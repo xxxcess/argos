@@ -170,7 +170,7 @@ class TTSService:
         if provider == "local":
             kokoro = self._get_kokoro()
             if kokoro and kokoro.available:
-                audio_data = kokoro.synthesize_raw(text, voice, speed)
+                audio_data = kokoro.synthesize_raw(text, voice)
             else:
                 logger.warning("Kokoro TTS not available")
                 return None
@@ -229,7 +229,7 @@ class TTSService:
 
 
 class _KokoroPipeline:
-    """Encapsulates the Kokoro-82M local pipeline on CUDA, Apple Silicon MPS, or CPU."""
+    """Encapsulates the Kokoro-82M local GPU pipeline."""
 
     def __init__(self):
         self.pipeline = None
@@ -242,68 +242,46 @@ class _KokoroPipeline:
             import torch
             from kokoro import KPipeline
 
-            if torch.cuda.is_available():
-                self.device = torch.device("cuda:0")
-            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-            else:
-                self.device = torch.device("cpu")
+            if not torch.cuda.is_available():
+                logger.warning("CUDA not available for Kokoro TTS")
+                return
 
-            self.pipeline = KPipeline(lang_code="a")
-
-            if hasattr(self.pipeline, "model"):
-                try:
+            self.device = torch.device("cuda:0")
+            with torch.cuda.device(0):
+                self.pipeline = KPipeline(lang_code="a")
+                if hasattr(self.pipeline, "model"):
                     self.pipeline.model = self.pipeline.model.to(self.device)
-                except Exception as e:
-                    if str(self.device) != "cpu":
-                        logger.warning(f"Kokoro could not move to {self.device}; falling back to CPU: {e}")
-                        self.device = torch.device("cpu")
-                        self.pipeline.model = self.pipeline.model.to(self.device)
-                    else:
-                        raise
-
             self.available = True
-            logger.info(f"Kokoro-82M TTS pipeline loaded on {self.device}")
-
+            logger.info("Kokoro-82M TTS pipeline loaded")
         except ImportError as e:
             logger.warning(f"Kokoro TTS not available: {e}")
             logger.warning("Install with: pip install kokoro soundfile")
         except Exception as e:
             logger.error(f"Kokoro init failed: {e}", exc_info=True)
 
-    def synthesize_raw(self, text: str, voice: str = "af_heart", speed: float = 1.0) -> Optional[bytes]:
+    def synthesize_raw(self, text: str, voice: str = "af_heart") -> Optional[bytes]:
         if not self.available:
             return None
         try:
+            import torch
             import numpy as np
 
-            chunks = []
-            generator = self.pipeline(
-                text,
-                voice=voice or "af_heart",
-                speed=speed,
-                split_pattern=r"\n+"
-            )
-
-            for _, _, audio in generator:
-                if hasattr(audio, "detach"):
-                    audio = audio.detach().cpu().numpy()
-                chunks.append(audio)
+            with torch.cuda.device(self.device):
+                chunks = []
+                for _, _, audio in self.pipeline(text, voice=voice):
+                    chunks.append(audio)
 
             if not chunks:
                 return None
 
             full = np.concatenate(chunks)
             buf = io.BytesIO()
-
             with wave.open(buf, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(24000)
                 wf.writeframes((full * 32767).astype(np.int16).tobytes())
-
             return buf.getvalue()
-
         except Exception as e:
             logger.error(f"Kokoro synthesis failed: {e}", exc_info=True)
             return None

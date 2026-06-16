@@ -72,13 +72,13 @@ fi
 #    (or non-mac) we just use whatever Python 3.11+ is on PATH.
 PY=""
 if [ "$(uname -m)" = "arm64" ]; then
-    cands="/opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11"
+    cands="/opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11"
 else
     cands="python3 python3.13 python3.12 python3.11"
 fi
 for cand in $cands; do
     p="$(command -v "$cand" 2>/dev/null)" || continue
-    if "$p" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' 2>/dev/null; then
+    if "$p" -c 'import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)' 2>/dev/null; then
         PY="$p"; break
     fi
 done
@@ -155,6 +155,7 @@ if "$VENV_PY" -m pip show chromadb-client >/dev/null 2>&1; then
     echo "▶ Cleaning up conflicting chromadb-client package…"
     "$VENV_PY" -m pip uninstall -y chromadb-client
     "$VENV_PY" -m pip install --force-reinstall chromadb
+    "$VENV_PY" -m pip install --force-reinstall "setuptools<82" "tokenizers==0.22.2"
 fi
 
 # 4. First-run setup: creates data dirs and prints an initial admin password

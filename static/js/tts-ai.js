@@ -10,7 +10,7 @@ class AITTSManager {
         this.browserVoice = '';
         this.playbackSpeed = 1;
         this._provider = 'disabled';
-        this.autoPlay = false;
+        this.autoPlay = localStorage.getItem('odysseus-tts-autoplay') === 'true';
         this.cache = new Map(); // Client-side audio cache
 
         // Queue for sequential auto-play

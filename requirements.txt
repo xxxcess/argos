@@ -47,3 +47,19 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Local Kokoro TTS
+numpy
+
+# Local Kokoro TTS
+kokoro>=0.9.4
+soundfile
+torch
+numpy
+transformers
+tokenizers==0.22.2
+setuptools<82
+
+# Kokoro / transformers compatibility
+tokenizers==0.22.2
+setuptools<82
