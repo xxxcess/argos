@@ -35,6 +35,24 @@ def test_voice_recorder_wires_conversation_loop_controls():
     assert '_submitCurrentTranscription' in source
 
 
+def test_voice_recorder_gates_loop_on_fresh_speech():
+    source = Path('static/js/voiceRecorder.js').read_text(encoding='utf-8')
+    assert '_startVoiceActivityDetection' in source
+    assert '_speechDetected' in source
+    assert '_browserSpeechDetected' in source
+    assert '_hasFreshTranscript' in source
+    assert 'replaceExisting: autoSubmit' in source
+    assert 'if (!_speechDetected && !_browserSpeechDetected)' in source
+    assert 'Do not auto-submit before the user speaks' in source
+
+
+def test_voice_recorder_prevents_duplicate_loop_submits():
+    source = Path('static/js/voiceRecorder.js').read_text(encoding='utf-8')
+    assert '_lastAutoSubmittedText' in source
+    assert 'DUPLICATE_SUBMIT_WINDOW_MS' in source
+    assert 'text !== expected' in source
+
+
 def test_local_stt_dependency_is_installed():
     source = Path('requirements.txt').read_text(encoding='utf-8')
     assert 'faster-whisper' in source
