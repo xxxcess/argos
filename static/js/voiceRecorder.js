@@ -15,6 +15,7 @@ let audioChunks = [];
 let isRecording = false;
 let recordingStartTime = null;
 let recordingInterval = null;
+let _recordingStopReason = 'manual';
 
 // Browser STT state
 let _recognition = null;
@@ -23,6 +24,139 @@ let _browserTranscript = '';
 // Cached STT provider — refreshed on settings change
 let _sttProvider = 'disabled';
 let _sttLanguage = '';
+
+// Conversation loop settings/state
+let _sttConversationLoop = false;
+let _sttLoopSubmitSeconds = 3;
+let _sttLoopIdleTimeoutSeconds = 5;
+let _loopActive = false;
+let _loopWaitingForAssistant = false;
+let _loopInstructionDeadline = 0;
+let _loopAutoStopTimer = null;
+let _loopRestartTimer = null;
+let _sendButtonObserver = null;
+let _lastSendButtonMode = '';
+
+function _clampNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function _applyLoopSettings(settings) {
+  settings = settings || {};
+  _sttConversationLoop = settings.stt_conversation_loop === true;
+  _sttLoopSubmitSeconds = _clampNumber(settings.stt_loop_submit_seconds, 3, 1, 60);
+  _sttLoopIdleTimeoutSeconds = _clampNumber(settings.stt_loop_idle_timeout_seconds, 5, 1, 300);
+}
+
+function _clearLoopTimers() {
+  if (_loopAutoStopTimer) {
+    clearTimeout(_loopAutoStopTimer);
+    _loopAutoStopTimer = null;
+  }
+  if (_loopRestartTimer) {
+    clearTimeout(_loopRestartTimer);
+    _loopRestartTimer = null;
+  }
+}
+
+function stopConversationLoop(reason) {
+  const wasActive = _loopActive || _loopWaitingForAssistant;
+  _loopActive = false;
+  _loopWaitingForAssistant = false;
+  _loopInstructionDeadline = 0;
+  _clearLoopTimers();
+  if (wasActive && reason !== 'silent') {
+    const msg = reason === 'idle-timeout'
+      ? 'Conversation loop ended — no instruction heard.'
+      : 'Conversation loop stopped.';
+    try { window.uiModule?.showToast?.(msg); } catch (_) {}
+  }
+}
+
+function _conversationLoopAvailable() {
+  return _sttConversationLoop && _sttProvider !== 'disabled';
+}
+
+function _loopRemainingMs() {
+  if (!_loopInstructionDeadline) return _sttLoopIdleTimeoutSeconds * 1000;
+  return Math.max(0, _loopInstructionDeadline - Date.now());
+}
+
+function _scheduleLoopAutoStop() {
+  if (!_loopActive || !isRecording) return;
+  if (_loopAutoStopTimer) clearTimeout(_loopAutoStopTimer);
+  const remaining = _loopRemainingMs();
+  if (remaining <= 0) {
+    stopConversationLoop('idle-timeout');
+    _stopRecordingInternal('loop-timeout');
+    return;
+  }
+  const delay = Math.max(250, Math.min(_sttLoopSubmitSeconds * 1000, remaining));
+  _loopAutoStopTimer = setTimeout(() => {
+    _loopAutoStopTimer = null;
+    if (_loopActive && isRecording) _stopRecordingInternal('loop-auto');
+  }, delay);
+}
+
+function _submitCurrentTranscription() {
+  const input = document.getElementById('message');
+  const text = (input?.value || '').trim();
+  if (!text) return false;
+  const sendBtn = document.querySelector('.send-btn');
+  if (!sendBtn) return false;
+  _loopWaitingForAssistant = true;
+  _lastSendButtonMode = sendBtn.dataset.mode || '';
+  setTimeout(() => sendBtn.click(), 0);
+  return true;
+}
+
+function _beginLoopListening() {
+  if (!_loopActive || isRecording || _loopWaitingForAssistant) return;
+  if (!_conversationLoopAvailable()) {
+    stopConversationLoop('silent');
+    return;
+  }
+  const sendBtn = document.querySelector('.send-btn');
+  if (sendBtn && (sendBtn.dataset.mode === 'streaming' || sendBtn.dataset.mode === 'recording')) return;
+  _loopInstructionDeadline = Date.now() + (_sttLoopIdleTimeoutSeconds * 1000);
+  startRecording(null, window.uiModule?.showToast, window.uiModule?.showError, { fromConversationLoop: true });
+}
+
+function _scheduleLoopRestartAfterAssistant() {
+  if (!_loopActive) return;
+  if (_loopRestartTimer) clearTimeout(_loopRestartTimer);
+  _loopRestartTimer = setTimeout(() => {
+    _loopRestartTimer = null;
+    _loopWaitingForAssistant = false;
+    _beginLoopListening();
+  }, 250);
+}
+
+function _watchSendButtonForLoop() {
+  if (_sendButtonObserver) return;
+  const attach = () => {
+    const sendBtn = document.querySelector('.send-btn');
+    if (!sendBtn) return false;
+    _lastSendButtonMode = sendBtn.dataset.mode || '';
+    _sendButtonObserver = new MutationObserver(() => {
+      const mode = sendBtn.dataset.mode || '';
+      const wasStreaming = _lastSendButtonMode === 'streaming';
+      _lastSendButtonMode = mode;
+      if (_loopWaitingForAssistant && wasStreaming && mode !== 'streaming') {
+        _scheduleLoopRestartAfterAssistant();
+      }
+    });
+    _sendButtonObserver.observe(sendBtn, { attributes: true, attributeFilter: ['data-mode'] });
+    return true;
+  };
+  if (attach()) return;
+  const bodyObserver = new MutationObserver(() => {
+    if (attach()) bodyObserver.disconnect();
+  });
+  if (document.body) bodyObserver.observe(document.body, { childList: true, subtree: true });
+}
 
 /**
  * Fetch current STT provider from server settings
@@ -40,6 +174,10 @@ async function refreshSttProvider() {
   } catch (e) {
     console.warn('Failed to fetch STT stats:', e);
   }
+  try {
+    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    if (settingsRes.ok) _applyLoopSettings(await settingsRes.json());
+  } catch (_) {}
 }
 
 /**
@@ -59,6 +197,10 @@ function _resetRecordingUI() {
   if (recordingInterval) {
     clearInterval(recordingInterval);
     recordingInterval = null;
+  }
+  if (_loopAutoStopTimer) {
+    clearTimeout(_loopAutoStopTimer);
+    _loopAutoStopTimer = null;
   }
   // Reset send button via global callback
   const sendBtn = document.querySelector('.send-btn');
@@ -132,10 +274,10 @@ async function transcribeOnServer(audioBlob) {
 /**
  * Insert transcribed text into the chat input
  */
-function insertTranscription(text, showToast) {
-  if (!text) return;
+function insertTranscription(text, showToast, opts = {}) {
+  if (!text) return false;
   const input = document.getElementById('message');
-  if (!input) return;
+  if (!input) return false;
 
   const existing = input.value.trim();
   input.value = existing ? existing + ' ' + text : text;
@@ -145,6 +287,8 @@ function insertTranscription(text, showToast) {
   input.focus();
 
   if (showToast) showToast('Transcribed');
+  if (opts.autoSubmit) return _submitCurrentTranscription();
+  return true;
 }
 
 function _escStt(value) {
@@ -204,6 +348,28 @@ function mountSttSettingsUi() {
           <label class="settings-label">Language</label>
           <input id="set-sttLangInput" type="text" placeholder="Auto-detect or ISO code, e.g. en" class="settings-select" style="flex:1;">
         </div>
+        <div class="settings-row">
+          <label class="settings-label">Conversation loop</label>
+          <div style="flex:1;display:flex;align-items:center;gap:8px;justify-content:space-between;">
+            <span class="admin-toggle-sub" style="margin:0;">Automatically submit recorded instructions, then listen again after each final response.</span>
+            <label class="admin-switch" title="Keep a hands-free voice conversation going until silence timeout or manual stop">
+              <input type="checkbox" id="set-sttConversationLoopToggle">
+              <span class="admin-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div id="set-sttLoopTimingRows" style="display:flex;flex-direction:column;gap:0.5rem;">
+          <div class="settings-row">
+            <label class="settings-label">Submit after</label>
+            <input id="set-sttLoopSubmitSeconds" type="number" min="1" max="60" step="0.5" class="settings-select" style="width:120px;flex:0 0 auto;margin-left:auto;" value="3">
+            <span class="admin-toggle-sub" style="margin:0 0 0 6px;">seconds</span>
+          </div>
+          <div class="settings-row">
+            <label class="settings-label">Stop listening after</label>
+            <input id="set-sttLoopIdleTimeoutSeconds" type="number" min="1" max="300" step="0.5" class="settings-select" style="width:120px;flex:0 0 auto;margin-left:auto;" value="5">
+            <span class="admin-toggle-sub" style="margin:0 0 0 6px;">seconds idle</span>
+          </div>
+        </div>
         <div id="set-sttSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
       </div>`;
   }
@@ -229,6 +395,10 @@ async function bindSttSettingsUi(card) {
   const sttMsg = document.getElementById('set-sttSettingsMsg');
   const sttEnabledToggle = document.getElementById('set-sttEnabledToggle');
   const sttConfigWrap = document.getElementById('set-sttConfigWrap');
+  const loopToggle = document.getElementById('set-sttConversationLoopToggle');
+  const loopTimingRows = document.getElementById('set-sttLoopTimingRows');
+  const loopSubmitInput = document.getElementById('set-sttLoopSubmitSeconds');
+  const loopIdleInput = document.getElementById('set-sttLoopIdleTimeoutSeconds');
   if (!provSel || provSel.dataset.boundVoiceRecorderStt === '1') return;
   provSel.dataset.boundVoiceRecorderStt = '1';
 
@@ -240,6 +410,16 @@ async function bindSttSettingsUi(card) {
     if (!sttMsg) return;
     sttMsg.textContent = text || '';
     sttMsg.style.color = isError ? 'var(--red, #e55)' : 'var(--fg)';
+  }
+
+  function readLoopSeconds(input, fallback, min, max) {
+    return _clampNumber(input ? input.value : fallback, fallback, min, max);
+  }
+
+  function syncLoopTimingDisabled() {
+    const off = !loopToggle || !loopToggle.checked;
+    if (loopTimingRows) loopTimingRows.style.opacity = off ? '0.5' : '';
+    if (loopTimingRows) loopTimingRows.style.pointerEvents = off ? 'none' : '';
   }
 
   function updateVisibility() {
@@ -259,6 +439,7 @@ async function bindSttSettingsUi(card) {
     const off = sttEnabledToggle && !sttEnabledToggle.checked;
     if (card) card.style.opacity = off ? '0.45' : '';
     if (sttConfigWrap) sttConfigWrap.style.pointerEvents = off ? 'none' : '';
+    syncLoopTimingDisabled();
 
     if (!off && prov === 'browser' && !_browserSttSupported()) {
       setMsg('Browser speech recognition is not available here; recordings will fall back to audio attachments.', true);
@@ -303,6 +484,10 @@ async function bindSttSettingsUi(card) {
       }
       if (settings.stt_language) langInput.value = settings.stt_language;
       if (sttEnabledToggle) sttEnabledToggle.checked = settings.stt_enabled !== false;
+      if (loopToggle) loopToggle.checked = settings.stt_conversation_loop === true;
+      if (loopSubmitInput) loopSubmitInput.value = _clampNumber(settings.stt_loop_submit_seconds, 3, 1, 60);
+      if (loopIdleInput) loopIdleInput.value = _clampNumber(settings.stt_loop_idle_timeout_seconds, 5, 1, 300);
+      _applyLoopSettings(settings);
       _sttProvider = effectiveProvider();
       _sttLanguage = langInput.value.trim();
     } catch (e) {
@@ -321,7 +506,8 @@ async function bindSttSettingsUi(card) {
       if (stats.provider === 'browser' && !_browserSttSupported()) {
         setMsg('Active: Browser (unsupported here; audio attachment fallback)', true);
       } else {
-        setMsg('Active: ' + label + (stats.model ? ' · ' + stats.model : ''), stats.provider === 'disabled');
+        const loopText = _sttConversationLoop && stats.provider !== 'disabled' ? ' · loop on' : '';
+        setMsg('Active: ' + label + (stats.model ? ' · ' + stats.model : '') + loopText, stats.provider === 'disabled');
       }
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
     } catch (_) {}
@@ -330,11 +516,18 @@ async function bindSttSettingsUi(card) {
   async function saveSTT() {
     try {
       const enabled = sttEnabledToggle ? sttEnabledToggle.checked : true;
+      const submitSeconds = readLoopSeconds(loopSubmitInput, 3, 1, 60);
+      const idleSeconds = readLoopSeconds(loopIdleInput, 5, 1, 300);
+      if (loopSubmitInput) loopSubmitInput.value = submitSeconds;
+      if (loopIdleInput) loopIdleInput.value = idleSeconds;
       const payload = {
         stt_enabled: enabled,
         stt_provider: provSel.value,
         stt_model: getModel() || 'base',
-        stt_language: langInput.value.trim()
+        stt_language: langInput.value.trim(),
+        stt_conversation_loop: loopToggle ? loopToggle.checked : false,
+        stt_loop_submit_seconds: submitSeconds,
+        stt_loop_idle_timeout_seconds: idleSeconds
       };
       const res = await fetch('/api/auth/settings', {
         method: 'POST',
@@ -343,6 +536,8 @@ async function bindSttSettingsUi(card) {
         body: JSON.stringify(payload)
       });
       if (!res.ok) throw new Error('Settings save failed');
+      _applyLoopSettings(payload);
+      if (!_sttConversationLoop) stopConversationLoop('silent');
       _sttProvider = enabled ? provSel.value : 'disabled';
       _sttLanguage = payload.stt_language;
       if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = _sttProvider;
@@ -363,6 +558,9 @@ async function bindSttSettingsUi(card) {
   modelSelect.addEventListener('change', saveSTT);
   modelInput.addEventListener('change', saveSTT);
   langInput.addEventListener('change', saveSTT);
+  if (loopToggle) loopToggle.addEventListener('change', function() { syncLoopTimingDisabled(); saveSTT(); });
+  if (loopSubmitInput) loopSubmitInput.addEventListener('change', saveSTT);
+  if (loopIdleInput) loopIdleInput.addEventListener('change', saveSTT);
   if (sttEnabledToggle) sttEnabledToggle.addEventListener('change', function() { updateVisibility(); saveSTT(); });
 }
 
@@ -382,21 +580,32 @@ function initSttSettingsUi() {
 /**
  * Start voice recording
  */
-export function startRecording(onFileCreated, showToast, showError) {
+export function startRecording(onFileCreated, showToast, showError, opts = {}) {
+  const fromConversationLoop = opts && opts.fromConversationLoop === true;
+  if (!fromConversationLoop && _conversationLoopAvailable()) {
+    _loopActive = true;
+    _loopWaitingForAssistant = false;
+    _loopInstructionDeadline = Date.now() + (_sttLoopIdleTimeoutSeconds * 1000);
+    if (showToast) showToast('Conversation loop started');
+  }
+
   // Check for secure context (getUserMedia requires HTTPS or localhost)
   if (!window.isSecureContext) {
     if (showError) showError('Microphone requires HTTPS. Use a reverse proxy with SSL or access via localhost.');
+    stopConversationLoop('silent');
     _resetRecordingUI();
     return;
   }
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     if (showError) showError('Microphone not supported in this browser.');
+    stopConversationLoop('silent');
     _resetRecordingUI();
     return;
   }
 
   audioChunks = [];
+  _recordingStopReason = 'manual';
 
   navigator.mediaDevices.getUserMedia({ audio: true })
     .then(stream => {
@@ -413,15 +622,20 @@ export function startRecording(onFileCreated, showToast, showError) {
 
         const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
         const provider = _sttProvider;
+        const stopReason = _recordingStopReason;
+        const autoSubmit = _loopActive && stopReason === 'loop-auto';
+        let inserted = false;
 
         if (provider === 'browser') {
           const transcript = stopBrowserSTT();
           if (transcript) {
-            insertTranscription(transcript, showToast);
+            inserted = insertTranscription(transcript, showToast, { autoSubmit });
           } else {
             if (showToast) showToast('No speech detected');
-            const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-            if (onFileCreated) onFileCreated(audioFile);
+            if (!autoSubmit) {
+              const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
+              if (onFileCreated) onFileCreated(audioFile);
+            }
           }
         } else if (provider === 'local' || provider.startsWith('endpoint:')) {
           // Show "Transcribing..." feedback
@@ -429,21 +643,31 @@ export function startRecording(onFileCreated, showToast, showError) {
           try {
             const transcript = await transcribeOnServer(audioBlob);
             if (transcript) {
-              insertTranscription(transcript, showToast);
+              inserted = insertTranscription(transcript, showToast, { autoSubmit });
             } else {
               if (showToast) showToast('No speech detected');
             }
           } catch (e) {
             console.error('STT transcription error:', e);
             if (showError) showError('Transcription failed: ' + e.message);
-            // Fallback: attach as file
-            const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-            if (onFileCreated) onFileCreated(audioFile);
+            if (!autoSubmit) {
+              // Fallback: attach as file
+              const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
+              if (onFileCreated) onFileCreated(audioFile);
+            }
           }
         } else {
           // STT disabled — attach audio file
           const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
           if (onFileCreated) onFileCreated(audioFile);
+        }
+
+        if (autoSubmit && _loopActive && !inserted) {
+          if (_loopRemainingMs() > 250) {
+            _loopRestartTimer = setTimeout(() => _beginLoopListening(), 100);
+          } else {
+            stopConversationLoop('idle-timeout');
+          }
         }
 
         _resetRecordingUI();
@@ -458,8 +682,11 @@ export function startRecording(onFileCreated, showToast, showError) {
         startBrowserSTT();
       }
 
+      if (_loopActive) _scheduleLoopAutoStop();
+
       if (showToast) {
-        showToast('Recording...');
+        const loopHint = _loopActive ? ` · auto-submit in ${_sttLoopSubmitSeconds}s` : '';
+        showToast('Recording...' + loopHint);
       }
     })
     .catch(error => {
@@ -473,20 +700,27 @@ export function startRecording(onFileCreated, showToast, showError) {
           showError('Microphone error: ' + error.message);
         }
       }
+      stopConversationLoop('silent');
       _resetRecordingUI();
     });
 }
 
-/**
- * Stop voice recording
- */
-export function stopRecording() {
+function _stopRecordingInternal(reason) {
+  _recordingStopReason = reason || 'manual';
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
     // isRecording will be set to false in _resetRecordingUI called from onstop
   } else {
     _resetRecordingUI();
   }
+}
+
+/**
+ * Stop voice recording
+ */
+export function stopRecording() {
+  if (_loopActive) stopConversationLoop('manual');
+  _stopRecordingInternal('manual');
 }
 
 /**
@@ -503,19 +737,23 @@ export function init() {
   isRecording = false;
   refreshSttProvider();
   initSttSettingsUi();
+  _watchSendButtonForLoop();
 }
 
 const voiceRecorderModule = {
   startRecording,
   stopRecording,
+  stopConversationLoop,
   getIsRecording,
   init,
   refreshSttProvider,
   get _sttProvider() { return _sttProvider; },
   set _sttProvider(v) { _sttProvider = v; },
+  get _sttConversationLoop() { return _sttConversationLoop; },
 };
 
 window.voiceRecorderModule = voiceRecorderModule;
 initSttSettingsUi();
+_watchSendButtonForLoop();
 
 export default voiceRecorderModule;
