@@ -25,3 +25,7 @@ Conversation loop is an opt-in hands-free mode. When enabled, clicking the micro
 8. End the loop if no instruction is heard before `stt_loop_idle_timeout_seconds`, default `5`, or if the user manually stops recording.
 
 The loop uses client-side voice activity detection to avoid transcribing silence. It also guards against duplicate rapid re-submission of the same transcript, which prevents an old cached prompt from being resent if the browser STT API returns stale or empty results.
+
+## Safety behavior
+
+The recorder treats the loop turn as invalid until it sees voice activity or a fresh browser recognition result. Auto-submit validates that the input exactly matches the transcript from the current recording before it clicks send. This prevents a previously typed prompt, an earlier transcript, or a stale browser STT result from being sent in the next loop turn.
