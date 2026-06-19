@@ -22,6 +22,7 @@ let _browserTranscript = '';
 
 // Cached STT provider — refreshed on settings change
 let _sttProvider = 'disabled';
+let _sttLanguage = '';
 
 /**
  * Fetch current STT provider from server settings
@@ -32,6 +33,7 @@ async function refreshSttProvider() {
     if (res.ok) {
       const stats = await res.json();
       _sttProvider = stats.provider || 'disabled';
+      _sttLanguage = stats.language || '';
       // Notify the send button to update its icon
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
     }
@@ -80,7 +82,7 @@ function startBrowserSTT() {
   _recognition = new SpeechRecognition();
   _recognition.continuous = true;
   _recognition.interimResults = false;
-  _recognition.lang = '';
+  _recognition.lang = _sttLanguage || '';
 
   _recognition.onresult = (event) => {
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -143,6 +145,238 @@ function insertTranscription(text, showToast) {
   input.focus();
 
   if (showToast) showToast('Transcribed');
+}
+
+function _escStt(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function _browserSttSupported() {
+  return typeof window !== 'undefined' && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function mountSttSettingsUi() {
+  const defaultMsg = document.getElementById('set-defaultChatMsg');
+  if (!defaultMsg) return false;
+
+  const defaultCard = defaultMsg.closest('.admin-card');
+  if (!defaultCard || !defaultCard.parentNode) return false;
+
+  let card = document.getElementById('set-sttSettingsCard');
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'admin-card';
+    card.id = 'set-sttSettingsCard';
+    card.innerHTML = `
+      <h2 style="display:flex;align-items:center;gap:6px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6;flex-shrink:0"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        Speech to Text
+        <span style="flex:1"></span>
+        <label class="admin-switch" title="Transcribe microphone recordings into the chat input"><input type="checkbox" id="set-sttEnabledToggle" checked><span class="admin-slider"></span></label>
+      </h2>
+      <div class="admin-toggle-sub" style="margin-bottom:8px">Configure microphone transcription. Browser mode is enabled by default and falls back to attaching audio if speech recognition is unavailable.</div>
+      <div id="set-sttConfigWrap" style="display:flex;flex-direction:column;gap:0.5rem;">
+        <div style="display:flex;align-items:center;gap:0.75rem;">
+          <label class="settings-label">Provider</label>
+          <select id="set-sttProviderSelect" class="settings-select">
+            <option value="browser">Browser (built-in)</option>
+            <option value="local">Local (Whisper)</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </div>
+        <div id="set-sttModelRow" style="display:flex;align-items:center;gap:0.75rem;">
+          <label class="settings-label">Model</label>
+          <select id="set-sttModelSelect" class="settings-select">
+            <option value="tiny">tiny (fastest)</option>
+            <option value="base" selected>base (default)</option>
+            <option value="small">small</option>
+            <option value="medium">medium</option>
+            <option value="large-v3">large-v3</option>
+          </select>
+          <input id="set-sttModelInput" type="text" placeholder="whisper-1" style="flex:1;padding:5px;display:none;">
+        </div>
+        <div id="set-sttLangRow" style="display:flex;align-items:center;gap:0.75rem;">
+          <label class="settings-label">Language</label>
+          <input id="set-sttLangInput" type="text" placeholder="Auto-detect or ISO code, e.g. en" class="settings-select" style="flex:1;">
+        </div>
+        <div id="set-sttSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+      </div>`;
+  }
+
+  const ttsToggle = document.getElementById('set-ttsEnabledToggle');
+  const ttsCard = ttsToggle ? ttsToggle.closest('.admin-card') : null;
+  const anchor = ttsCard || defaultCard;
+  if (anchor && anchor.parentNode && anchor.nextSibling !== card) {
+    anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  }
+
+  bindSttSettingsUi(card).catch(function(e) { console.warn('Failed to bind STT settings UI', e); });
+  return true;
+}
+
+async function bindSttSettingsUi(card) {
+  const provSel = document.getElementById('set-sttProviderSelect');
+  const modelSelect = document.getElementById('set-sttModelSelect');
+  const modelInput = document.getElementById('set-sttModelInput');
+  const modelRow = document.getElementById('set-sttModelRow');
+  const langRow = document.getElementById('set-sttLangRow');
+  const langInput = document.getElementById('set-sttLangInput');
+  const sttMsg = document.getElementById('set-sttSettingsMsg');
+  const sttEnabledToggle = document.getElementById('set-sttEnabledToggle');
+  const sttConfigWrap = document.getElementById('set-sttConfigWrap');
+  if (!provSel || provSel.dataset.boundVoiceRecorderStt === '1') return;
+  provSel.dataset.boundVoiceRecorderStt = '1';
+
+  function isEndpoint() { return provSel.value.startsWith('endpoint:'); }
+  function getModel() { return isEndpoint() ? modelInput.value.trim() : modelSelect.value; }
+  function effectiveProvider() { return sttEnabledToggle && !sttEnabledToggle.checked ? 'disabled' : provSel.value; }
+
+  function setMsg(text, isError) {
+    if (!sttMsg) return;
+    sttMsg.textContent = text || '';
+    sttMsg.style.color = isError ? 'var(--red, #e55)' : 'var(--fg)';
+  }
+
+  function updateVisibility() {
+    const prov = provSel.value;
+    const showModel = prov === 'local' || prov.startsWith('endpoint:');
+    const showLang = prov !== 'disabled';
+    if (modelRow) modelRow.style.display = showModel ? 'flex' : 'none';
+    if (langRow) langRow.style.display = showLang ? 'flex' : 'none';
+    if (isEndpoint()) {
+      modelSelect.style.display = 'none';
+      modelInput.style.display = '';
+    } else {
+      modelSelect.style.display = '';
+      modelInput.style.display = 'none';
+    }
+
+    const off = sttEnabledToggle && !sttEnabledToggle.checked;
+    if (card) card.style.opacity = off ? '0.45' : '';
+    if (sttConfigWrap) sttConfigWrap.style.pointerEvents = off ? 'none' : '';
+
+    if (!off && prov === 'browser' && !_browserSttSupported()) {
+      setMsg('Browser speech recognition is not available here; recordings will fall back to audio attachments.', true);
+    }
+  }
+
+  async function loadEndpoints() {
+    try {
+      const epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+      const endpoints = await epRes.json();
+      if (!Array.isArray(endpoints)) return;
+      endpoints.forEach(function(ep) {
+        if (!ep.is_enabled) return;
+        const value = 'endpoint:' + ep.id;
+        if (Array.from(provSel.options).some(function(o) { return o.value === value; })) return;
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = (ep.name || ep.id) + ' (API)';
+        provSel.appendChild(opt);
+      });
+    } catch (e) {
+      console.warn('Failed to load endpoints for STT', e);
+    }
+  }
+
+  async function loadSettings() {
+    try {
+      const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+      const settings = await settingsRes.json();
+      const provider = settings.stt_provider || 'browser';
+      if (Array.from(provSel.options).some(function(o) { return o.value === provider; })) provSel.value = provider;
+      else if (provider.startsWith('endpoint:')) {
+        const opt = document.createElement('option');
+        opt.value = provider;
+        opt.textContent = provider.replace('endpoint:', 'Endpoint ') + ' (API)';
+        provSel.appendChild(opt);
+        provSel.value = provider;
+      }
+      if (settings.stt_model) {
+        modelSelect.value = settings.stt_model;
+        modelInput.value = settings.stt_model;
+      }
+      if (settings.stt_language) langInput.value = settings.stt_language;
+      if (sttEnabledToggle) sttEnabledToggle.checked = settings.stt_enabled !== false;
+      _sttProvider = effectiveProvider();
+      _sttLanguage = langInput.value.trim();
+    } catch (e) {
+      console.warn('Failed to load STT settings', e);
+    }
+  }
+
+  async function refreshStatus() {
+    try {
+      const statsRes = await fetch('/api/stt/stats', { credentials: 'same-origin' });
+      if (!statsRes.ok) return;
+      const stats = await statsRes.json();
+      _sttProvider = stats.provider || 'disabled';
+      _sttLanguage = stats.language || '';
+      const label = stats.provider === 'browser' ? 'Browser' : stats.provider === 'local' ? 'Local Whisper' : stats.provider === 'disabled' ? 'Disabled' : stats.provider;
+      if (stats.provider === 'browser' && !_browserSttSupported()) {
+        setMsg('Active: Browser (unsupported here; audio attachment fallback)', true);
+      } else {
+        setMsg('Active: ' + label + (stats.model ? ' · ' + stats.model : ''), stats.provider === 'disabled');
+      }
+      if (window._updateSendBtnIcon) window._updateSendBtnIcon();
+    } catch (_) {}
+  }
+
+  async function saveSTT() {
+    try {
+      const enabled = sttEnabledToggle ? sttEnabledToggle.checked : true;
+      const payload = {
+        stt_enabled: enabled,
+        stt_provider: provSel.value,
+        stt_model: getModel() || 'base',
+        stt_language: langInput.value.trim()
+      };
+      const res = await fetch('/api/auth/settings', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('Settings save failed');
+      _sttProvider = enabled ? provSel.value : 'disabled';
+      _sttLanguage = payload.stt_language;
+      if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = _sttProvider;
+      if (window._updateSendBtnIcon) window._updateSendBtnIcon();
+      setMsg('Saved', false);
+      setTimeout(refreshStatus, 500);
+    } catch (e) {
+      setMsg('Failed to save STT settings', true);
+    }
+  }
+
+  await loadEndpoints();
+  await loadSettings();
+  updateVisibility();
+  refreshStatus();
+
+  provSel.addEventListener('change', function() { updateVisibility(); saveSTT(); });
+  modelSelect.addEventListener('change', saveSTT);
+  modelInput.addEventListener('change', saveSTT);
+  langInput.addEventListener('change', saveSTT);
+  if (sttEnabledToggle) sttEnabledToggle.addEventListener('change', function() { updateVisibility(); saveSTT(); });
+}
+
+function initSttSettingsUi() {
+  if (typeof document === 'undefined') return;
+  if (mountSttSettingsUi()) return;
+  const observer = new MutationObserver(function() {
+    if (mountSttSettingsUi()) observer.disconnect();
+  });
+  const start = function() {
+    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
 }
 
 /**
@@ -268,6 +502,7 @@ export function getIsRecording() {
 export function init() {
   isRecording = false;
   refreshSttProvider();
+  initSttSettingsUi();
 }
 
 const voiceRecorderModule = {
@@ -279,5 +514,8 @@ const voiceRecorderModule = {
   get _sttProvider() { return _sttProvider; },
   set _sttProvider(v) { _sttProvider = v; },
 };
+
+window.voiceRecorderModule = voiceRecorderModule;
+initSttSettingsUi();
 
 export default voiceRecorderModule;
