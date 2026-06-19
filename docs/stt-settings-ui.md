@@ -15,11 +15,13 @@ The UI persists `stt_enabled`, `stt_provider`, `stt_model`, `stt_language`, `stt
 
 Conversation loop is an opt-in hands-free mode. When enabled, clicking the microphone starts a looped voice conversation:
 
-1. Record the user's instruction.
-2. Auto-stop and transcribe after `stt_loop_submit_seconds` seconds, default `3`.
-3. Auto-submit the transcribed text to the active chat.
-4. Wait for the model to finish its final response.
-5. Start recording again for the next instruction.
-6. End the loop if no instruction is heard before `stt_loop_idle_timeout_seconds`, default `5`, or if the user manually stops recording.
+1. Start listening and clear the chat input for the loop turn so old prompts cannot be reused.
+2. Wait for fresh voice activity before any auto-stop or auto-submit can occur.
+3. After speech is detected, stop recording only after `stt_loop_submit_seconds` seconds of silence, default `3`.
+4. Transcribe and auto-submit only if the current recording produced fresh transcript text.
+5. Replace the chat input with the fresh transcript before clicking send.
+6. Wait for the model to finish its final response.
+7. Start recording again for the next instruction.
+8. End the loop if no instruction is heard before `stt_loop_idle_timeout_seconds`, default `5`, or if the user manually stops recording.
 
-If no transcript is detected before the idle timeout, the loop exits without sending an empty message.
+The loop uses client-side voice activity detection to avoid transcribing silence. It also guards against duplicate rapid re-submission of the same transcript, which prevents an old cached prompt from being resent if the browser STT API returns stale or empty results.
