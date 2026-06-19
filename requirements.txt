@@ -48,6 +48,10 @@ pytest-asyncio
 # using `httpx` above; this is test-client only.
 httpx2
 
+# Browser/default STT has no server dependency. Local Whisper STT uses
+# faster-whisper when the provider is set to local.
+faster-whisper
+
 # Local Kokoro TTS
 numpy
 
