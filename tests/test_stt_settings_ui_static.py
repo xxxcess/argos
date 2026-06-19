@@ -46,6 +46,14 @@ def test_voice_recorder_gates_loop_on_fresh_speech():
     assert 'Do not auto-submit before the user speaks' in source
 
 
+def test_voice_recorder_prevents_stale_prompt_loop_submits():
+    source = Path('static/js/voiceRecorder.js').read_text(encoding='utf-8')
+    assert '_clearMessageInputForLoop' in source
+    assert 'text !== expected' in source
+    assert '_activeRecordingId' in source
+    assert 'recordingId !== _activeRecordingId' in source
+
+
 def test_voice_recorder_prevents_duplicate_loop_submits():
     source = Path('static/js/voiceRecorder.js').read_text(encoding='utf-8')
     assert '_lastAutoSubmittedText' in source
