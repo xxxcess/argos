@@ -56,6 +56,9 @@ DEFAULT_SETTINGS = {
     "stt_provider": "browser",
     "stt_model": "base",
     "stt_language": "",
+    "stt_conversation_loop": False,
+    "stt_loop_submit_seconds": 3,
+    "stt_loop_idle_timeout_seconds": 5,
     "search_provider": "searxng",
     # Default fallback chain — when the primary provider fails or
     # rate-limits, we try DuckDuckGo next. Free, no API key required, so
