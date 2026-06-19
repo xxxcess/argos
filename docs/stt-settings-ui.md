@@ -28,4 +28,4 @@ The loop uses client-side voice activity detection to avoid transcribing silence
 
 ## Safety behavior
 
-The recorder treats the loop turn as invalid until it sees voice activity or a fresh browser recognition result. Auto-submit validates that the input exactly matches the transcript from the current recording before it clicks send. This prevents a previously typed prompt, an earlier transcript, or a stale browser STT result from being sent in the next loop turn.
+The recorder treats each loop turn as invalid until it sees voice activity or a fresh browser recognition result. Auto-submit validates that the input exactly matches the transcript from the current recording before it clicks send. This prevents a previously typed prompt, an earlier transcript, or a stale browser STT result from being sent in the next loop turn.
