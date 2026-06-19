@@ -16,10 +16,30 @@ let isRecording = false;
 let recordingStartTime = null;
 let recordingInterval = null;
 let _recordingStopReason = 'manual';
+let _activeRecordingId = 0;
 
 // Browser STT state
 let _recognition = null;
 let _browserTranscript = '';
+let _browserSpeechDetected = false;
+
+// Client-side voice activity detection. This gates looped auto-submit so silence
+// cannot hallucinate or reuse an old prompt.
+let _audioContext = null;
+let _audioAnalyser = null;
+let _audioSource = null;
+let _voiceActivityTimer = null;
+let _speechDetected = false;
+let _speechStartedAt = 0;
+let _lastVoiceActivityAt = 0;
+let _recordingStartedAt = 0;
+let _vadAvailable = false;
+
+const VAD_RMS_THRESHOLD = 0.018;
+const VAD_MIN_SPEECH_MS = 250;
+const MIN_RECORDING_MS = 400;
+const MIN_TRANSCRIPT_CHARS = 2;
+const DUPLICATE_SUBMIT_WINDOW_MS = 15000;
 
 // Cached STT provider — refreshed on settings change
 let _sttProvider = 'disabled';
@@ -36,6 +56,8 @@ let _loopAutoStopTimer = null;
 let _loopRestartTimer = null;
 let _sendButtonObserver = null;
 let _lastSendButtonMode = '';
+let _lastAutoSubmittedText = '';
+let _lastAutoSubmittedAt = 0;
 
 function _clampNumber(value, fallback, min, max) {
   const n = Number(value);
@@ -84,32 +106,138 @@ function _loopRemainingMs() {
   return Math.max(0, _loopInstructionDeadline - Date.now());
 }
 
+function _normalizeTranscript(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function _hasFreshTranscript(text) {
+  return _normalizeTranscript(text).length >= MIN_TRANSCRIPT_CHARS;
+}
+
+function _resetSpeechState() {
+  _browserTranscript = '';
+  _browserSpeechDetected = false;
+  _speechDetected = false;
+  _speechStartedAt = 0;
+  _lastVoiceActivityAt = 0;
+  _recordingStartedAt = Date.now();
+  _vadAvailable = false;
+}
+
+function _markVoiceActivity() {
+  const now = Date.now();
+  if (!_speechStartedAt) _speechStartedAt = now;
+  _lastVoiceActivityAt = now;
+  if (now - _speechStartedAt >= VAD_MIN_SPEECH_MS) {
+    _speechDetected = true;
+  }
+  if (_loopActive) {
+    _loopInstructionDeadline = now + (_sttLoopIdleTimeoutSeconds * 1000);
+  }
+}
+
+function _stopVoiceActivityDetection() {
+  if (_voiceActivityTimer) {
+    clearInterval(_voiceActivityTimer);
+    _voiceActivityTimer = null;
+  }
+  try { _audioSource?.disconnect?.(); } catch (_) {}
+  try { _audioAnalyser?.disconnect?.(); } catch (_) {}
+  try { _audioContext?.close?.(); } catch (_) {}
+  _audioSource = null;
+  _audioAnalyser = null;
+  _audioContext = null;
+}
+
+function _startVoiceActivityDetection(stream) {
+  _stopVoiceActivityDetection();
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    _audioContext = new AudioCtx();
+    _audioAnalyser = _audioContext.createAnalyser();
+    _audioAnalyser.fftSize = 512;
+    _audioSource = _audioContext.createMediaStreamSource(stream);
+    _audioSource.connect(_audioAnalyser);
+    const samples = new Uint8Array(_audioAnalyser.fftSize);
+    _vadAvailable = true;
+    _voiceActivityTimer = setInterval(() => {
+      if (!_audioAnalyser || !isRecording) return;
+      _audioAnalyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const centered = (samples[i] - 128) / 128;
+        sum += centered * centered;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      if (rms >= VAD_RMS_THRESHOLD) _markVoiceActivity();
+    }, 100);
+  } catch (e) {
+    _vadAvailable = false;
+    console.warn('Voice activity detection unavailable:', e);
+  }
+}
+
 function _scheduleLoopAutoStop() {
   if (!_loopActive || !isRecording) return;
   if (_loopAutoStopTimer) clearTimeout(_loopAutoStopTimer);
+
   const remaining = _loopRemainingMs();
   if (remaining <= 0) {
     stopConversationLoop('idle-timeout');
     _stopRecordingInternal('loop-timeout');
     return;
   }
-  const delay = Math.max(250, Math.min(_sttLoopSubmitSeconds * 1000, remaining));
-  _loopAutoStopTimer = setTimeout(() => {
+
+  // Do not auto-submit before the user speaks. While no speech is detected,
+  // keep listening until the idle deadline ends the loop.
+  if (!_speechDetected && !_browserSpeechDetected) {
+    _loopAutoStopTimer = setTimeout(_scheduleLoopAutoStop, Math.min(250, remaining));
+    return;
+  }
+
+  const lastSpeechAt = Math.max(_lastVoiceActivityAt || 0, _recordingStartedAt || 0);
+  const silenceForMs = Date.now() - lastSpeechAt;
+  const silenceNeededMs = _sttLoopSubmitSeconds * 1000;
+  if (silenceForMs >= silenceNeededMs && Date.now() - _recordingStartedAt >= MIN_RECORDING_MS) {
     _loopAutoStopTimer = null;
-    if (_loopActive && isRecording) _stopRecordingInternal('loop-auto');
-  }, delay);
+    _stopRecordingInternal('loop-auto');
+    return;
+  }
+
+  const nextCheck = Math.max(100, Math.min(250, silenceNeededMs - silenceForMs, remaining));
+  _loopAutoStopTimer = setTimeout(_scheduleLoopAutoStop, nextCheck);
 }
 
-function _submitCurrentTranscription() {
+function _submitCurrentTranscription(expectedText) {
   const input = document.getElementById('message');
-  const text = (input?.value || '').trim();
-  if (!text) return false;
+  const text = _normalizeTranscript(input?.value || '');
+  const expected = _normalizeTranscript(expectedText || text);
+  if (!text || !expected || text !== expected) return false;
+
+  const now = Date.now();
+  if (text === _lastAutoSubmittedText && now - _lastAutoSubmittedAt < DUPLICATE_SUBMIT_WINDOW_MS) {
+    return false;
+  }
+
   const sendBtn = document.querySelector('.send-btn');
-  if (!sendBtn) return false;
+  if (!sendBtn || sendBtn.dataset.mode === 'streaming' || sendBtn.dataset.mode === 'recording') return false;
+
+  _lastAutoSubmittedText = text;
+  _lastAutoSubmittedAt = now;
   _loopWaitingForAssistant = true;
   _lastSendButtonMode = sendBtn.dataset.mode || '';
   setTimeout(() => sendBtn.click(), 0);
   return true;
+}
+
+function _clearMessageInputForLoop() {
+  const input = document.getElementById('message');
+  if (!input) return;
+  if (input.value) {
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 }
 
 function _beginLoopListening() {
@@ -120,6 +248,7 @@ function _beginLoopListening() {
   }
   const sendBtn = document.querySelector('.send-btn');
   if (sendBtn && (sendBtn.dataset.mode === 'streaming' || sendBtn.dataset.mode === 'recording')) return;
+  _clearMessageInputForLoop();
   _loopInstructionDeadline = Date.now() + (_sttLoopIdleTimeoutSeconds * 1000);
   startRecording(null, window.uiModule?.showToast, window.uiModule?.showError, { fromConversationLoop: true });
 }
@@ -168,7 +297,6 @@ async function refreshSttProvider() {
       const stats = await res.json();
       _sttProvider = stats.provider || 'disabled';
       _sttLanguage = stats.language || '';
-      // Notify the send button to update its icon
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
     }
   } catch (e) {
@@ -194,6 +322,7 @@ function formatTime(seconds) {
  */
 function _resetRecordingUI() {
   isRecording = false;
+  _stopVoiceActivityDetection();
   if (recordingInterval) {
     clearInterval(recordingInterval);
     recordingInterval = null;
@@ -202,7 +331,6 @@ function _resetRecordingUI() {
     clearTimeout(_loopAutoStopTimer);
     _loopAutoStopTimer = null;
   }
-  // Reset send button via global callback
   const sendBtn = document.querySelector('.send-btn');
   if (sendBtn) {
     sendBtn.classList.remove('recording');
@@ -216,20 +344,28 @@ function _resetRecordingUI() {
 /**
  * Start browser speech recognition alongside recording
  */
-function startBrowserSTT() {
+function startBrowserSTT(recordingId) {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) return;
 
   _browserTranscript = '';
+  _browserSpeechDetected = false;
   _recognition = new SpeechRecognition();
   _recognition.continuous = true;
   _recognition.interimResults = false;
   _recognition.lang = _sttLanguage || '';
 
   _recognition.onresult = (event) => {
+    if (recordingId !== _activeRecordingId) return;
     for (let i = event.resultIndex; i < event.results.length; i++) {
       if (event.results[i].isFinal) {
-        _browserTranscript += event.results[i][0].transcript + ' ';
+        const part = _normalizeTranscript(event.results[i][0].transcript || '');
+        if (part) {
+          _browserTranscript = _normalizeTranscript(_browserTranscript + ' ' + part);
+          _browserSpeechDetected = true;
+          _markVoiceActivity();
+          if (_loopActive) _scheduleLoopAutoStop();
+        }
       }
     }
   };
@@ -238,15 +374,17 @@ function startBrowserSTT() {
     console.warn('Browser STT error:', e.error);
   };
 
-  _recognition.start();
+  try { _recognition.start(); } catch (e) { console.warn('Browser STT start failed:', e); }
 }
 
 function stopBrowserSTT() {
+  const transcript = _normalizeTranscript(_browserTranscript);
   if (_recognition) {
     try { _recognition.stop(); } catch (e) { /* ignore */ }
     _recognition = null;
   }
-  return _browserTranscript.trim();
+  _browserTranscript = '';
+  return transcript;
 }
 
 /**
@@ -268,26 +406,30 @@ async function transcribeOnServer(audioBlob) {
   }
 
   const data = await res.json();
-  return data.text || '';
+  return _normalizeTranscript(data.text || '');
 }
 
 /**
  * Insert transcribed text into the chat input
  */
 function insertTranscription(text, showToast, opts = {}) {
-  if (!text) return false;
+  const cleanText = _normalizeTranscript(text);
+  if (!cleanText) return false;
   const input = document.getElementById('message');
   if (!input) return false;
 
-  const existing = input.value.trim();
-  input.value = existing ? existing + ' ' + text : text;
+  if (opts.replaceExisting) {
+    input.value = cleanText;
+  } else {
+    const existing = input.value.trim();
+    input.value = existing ? existing + ' ' + cleanText : cleanText;
+  }
 
-  // Trigger auto-resize and icon update
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.focus();
 
   if (showToast) showToast('Transcribed');
-  if (opts.autoSubmit) return _submitCurrentTranscription();
+  if (opts.autoSubmit) return _submitCurrentTranscription(cleanText);
   return true;
 }
 
@@ -351,7 +493,7 @@ function mountSttSettingsUi() {
         <div class="settings-row">
           <label class="settings-label">Conversation loop</label>
           <div style="flex:1;display:flex;align-items:center;gap:8px;justify-content:space-between;">
-            <span class="admin-toggle-sub" style="margin:0;">Automatically submit recorded instructions, then listen again after each final response.</span>
+            <span class="admin-toggle-sub" style="margin:0;">Wait for voice activity, auto-submit after silence, then listen again after each final response.</span>
             <label class="admin-switch" title="Keep a hands-free voice conversation going until silence timeout or manual stop">
               <input type="checkbox" id="set-sttConversationLoopToggle">
               <span class="admin-slider"></span>
@@ -360,7 +502,7 @@ function mountSttSettingsUi() {
         </div>
         <div id="set-sttLoopTimingRows" style="display:flex;flex-direction:column;gap:0.5rem;">
           <div class="settings-row">
-            <label class="settings-label">Submit after</label>
+            <label class="settings-label">Submit after silence</label>
             <input id="set-sttLoopSubmitSeconds" type="number" min="1" max="60" step="0.5" class="settings-select" style="width:120px;flex:0 0 auto;margin-left:auto;" value="3">
             <span class="admin-toggle-sub" style="margin:0 0 0 6px;">seconds</span>
           </div>
@@ -585,11 +727,11 @@ export function startRecording(onFileCreated, showToast, showError, opts = {}) {
   if (!fromConversationLoop && _conversationLoopAvailable()) {
     _loopActive = true;
     _loopWaitingForAssistant = false;
+    _clearMessageInputForLoop();
     _loopInstructionDeadline = Date.now() + (_sttLoopIdleTimeoutSeconds * 1000);
     if (showToast) showToast('Conversation loop started');
   }
 
-  // Check for secure context (getUserMedia requires HTTPS or localhost)
   if (!window.isSecureContext) {
     if (showError) showError('Microphone requires HTTPS. Use a reverse proxy with SSL or access via localhost.');
     stopConversationLoop('silent');
@@ -606,10 +748,13 @@ export function startRecording(onFileCreated, showToast, showError, opts = {}) {
 
   audioChunks = [];
   _recordingStopReason = 'manual';
+  const recordingId = ++_activeRecordingId;
+  _resetSpeechState();
 
   navigator.mediaDevices.getUserMedia({ audio: true })
     .then(stream => {
       mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      _startVoiceActivityDetection(stream);
 
       mediaRecorder.ondataavailable = event => {
         if (event.data.size > 0) {
@@ -619,45 +764,51 @@ export function startRecording(onFileCreated, showToast, showError, opts = {}) {
 
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach(track => track.stop());
+        _stopVoiceActivityDetection();
 
         const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
         const provider = _sttProvider;
         const stopReason = _recordingStopReason;
         const autoSubmit = _loopActive && stopReason === 'loop-auto';
+        const loopRecording = autoSubmit || stopReason === 'loop-timeout';
+        const hadVoiceActivity = _speechDetected || _browserSpeechDetected || !_vadAvailable;
         let inserted = false;
 
         if (provider === 'browser') {
           const transcript = stopBrowserSTT();
-          if (transcript) {
-            inserted = insertTranscription(transcript, showToast, { autoSubmit });
+          const fresh = _hasFreshTranscript(transcript) && (_browserSpeechDetected || _speechDetected || !_vadAvailable);
+          if (fresh) {
+            inserted = insertTranscription(transcript, showToast, { autoSubmit, replaceExisting: autoSubmit });
           } else {
             if (showToast) showToast('No speech detected');
-            if (!autoSubmit) {
+            if (!loopRecording && !autoSubmit) {
               const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
               if (onFileCreated) onFileCreated(audioFile);
             }
           }
         } else if (provider === 'local' || provider.startsWith('endpoint:')) {
-          // Show "Transcribing..." feedback
-          if (showToast) showToast('Transcribing...', 5000);
-          try {
-            const transcript = await transcribeOnServer(audioBlob);
-            if (transcript) {
-              inserted = insertTranscription(transcript, showToast, { autoSubmit });
-            } else {
-              if (showToast) showToast('No speech detected');
-            }
-          } catch (e) {
-            console.error('STT transcription error:', e);
-            if (showError) showError('Transcription failed: ' + e.message);
-            if (!autoSubmit) {
-              // Fallback: attach as file
-              const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-              if (onFileCreated) onFileCreated(audioFile);
+          if (autoSubmit && !hadVoiceActivity) {
+            if (showToast) showToast('No speech detected');
+          } else {
+            if (showToast) showToast('Transcribing...', 5000);
+            try {
+              const transcript = await transcribeOnServer(audioBlob);
+              const fresh = _hasFreshTranscript(transcript) && (!autoSubmit || hadVoiceActivity);
+              if (fresh) {
+                inserted = insertTranscription(transcript, showToast, { autoSubmit, replaceExisting: autoSubmit });
+              } else {
+                if (showToast) showToast('No speech detected');
+              }
+            } catch (e) {
+              console.error('STT transcription error:', e);
+              if (showError) showError('Transcription failed: ' + e.message);
+              if (!loopRecording && !autoSubmit) {
+                const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
+                if (onFileCreated) onFileCreated(audioFile);
+              }
             }
           }
         } else {
-          // STT disabled — attach audio file
           const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
           if (onFileCreated) onFileCreated(audioFile);
         }
@@ -677,15 +828,14 @@ export function startRecording(onFileCreated, showToast, showError, opts = {}) {
       isRecording = true;
       recordingStartTime = new Date();
 
-      // Start browser STT if that's the provider
       if (_sttProvider === 'browser') {
-        startBrowserSTT();
+        startBrowserSTT(recordingId);
       }
 
       if (_loopActive) _scheduleLoopAutoStop();
 
       if (showToast) {
-        const loopHint = _loopActive ? ` · auto-submit in ${_sttLoopSubmitSeconds}s` : '';
+        const loopHint = _loopActive ? ` · waiting for speech` : '';
         showToast('Recording...' + loopHint);
       }
     })
@@ -709,7 +859,6 @@ function _stopRecordingInternal(reason) {
   _recordingStopReason = reason || 'manual';
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
-    // isRecording will be set to false in _resetRecordingUI called from onstop
   } else {
     _resetRecordingUI();
   }
