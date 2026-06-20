@@ -18,14 +18,15 @@ Conversation loop is an opt-in hands-free mode. When enabled, clicking the micro
 1. Start listening and clear the chat input for the loop turn so old prompts cannot be reused.
 2. Wait for fresh voice activity before any auto-stop or auto-submit can occur.
 3. After speech is detected, stop recording only after `stt_loop_submit_seconds` seconds of silence, default `3`.
-4. Transcribe and auto-submit only if the current recording produced fresh transcript text.
-5. Replace the chat input with the fresh transcript before clicking send.
-6. Wait for the model to finish its final response.
-7. Start recording again for the next instruction.
-8. End the loop if no instruction is heard before `stt_loop_idle_timeout_seconds`, default `5`, or if the user manually stops recording.
+4. Release the recorder state before the transcript is placed into the chat input.
+5. Transcribe and auto-submit only if the current recording produced fresh transcript text.
+6. Replace the chat input with the fresh transcript before clicking send.
+7. Wait for the model to finish its final response.
+8. Start recording again for the next instruction.
+9. End the loop if no instruction is heard before `stt_loop_idle_timeout_seconds`, default `5`, or if the user manually stops recording.
 
 The loop uses client-side voice activity detection to avoid transcribing silence. It also guards against duplicate rapid re-submission of the same transcript, which prevents an old cached prompt from being resent if the browser STT API returns stale or empty results.
 
 ## Safety behavior
 
-The recorder treats each loop turn as invalid until it sees voice activity or a fresh browser recognition result. Auto-submit validates that the input exactly matches the transcript from the current recording before it clicks send. This prevents a previously typed prompt, an earlier transcript, or a stale browser STT result from being sent in the next loop turn.
+The recorder treats each loop turn as invalid until it sees voice activity or a fresh browser recognition result. Auto-submit validates that the input exactly matches the transcript from the current recording before it clicks send. It clears the recorder's `recording` button mode before triggering the standard send-button click, so a valid transcript is not rejected merely because audio capture has just ended.
