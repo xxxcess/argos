@@ -41,9 +41,8 @@ def test_voice_recorder_gates_loop_on_fresh_speech():
     assert '_speechDetected' in source
     assert '_browserSpeechDetected' in source
     assert '_hasFreshTranscript' in source
-    assert 'replaceExisting: autoSubmit' in source
     assert 'if (!_speechDetected && !_browserSpeechDetected)' in source
-    assert 'Do not auto-submit before the user speaks' in source
+    assert 'Never turn a timer into an instruction' in source
 
 
 def test_voice_recorder_prevents_stale_prompt_loop_submits():
@@ -52,6 +51,16 @@ def test_voice_recorder_prevents_stale_prompt_loop_submits():
     assert 'text !== expected' in source
     assert '_activeRecordingId' in source
     assert 'recordingId !== _activeRecordingId' in source
+
+
+def test_voice_recorder_releases_recorder_before_auto_submit():
+    source = Path('static/js/voiceRecorder.js').read_text(encoding='utf-8')
+    assert '_releaseRecordingUi' in source
+    assert '_handleLoopTranscript' in source
+    assert 'data-mode="recording"' in source
+    assert source.index('_releaseRecordingUi();', source.index('mediaRecorder.onstop')) < source.index(
+        '_handleLoopTranscript(', source.index('mediaRecorder.onstop')
+    )
 
 
 def test_voice_recorder_prevents_duplicate_loop_submits():
