@@ -1,19 +1,18 @@
 // static/js/voiceRecorder.js
 
 /**
- * Voice recording with optional Speech-to-Text transcription.
+ * Voice recording with optional speech-to-text transcription.
  *
- * STT providers:
- *   "disabled"       — record audio as a file attachment
- *   "browser"        — use the Web Speech API for real-time transcription
- *   "local"          — send recording to /api/stt/transcribe (Whisper)
- *   "endpoint:<id>"  — send recording to /api/stt/transcribe (API)
+ * Providers:
+ *   disabled       - attach audio as a file
+ *   browser        - Web Speech API
+ *   local          - server-side Whisper
+ *   endpoint:<id>  - OpenAI-compatible transcription endpoint
  */
 
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
-let recordingInterval = null;
 let _recordingStopReason = 'manual';
 let _activeRecordingId = 0;
 
@@ -33,13 +32,7 @@ let _speechStartedAt = 0;
 let _lastVoiceActivityAt = 0;
 let _recordingStartedAt = 0;
 
-const VAD_RMS_THRESHOLD = 0.018;
-const VAD_MIN_SPEECH_MS = 250;
-const MIN_RECORDING_MS = 400;
-const MIN_TRANSCRIPT_CHARS = 2;
-const DUPLICATE_SUBMIT_WINDOW_MS = 15000;
-
-// Cached STT settings
+// STT settings
 let _sttProvider = 'disabled';
 let _sttLanguage = '';
 let _sttConversationLoop = false;
@@ -49,6 +42,7 @@ let _sttLoopIdleTimeoutSeconds = 5;
 // Conversation-loop state
 let _loopActive = false;
 let _loopWaitingForAssistant = false;
+let _loopWaitingForTts = false;
 let _loopInstructionDeadline = 0;
 let _loopAutoStopTimer = null;
 let _loopRestartTimer = null;
@@ -56,11 +50,22 @@ let _sendButtonObserver = null;
 let _lastSendButtonMode = '';
 let _lastAutoSubmittedText = '';
 let _lastAutoSubmittedAt = 0;
+let _ttsQuietSince = 0;
+let _discardCurrentRecordingForTts = false;
+
+const VAD_RMS_THRESHOLD = 0.018;
+const VAD_MIN_SPEECH_MS = 250;
+const MIN_RECORDING_MS = 400;
+const MIN_TRANSCRIPT_CHARS = 2;
+const DUPLICATE_SUBMIT_WINDOW_MS = 15000;
+const TTS_POLL_MS = 200;
+const TTS_STARTUP_GRACE_MS = 900;
+const TTS_POST_PLAYBACK_COOLDOWN_MS = 900;
 
 function _clampNumber(value, fallback, min, max) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.max(min, Math.min(max, parsed));
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
 }
 
 function _normalizeTranscript(value) {
@@ -87,6 +92,26 @@ function _clearLoopTimers() {
     clearTimeout(_loopRestartTimer);
     _loopRestartTimer = null;
   }
+}
+
+function _isTtsPlaybackActive() {
+  const manager = window.aiTTSManager;
+  const managerAudioActive = !!(
+    manager && (
+      manager.isPlaying ||
+      manager._processing ||
+      manager._streamActive ||
+      (Array.isArray(manager._queue) && manager._queue.length > 0) ||
+      (manager.currentAudio && !manager.currentAudio.paused && !manager.currentAudio.ended)
+    )
+  );
+
+  const browserTtsActive = !!(
+    window.speechSynthesis &&
+    (window.speechSynthesis.speaking || window.speechSynthesis.pending)
+  );
+
+  return managerAudioActive || browserTtsActive;
 }
 
 function _stopVoiceActivityDetection() {
@@ -116,9 +141,7 @@ function _markVoiceActivity() {
   const now = Date.now();
   if (!_speechStartedAt) _speechStartedAt = now;
   _lastVoiceActivityAt = now;
-  if (now - _speechStartedAt >= VAD_MIN_SPEECH_MS) {
-    _speechDetected = true;
-  }
+  if (now - _speechStartedAt >= VAD_MIN_SPEECH_MS) _speechDetected = true;
   if (_loopActive) {
     _loopInstructionDeadline = now + (_sttLoopIdleTimeoutSeconds * 1000);
   }
@@ -135,9 +158,9 @@ function _startVoiceActivityDetection(stream) {
     _audioAnalyser.fftSize = 512;
     _audioSource = _audioContext.createMediaStreamSource(stream);
     _audioSource.connect(_audioAnalyser);
+    _vadAvailable = true;
 
     const samples = new Uint8Array(_audioAnalyser.fftSize);
-    _vadAvailable = true;
     _voiceActivityTimer = setInterval(() => {
       if (!_audioAnalyser || !isRecording) return;
       _audioAnalyser.getByteTimeDomainData(samples);
@@ -157,10 +180,6 @@ function _startVoiceActivityDetection(stream) {
 
 function _releaseRecordingUi() {
   isRecording = false;
-  if (recordingInterval) {
-    clearInterval(recordingInterval);
-    recordingInterval = null;
-  }
   if (_loopAutoStopTimer) {
     clearTimeout(_loopAutoStopTimer);
     _loopAutoStopTimer = null;
@@ -171,22 +190,22 @@ function _releaseRecordingUi() {
     sendButton.classList.remove('recording');
     sendButton.dataset.mode = '';
   }
-
-  if (window._updateSendBtnIcon) {
-    setTimeout(window._updateSendBtnIcon, 0);
-  }
+  if (window._updateSendBtnIcon) setTimeout(window._updateSendBtnIcon, 0);
 }
 
-function _resetRecordingUI() {
+function _resetRecordingUi() {
   _stopVoiceActivityDetection();
   _releaseRecordingUi();
 }
 
 function stopConversationLoop(reason) {
-  const wasActive = _loopActive || _loopWaitingForAssistant;
+  const wasActive = _loopActive || _loopWaitingForAssistant || _loopWaitingForTts;
   _loopActive = false;
   _loopWaitingForAssistant = false;
+  _loopWaitingForTts = false;
   _loopInstructionDeadline = 0;
+  _ttsQuietSince = 0;
+  _discardCurrentRecordingForTts = false;
   _clearLoopTimers();
 
   if (wasActive && reason !== 'silent') {
@@ -213,7 +232,48 @@ function _clearMessageInputForLoop() {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function _waitForTtsThenRestart(options = {}) {
+  if (!_loopActive) return;
+  if (_loopRestartTimer) clearTimeout(_loopRestartTimer);
+
+  const initialGrace = options.initialGrace === true;
+  const check = () => {
+    if (!_loopActive) return;
+
+    if (_isTtsPlaybackActive()) {
+      _loopWaitingForTts = true;
+      _ttsQuietSince = 0;
+      _loopRestartTimer = setTimeout(check, TTS_POLL_MS);
+      return;
+    }
+
+    const now = Date.now();
+    if (!_ttsQuietSince) _ttsQuietSince = now;
+    const quietRequired = _loopWaitingForTts || !initialGrace
+      ? TTS_POST_PLAYBACK_COOLDOWN_MS
+      : TTS_STARTUP_GRACE_MS;
+
+    if (now - _ttsQuietSince < quietRequired) {
+      _loopRestartTimer = setTimeout(check, TTS_POLL_MS);
+      return;
+    }
+
+    _loopRestartTimer = null;
+    _loopWaitingForTts = false;
+    _loopWaitingForAssistant = false;
+    _ttsQuietSince = 0;
+    _beginLoopListening();
+  };
+
+  check();
+}
+
 function _submitCurrentTranscription(expectedText) {
+  if (_isTtsPlaybackActive()) {
+    _waitForTtsThenRestart();
+    return false;
+  }
+
   const input = document.getElementById('message');
   const text = _normalizeTranscript(input?.value || '');
   const expected = _normalizeTranscript(expectedText || text);
@@ -225,23 +285,19 @@ function _submitCurrentTranscription(expectedText) {
   }
 
   const sendButton = document.querySelector('.send-btn');
-  if (!sendButton || sendButton.disabled || sendButton.dataset.mode === 'streaming') {
-    return false;
-  }
+  if (!sendButton || sendButton.disabled || sendButton.dataset.mode === 'streaming') return false;
 
-  // The recorder has been released before this function is called. Clearing a
-  // stale visual mode here makes the order explicit and preserves the send
-  // button's normal click handler.
   sendButton.classList.remove('recording');
   sendButton.dataset.mode = '';
-
   _lastAutoSubmittedText = text;
   _lastAutoSubmittedAt = now;
   _loopWaitingForAssistant = true;
   _lastSendButtonMode = '';
 
   setTimeout(() => {
-    if (_loopWaitingForAssistant && !isRecording) sendButton.click();
+    if (_loopWaitingForAssistant && !isRecording && !_isTtsPlaybackActive()) {
+      sendButton.click();
+    }
   }, 0);
   return true;
 }
@@ -250,6 +306,14 @@ function _scheduleLoopAutoStop() {
   if (!_loopActive || !isRecording) return;
   if (_loopAutoStopTimer) clearTimeout(_loopAutoStopTimer);
 
+  // Speaker playback is not user speech. Stop and discard this turn instead
+  // of allowing browser STT to transcribe the assistant's TTS response.
+  if (_isTtsPlaybackActive()) {
+    _discardCurrentRecordingForTts = true;
+    _stopRecordingInternal('loop-tts');
+    return;
+  }
+
   const remaining = _loopRemainingMs();
   if (remaining <= 0) {
     stopConversationLoop('idle-timeout');
@@ -257,8 +321,8 @@ function _scheduleLoopAutoStop() {
     return;
   }
 
-  // Never turn a timer into an instruction. The loop remains in the listening
-  // state until the user speaks or the no-speech deadline expires.
+  // Never turn a timer into an instruction. Keep listening until actual user
+  // speech is detected or the no-speech deadline expires.
   if (!_speechDetected && !_browserSpeechDetected) {
     _loopAutoStopTimer = setTimeout(_scheduleLoopAutoStop, Math.min(250, remaining));
     return;
@@ -279,9 +343,13 @@ function _scheduleLoopAutoStop() {
 }
 
 function _beginLoopListening() {
-  if (!_loopActive || isRecording || _loopWaitingForAssistant) return;
+  if (!_loopActive || isRecording || _loopWaitingForAssistant || _loopWaitingForTts) return;
   if (!_conversationLoopAvailable()) {
     stopConversationLoop('silent');
+    return;
+  }
+  if (_isTtsPlaybackActive()) {
+    _waitForTtsThenRestart();
     return;
   }
 
@@ -295,12 +363,9 @@ function _beginLoopListening() {
 
 function _scheduleLoopRestartAfterAssistant() {
   if (!_loopActive) return;
-  if (_loopRestartTimer) clearTimeout(_loopRestartTimer);
-  _loopRestartTimer = setTimeout(() => {
-    _loopRestartTimer = null;
-    _loopWaitingForAssistant = false;
-    _beginLoopListening();
-  }, 250);
+  _loopWaitingForAssistant = true;
+  _ttsQuietSince = 0;
+  _waitForTtsThenRestart({ initialGrace: true });
 }
 
 function _watchSendButtonForLoop() {
@@ -309,8 +374,8 @@ function _watchSendButtonForLoop() {
   const attach = () => {
     const sendButton = document.querySelector('.send-btn');
     if (!sendButton) return false;
-
     _lastSendButtonMode = sendButton.dataset.mode || '';
+
     _sendButtonObserver = new MutationObserver(() => {
       const mode = sendButton.dataset.mode || '';
       const wasStreaming = _lastSendButtonMode === 'streaming';
@@ -324,10 +389,10 @@ function _watchSendButtonForLoop() {
   };
 
   if (attach()) return;
-  const bodyObserver = new MutationObserver(() => {
-    if (attach()) bodyObserver.disconnect();
+  const observer = new MutationObserver(() => {
+    if (attach()) observer.disconnect();
   });
-  if (document.body) bodyObserver.observe(document.body, { childList: true, subtree: true });
+  if (document.body) observer.observe(document.body, { childList: true, subtree: true });
 }
 
 async function refreshSttProvider() {
@@ -377,10 +442,7 @@ function startBrowserSTT(recordingId) {
     }
   };
 
-  _recognition.onerror = (event) => {
-    console.warn('Browser STT error:', event.error);
-  };
-
+  _recognition.onerror = (event) => console.warn('Browser STT error:', event.error);
   try { _recognition.start(); } catch (error) { console.warn('Browser STT start failed:', error); }
 }
 
@@ -397,7 +459,6 @@ function stopBrowserSTT() {
 async function transcribeOnServer(audioBlob) {
   const formData = new FormData();
   formData.append('file', audioBlob, 'audio.webm');
-
   const response = await fetch('/api/stt/transcribe', {
     method: 'POST',
     credentials: 'same-origin',
@@ -408,7 +469,6 @@ async function transcribeOnServer(audioBlob) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail?.message || 'Transcription failed');
   }
-
   const data = await response.json();
   return _normalizeTranscript(data.text || '');
 }
@@ -419,13 +479,8 @@ function insertTranscription(text, showToast, options = {}) {
 
   const input = document.getElementById('message');
   if (!input) return false;
-
-  if (options.replaceExisting) {
-    input.value = transcript;
-  } else {
-    const existing = _normalizeTranscript(input.value);
-    input.value = existing ? `${existing} ${transcript}` : transcript;
-  }
+  if (options.replaceExisting) input.value = transcript;
+  else input.value = _normalizeTranscript(input.value) ? `${_normalizeTranscript(input.value)} ${transcript}` : transcript;
 
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.focus();
@@ -433,10 +488,32 @@ function insertTranscription(text, showToast, options = {}) {
   return true;
 }
 
+function _handleLoopTranscript(transcript, showToast, autoSubmit) {
+  const inserted = insertTranscription(transcript, showToast, { replaceExisting: autoSubmit });
+  if (!autoSubmit || !inserted) return { inserted, submitted: false };
+  const submitted = _submitCurrentTranscription(transcript);
+  if (!submitted && showToast && !_isTtsPlaybackActive()) {
+    showToast('Transcript ready — press Send to continue.');
+  }
+  return { inserted, submitted };
+}
+
+function _continueLoopAfterNoSubmission() {
+  if (!_loopActive) return;
+  if (_isTtsPlaybackActive()) {
+    _waitForTtsThenRestart();
+    return;
+  }
+  if (_loopRemainingMs() <= 250) {
+    stopConversationLoop('idle-timeout');
+    return;
+  }
+  _loopRestartTimer = setTimeout(_beginLoopListening, 100);
+}
+
 function mountSttSettingsUi() {
   const defaultMessage = document.getElementById('set-defaultChatMsg');
   if (!defaultMessage) return false;
-
   const defaultCard = defaultMessage.closest('.admin-card');
   if (!defaultCard || !defaultCard.parentNode) return false;
 
@@ -446,30 +523,23 @@ function mountSttSettingsUi() {
     card.className = 'admin-card';
     card.id = 'set-sttSettingsCard';
     card.innerHTML = `
-      <h2 style="display:flex;align-items:center;gap:6px;">
-        Speech to Text
-        <span style="flex:1"></span>
-        <label class="admin-switch" title="Transcribe microphone recordings into the chat input"><input type="checkbox" id="set-sttEnabledToggle" checked><span class="admin-slider"></span></label>
-      </h2>
-      <div class="admin-toggle-sub" style="margin-bottom:8px">Configure microphone transcription. Browser mode is enabled by default and falls back to attaching audio if speech recognition is unavailable.</div>
+      <h2 style="display:flex;align-items:center;gap:6px;">Speech to Text<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-sttEnabledToggle" checked><span class="admin-slider"></span></label></h2>
+      <div class="admin-toggle-sub" style="margin-bottom:8px">Configure microphone transcription. Conversation loop waits for user speech and pauses while TTS plays.</div>
       <div id="set-sttConfigWrap" style="display:flex;flex-direction:column;gap:.5rem;">
         <div class="settings-row"><label class="settings-label">Provider</label><select id="set-sttProviderSelect" class="settings-select"><option value="browser">Browser (built-in)</option><option value="local">Local (Whisper)</option><option value="disabled">Disabled</option></select></div>
-        <div id="set-sttModelRow" class="settings-row"><label class="settings-label">Model</label><select id="set-sttModelSelect" class="settings-select"><option value="tiny">tiny (fastest)</option><option value="base" selected>base (default)</option><option value="small">small</option><option value="medium">medium</option><option value="large-v3">large-v3</option></select><input id="set-sttModelInput" type="text" placeholder="whisper-1" style="flex:1;padding:5px;display:none;"></div>
-        <div id="set-sttLangRow" class="settings-row"><label class="settings-label">Language</label><input id="set-sttLangInput" type="text" placeholder="Auto-detect or ISO code, e.g. en" class="settings-select" style="flex:1;"></div>
-        <div class="settings-row"><label class="settings-label">Conversation loop</label><div style="flex:1;display:flex;align-items:center;gap:8px;justify-content:space-between;"><span class="admin-toggle-sub" style="margin:0;">Wait for speech, submit after silence, then listen again after each response.</span><label class="admin-switch"><input type="checkbox" id="set-sttConversationLoopToggle"><span class="admin-slider"></span></label></div></div>
-        <div id="set-sttLoopTimingRows" style="display:flex;flex-direction:column;gap:.5rem;"><div class="settings-row"><label class="settings-label">Submit after silence</label><input id="set-sttLoopSubmitSeconds" type="number" min="1" max="60" step=".5" class="settings-select" style="width:120px;flex:0 0 auto;margin-left:auto;" value="3"><span class="admin-toggle-sub" style="margin:0 0 0 6px;">seconds</span></div><div class="settings-row"><label class="settings-label">Stop listening after</label><input id="set-sttLoopIdleTimeoutSeconds" type="number" min="1" max="300" step=".5" class="settings-select" style="width:120px;flex:0 0 auto;margin-left:auto;" value="5"><span class="admin-toggle-sub" style="margin:0 0 0 6px;">seconds idle</span></div></div>
-        <div id="set-sttSettingsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+        <div id="set-sttModelRow" class="settings-row"><label class="settings-label">Model</label><select id="set-sttModelSelect" class="settings-select"><option value="tiny">tiny (fastest)</option><option value="base" selected>base (default)</option><option value="small">small</option><option value="medium">medium</option><option value="large-v3">large-v3</option></select><input id="set-sttModelInput" type="text" placeholder="whisper-1" class="settings-select" style="display:none;flex:1"></div>
+        <div id="set-sttLangRow" class="settings-row"><label class="settings-label">Language</label><input id="set-sttLangInput" type="text" placeholder="Auto-detect or ISO code, e.g. en" class="settings-select" style="flex:1"></div>
+        <div class="settings-row"><label class="settings-label">Conversation loop</label><div style="flex:1;display:flex;align-items:center;gap:8px;justify-content:space-between"><span class="admin-toggle-sub" style="margin:0">Submit after speech ends, then wait for the assistant and TTS before listening again.</span><label class="admin-switch"><input type="checkbox" id="set-sttConversationLoopToggle"><span class="admin-slider"></span></label></div></div>
+        <div id="set-sttLoopTimingRows" style="display:flex;flex-direction:column;gap:.5rem"><div class="settings-row"><label class="settings-label">Submit after silence</label><input id="set-sttLoopSubmitSeconds" type="number" min="1" max="60" step=".5" value="3" class="settings-select" style="width:120px;margin-left:auto"><span class="admin-toggle-sub" style="margin:0 0 0 6px">seconds</span></div><div class="settings-row"><label class="settings-label">Stop listening after</label><input id="set-sttLoopIdleTimeoutSeconds" type="number" min="1" max="300" step=".5" value="5" class="settings-select" style="width:120px;margin-left:auto"><span class="admin-toggle-sub" style="margin:0 0 0 6px">seconds idle</span></div></div>
+        <div id="set-sttSettingsMsg" style="font-size:11px;color:color-mix(in srgb,var(--fg) 45%,transparent)"></div>
       </div>`;
   }
 
   const ttsToggle = document.getElementById('set-ttsEnabledToggle');
   const ttsCard = ttsToggle ? ttsToggle.closest('.admin-card') : null;
   const anchor = ttsCard || defaultCard;
-  if (anchor.parentNode && anchor.nextSibling !== card) {
-    anchor.parentNode.insertBefore(card, anchor.nextSibling);
-  }
-
-  bindSttSettingsUi(card).catch((error) => console.warn('Failed to bind STT settings UI', error));
+  if (anchor.parentNode && anchor.nextSibling !== card) anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  bindSttSettingsUi(card).catch((error) => console.warn('Failed to bind STT settings', error));
   return true;
 }
 
@@ -481,18 +551,16 @@ async function bindSttSettingsUi(card) {
   const languageRow = document.getElementById('set-sttLangRow');
   const languageInput = document.getElementById('set-sttLangInput');
   const enabledToggle = document.getElementById('set-sttEnabledToggle');
-  const configWrap = document.getElementById('set-sttConfigWrap');
   const loopToggle = document.getElementById('set-sttConversationLoopToggle');
   const loopTimingRows = document.getElementById('set-sttLoopTimingRows');
   const submitSecondsInput = document.getElementById('set-sttLoopSubmitSeconds');
   const idleSecondsInput = document.getElementById('set-sttLoopIdleTimeoutSeconds');
   const status = document.getElementById('set-sttSettingsMsg');
-
+  const configWrap = document.getElementById('set-sttConfigWrap');
   if (!providerSelect || providerSelect.dataset.boundVoiceRecorderStt === '1') return;
   providerSelect.dataset.boundVoiceRecorderStt = '1';
 
   const isEndpoint = () => providerSelect.value.startsWith('endpoint:');
-  const getModel = () => isEndpoint() ? modelInput.value.trim() : modelSelect.value;
   const effectiveProvider = () => enabledToggle && !enabledToggle.checked ? 'disabled' : providerSelect.value;
   const setStatus = (message, isError = false) => {
     if (!status) return;
@@ -503,23 +571,20 @@ async function bindSttSettingsUi(card) {
   const updateVisibility = () => {
     const provider = providerSelect.value;
     const showModel = provider === 'local' || provider.startsWith('endpoint:');
-    const showLanguage = provider !== 'disabled';
     if (modelRow) modelRow.style.display = showModel ? 'flex' : 'none';
-    if (languageRow) languageRow.style.display = showLanguage ? 'flex' : 'none';
+    if (languageRow) languageRow.style.display = provider !== 'disabled' ? 'flex' : 'none';
     modelSelect.style.display = isEndpoint() ? 'none' : '';
     modelInput.style.display = isEndpoint() ? '' : 'none';
-
     const disabled = enabledToggle && !enabledToggle.checked;
     if (card) card.style.opacity = disabled ? '.45' : '';
     if (configWrap) configWrap.style.pointerEvents = disabled ? 'none' : '';
-    const loopDisabled = !loopToggle || !loopToggle.checked;
+    const loopOff = !loopToggle || !loopToggle.checked;
     if (loopTimingRows) {
-      loopTimingRows.style.opacity = loopDisabled ? '.5' : '';
-      loopTimingRows.style.pointerEvents = loopDisabled ? 'none' : '';
+      loopTimingRows.style.opacity = loopOff ? '.5' : '';
+      loopTimingRows.style.pointerEvents = loopOff ? 'none' : '';
     }
-
     if (!disabled && provider === 'browser' && !_browserSttSupported()) {
-      setStatus('Browser speech recognition is not available here; recordings will fall back to audio attachments.', true);
+      setStatus('Browser speech recognition is unavailable; recordings will fall back to attachments.', true);
     }
   };
 
@@ -536,9 +601,7 @@ async function bindSttSettingsUi(card) {
         option.textContent = `${endpoint.name || endpoint.id} (API)`;
         providerSelect.appendChild(option);
       });
-    } catch (error) {
-      console.warn('Failed to load STT endpoints', error);
-    }
+    } catch (_) {}
   };
 
   const loadSettings = async () => {
@@ -553,10 +616,8 @@ async function bindSttSettingsUi(card) {
         providerSelect.appendChild(option);
       }
       if (Array.from(providerSelect.options).some((option) => option.value === provider)) providerSelect.value = provider;
-      if (settings.stt_model) {
-        modelSelect.value = settings.stt_model;
-        modelInput.value = settings.stt_model;
-      }
+      modelSelect.value = settings.stt_model || 'base';
+      modelInput.value = settings.stt_model || 'base';
       languageInput.value = settings.stt_language || '';
       if (enabledToggle) enabledToggle.checked = settings.stt_enabled !== false;
       if (loopToggle) loopToggle.checked = settings.stt_conversation_loop === true;
@@ -575,7 +636,7 @@ async function bindSttSettingsUi(card) {
       const payload = {
         stt_enabled: enabledToggle ? enabledToggle.checked : true,
         stt_provider: providerSelect.value,
-        stt_model: getModel() || 'base',
+        stt_model: isEndpoint() ? (modelInput.value.trim() || 'whisper-1') : modelSelect.value,
         stt_language: languageInput.value.trim(),
         stt_conversation_loop: loopToggle ? loopToggle.checked : false,
         stt_loop_submit_seconds: _clampNumber(submitSecondsInput?.value, 3, 1, 60),
@@ -583,7 +644,6 @@ async function bindSttSettingsUi(card) {
       };
       if (submitSecondsInput) submitSecondsInput.value = payload.stt_loop_submit_seconds;
       if (idleSecondsInput) idleSecondsInput.value = payload.stt_loop_idle_timeout_seconds;
-
       const response = await fetch('/api/auth/settings', {
         method: 'POST',
         credentials: 'same-origin',
@@ -591,15 +651,13 @@ async function bindSttSettingsUi(card) {
         body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error('Settings save failed');
-
       _applyLoopSettings(payload);
-      if (!_sttConversationLoop) stopConversationLoop('silent');
       _sttProvider = payload.stt_enabled ? payload.stt_provider : 'disabled';
       _sttLanguage = payload.stt_language;
-      if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = _sttProvider;
+      if (!_sttConversationLoop) stopConversationLoop('silent');
       if (window._updateSendBtnIcon) window._updateSendBtnIcon();
       setStatus('Saved');
-    } catch (error) {
+    } catch (_) {
       setStatus('Failed to save STT settings', true);
     }
   };
@@ -607,15 +665,14 @@ async function bindSttSettingsUi(card) {
   await loadEndpoints();
   await loadSettings();
   updateVisibility();
-
   providerSelect.addEventListener('change', () => { updateVisibility(); saveSettings(); });
   modelSelect.addEventListener('change', saveSettings);
   modelInput.addEventListener('change', saveSettings);
   languageInput.addEventListener('change', saveSettings);
+  if (enabledToggle) enabledToggle.addEventListener('change', () => { updateVisibility(); saveSettings(); });
   if (loopToggle) loopToggle.addEventListener('change', () => { updateVisibility(); saveSettings(); });
   if (submitSecondsInput) submitSecondsInput.addEventListener('change', saveSettings);
   if (idleSecondsInput) idleSecondsInput.addEventListener('change', saveSettings);
-  if (enabledToggle) enabledToggle.addEventListener('change', () => { updateVisibility(); saveSettings(); });
 }
 
 function initSttSettingsUi() {
@@ -631,26 +688,6 @@ function initSttSettingsUi() {
   else start();
 }
 
-function _continueLoopAfterNoSubmission() {
-  if (!_loopActive) return;
-  if (_loopRemainingMs() <= 250) {
-    stopConversationLoop('idle-timeout');
-    return;
-  }
-  _loopRestartTimer = setTimeout(_beginLoopListening, 100);
-}
-
-function _handleLoopTranscript(transcript, showToast, autoSubmit) {
-  const inserted = insertTranscription(transcript, showToast, { replaceExisting: autoSubmit });
-  if (!autoSubmit || !inserted) return { inserted, submitted: false };
-
-  // onstop already called _releaseRecordingUi, so the click uses the normal
-  // send flow instead of being rejected as an active microphone recording.
-  const submitted = _submitCurrentTranscription(transcript);
-  if (!submitted && showToast) showToast('Transcript ready — press Send to continue.');
-  return { inserted, submitted };
-}
-
 export function startRecording(onFileCreated, showToast, showError, options = {}) {
   const fromConversationLoop = options.fromConversationLoop === true;
   if (!fromConversationLoop && _conversationLoopAvailable()) {
@@ -658,34 +695,36 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
     _loopWaitingForAssistant = false;
     _clearMessageInputForLoop();
     _loopInstructionDeadline = Date.now() + (_sttLoopIdleTimeoutSeconds * 1000);
-    if (showToast) showToast('Conversation loop started');
+  }
+
+  if (_loopActive && _isTtsPlaybackActive()) {
+    _waitForTtsThenRestart({ initialGrace: false });
+    return;
   }
 
   if (!window.isSecureContext) {
-    if (showError) showError('Microphone requires HTTPS. Use a reverse proxy with SSL or access via localhost.');
+    if (showError) showError('Microphone requires HTTPS. Use SSL or localhost.');
     stopConversationLoop('silent');
-    _resetRecordingUI();
+    _resetRecordingUi();
     return;
   }
   if (!navigator.mediaDevices?.getUserMedia) {
     if (showError) showError('Microphone not supported in this browser.');
     stopConversationLoop('silent');
-    _resetRecordingUI();
+    _resetRecordingUi();
     return;
   }
 
   audioChunks = [];
   _recordingStopReason = 'manual';
+  _discardCurrentRecordingForTts = false;
   _resetSpeechState();
   const recordingId = ++_activeRecordingId;
 
   navigator.mediaDevices.getUserMedia({ audio: true })
     .then((stream) => {
-      try {
-        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      } catch (_) {
-        mediaRecorder = new MediaRecorder(stream);
-      }
+      try { mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); }
+      catch (_) { mediaRecorder = new MediaRecorder(stream); }
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) audioChunks.push(event.data);
@@ -694,44 +733,50 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
         _stopVoiceActivityDetection();
-
-        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-        const provider = _sttProvider;
         const stopReason = _recordingStopReason;
         const autoSubmit = _loopActive && stopReason === 'loop-auto';
-        const loopRecording = autoSubmit || stopReason === 'loop-timeout';
+        const discardForTts = _discardCurrentRecordingForTts || stopReason === 'loop-tts';
+        const loopRecording = autoSubmit || stopReason === 'loop-timeout' || discardForTts;
         const hadVoiceActivity = _speechDetected || _browserSpeechDetected || !_vadAvailable;
+        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
 
-        // Critical ordering: clear the recorder's state before attempting the
-        // normal send-button click. Previously the click was blocked because
-        // the button still carried data-mode="recording".
+        // Clear recording mode before inserting/sending any transcription.
         _releaseRecordingUi();
 
-        let submitted = false;
-        let inserted = false;
+        if (discardForTts) {
+          stopBrowserSTT();
+          _discardCurrentRecordingForTts = false;
+          _waitForTtsThenRestart();
+          return;
+        }
 
-        if (provider === 'browser') {
+        let inserted = false;
+        let submitted = false;
+
+        if (providerForCurrentTurn() === 'browser') {
           const transcript = stopBrowserSTT();
-          const fresh = _hasFreshTranscript(transcript)
-            && (_browserSpeechDetected || _speechDetected || !_vadAvailable);
+          const fresh = _hasFreshTranscript(transcript) && (_browserSpeechDetected || _speechDetected || !_vadAvailable);
           if (fresh) {
             const result = _handleLoopTranscript(transcript, showToast, autoSubmit);
             inserted = result.inserted;
             submitted = result.submitted;
           } else {
             if (showToast) showToast('No speech detected');
-            if (!loopRecording) {
-              const file = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-              if (onFileCreated) onFileCreated(file);
+            if (!loopRecording && onFileCreated) {
+              onFileCreated(new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' }));
             }
           }
-        } else if (provider === 'local' || provider.startsWith('endpoint:')) {
+        } else if (providerForCurrentTurn() === 'local' || providerForCurrentTurn().startsWith('endpoint:')) {
           if (autoSubmit && !hadVoiceActivity) {
             if (showToast) showToast('No speech detected');
           } else {
             if (showToast) showToast('Transcribing...', 5000);
             try {
               const transcript = await transcribeOnServer(audioBlob);
+              if (_loopActive && _isTtsPlaybackActive()) {
+                _waitForTtsThenRestart();
+                return;
+              }
               const fresh = _hasFreshTranscript(transcript) && (!autoSubmit || hadVoiceActivity);
               if (fresh) {
                 const result = _handleLoopTranscript(transcript, showToast, autoSubmit);
@@ -743,20 +788,16 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
             } catch (error) {
               console.error('STT transcription error:', error);
               if (showError) showError(`Transcription failed: ${error.message}`);
-              if (!loopRecording) {
-                const file = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-                if (onFileCreated) onFileCreated(file);
+              if (!loopRecording && onFileCreated) {
+                onFileCreated(new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' }));
               }
             }
           }
-        } else {
-          const file = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-          if (onFileCreated) onFileCreated(file);
+        } else if (onFileCreated) {
+          onFileCreated(new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' }));
         }
 
         if (autoSubmit && _loopActive && !submitted) {
-          // A valid transcript that could not be clicked is left in the input
-          // for the user rather than risking a duplicate or stale resend.
           if (!inserted) _continueLoopAfterNoSubmission();
           else stopConversationLoop('silent');
         }
@@ -765,29 +806,26 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
       mediaRecorder.start();
       isRecording = true;
       _startVoiceActivityDetection(stream);
-      if (_sttProvider === 'browser') startBrowserSTT(recordingId);
+      if (providerForCurrentTurn() === 'browser') startBrowserSTT(recordingId);
       if (_loopActive) _scheduleLoopAutoStop();
       if (showToast) showToast(`Recording...${_loopActive ? ' · waiting for speech' : ''}`);
     })
     .catch((error) => {
       console.error('Microphone access error:', error);
-      if (showError) {
-        if (error.name === 'NotAllowedError') showError('Microphone access denied. Check browser permissions.');
-        else if (error.name === 'NotFoundError') showError('No microphone found.');
-        else showError(`Microphone error: ${error.message}`);
-      }
+      if (showError) showError(`Microphone error: ${error.message}`);
       stopConversationLoop('silent');
-      _resetRecordingUI();
+      _resetRecordingUi();
     });
+}
+
+function providerForCurrentTurn() {
+  return _sttProvider || 'disabled';
 }
 
 function _stopRecordingInternal(reason) {
   _recordingStopReason = reason || 'manual';
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-  } else {
-    _resetRecordingUI();
-  }
+  if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+  else _resetRecordingUi();
 }
 
 export function stopRecording() {
