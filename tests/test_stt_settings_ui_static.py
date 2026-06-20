@@ -58,9 +58,8 @@ def test_voice_recorder_releases_recorder_before_auto_submit():
     assert '_releaseRecordingUi' in source
     assert '_handleLoopTranscript' in source
     assert 'data-mode="recording"' in source
-    assert source.index('_releaseRecordingUi();', source.index('mediaRecorder.onstop')) < source.index(
-        '_handleLoopTranscript(', source.index('mediaRecorder.onstop')
-    )
+    onstop = source.index('mediaRecorder.onstop')
+    assert source.index('_releaseRecordingUi();', onstop) < source.index('_handleLoopTranscript(', onstop)
 
 
 def test_voice_recorder_prevents_duplicate_loop_submits():
