@@ -45,6 +45,7 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import missionControlModule from './js/missionControl.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -119,6 +120,7 @@ async function _createDirectChatFromPreferredModel() {
 
   return false;
 }
+window.createDirectChatFromPreferredModel = _createDirectChatFromPreferredModel;
 
 // ============================================
 // EVENT LISTENERS INITIALIZATION
@@ -2451,6 +2453,7 @@ function initializeEventListeners() {
     applyTextEmojis(state['text-emojis'] === true);
     // Hide thinking sections toggle (show-thinking: checked=show, unchecked=hide)
     document.body.classList.toggle('hide-thinking', state['show-thinking'] === false);
+    try { document.dispatchEvent(new CustomEvent('odysseus:ui-visibility-change', { detail: state })); } catch (_) {}
   }
 
   // Rearrange toggles in session/model sort dropdowns
@@ -3377,6 +3380,7 @@ function startOdysseusApp() {
   searchModule.init(API_BASE);
   chatModule.init(API_BASE);
   chatModule.initListeners();
+  missionControlModule.init();
   groupModule.init(API_BASE);
   // Initialize compare module
   if (compareModule) {

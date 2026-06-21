@@ -33,6 +33,9 @@ class AITTSManager {
         // Queue for sequential auto-play
         this._queue = [];       // Array of { text, button, resetFn }
         this._processing = false;
+        this._latestFinalTimer = null;
+        this._pendingLatestFinal = null;
+        this._latestFinalDelayMs = 1200;
 
         // Streaming sentence-by-sentence TTS state
         this._streamSentencesSent = 0;  // chars of plain text already queued
@@ -40,6 +43,10 @@ class AITTSManager {
         this._streamButton = null;
         this._streamResetFn = null;
         this._streamDebounceTimer = null;
+        this._streamSessionId = null;
+        this.activeSessionId = null;
+        this.ttsEnabledForActiveMission = true;
+        this._disabledAutoSessions = new Set();
 
         // Check if TTS service is available
         this.checkAvailability();
@@ -274,6 +281,15 @@ class AITTSManager {
     }
 
     stop() {
+        if (this._latestFinalTimer) {
+            clearTimeout(this._latestFinalTimer);
+            this._latestFinalTimer = null;
+        }
+        if (this._pendingLatestFinal && this._pendingLatestFinal.resetFn) {
+            this._pendingLatestFinal.resetFn();
+        }
+        this._pendingLatestFinal = null;
+
         // Cancel streaming TTS
         this._streamActive = false;
         if (this._streamDebounceTimer) {
@@ -301,6 +317,35 @@ class AITTSManager {
         }
     }
 
+    setActiveMissionSession(sessionId, enabled = true) {
+        this.activeSessionId = sessionId || null;
+        this.ttsEnabledForActiveMission = enabled !== false;
+        if (this.activeSessionId && this.ttsEnabledForActiveMission) {
+            this._disabledAutoSessions.delete(String(this.activeSessionId));
+        }
+    }
+
+    disableAutomaticForSession(sessionId) {
+        if (sessionId != null) this._disabledAutoSessions.add(String(sessionId));
+        if (this.activeSessionId != null && String(this.activeSessionId) === String(sessionId)) {
+            this.activeSessionId = null;
+        }
+    }
+
+    canAutoSpeakForSession(sessionId) {
+        if (!sessionId) return false;
+        if (this._disabledAutoSessions.has(String(sessionId))) return false;
+        if (!this.ttsEnabledForActiveMission) return false;
+        if (!this.activeSessionId || String(this.activeSessionId) !== String(sessionId)) return false;
+        return true;
+    }
+
+    stopForMissionClose(sessionId) {
+        this.disableAutomaticForSession(sessionId);
+        this.ttsEnabledForActiveMission = false;
+        this.stop();
+    }
+
     /**
      * Enqueue a message for auto-play. Plays sequentially — each message
      * finishes before the next starts. Stopping any message clears the queue.
@@ -310,6 +355,20 @@ class AITTSManager {
         if (!this._processing) {
             this._processQueue();
         }
+    }
+
+    enqueueLatestFinal(text, button, resetFn, sessionId) {
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) return;
+        this.stop();
+        this._pendingLatestFinal = { text, button, resetFn, sessionId };
+        this._latestFinalTimer = setTimeout(() => {
+            const pending = this._pendingLatestFinal;
+            this._latestFinalTimer = null;
+            this._pendingLatestFinal = null;
+            if (!pending) return;
+            if (pending.sessionId && !this.canAutoSpeakForSession(pending.sessionId)) return;
+            this.enqueue(pending.text, pending.button, pending.resetFn);
+        }, this._latestFinalDelayMs);
     }
 
     async _processQueue() {
@@ -396,23 +455,31 @@ class AITTSManager {
 
     // ── Streaming TTS (sentence-by-sentence) ──
 
-    streamingStart() {
+    streamingStart(sessionId) {
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) {
+            this._streamActive = false;
+            return;
+        }
+        this._streamSessionId = sessionId || this.activeSessionId || null;
         this._streamSentencesSent = 0;
         this._streamActive = true;
         this._streamButton = null;
         this._streamResetFn = null;
     }
 
-    streamingUpdate(accumulatedText) {
+    streamingUpdate(accumulatedText, sessionId) {
+        var targetSession = sessionId || this._streamSessionId;
+        if (targetSession && !this.canAutoSpeakForSession(targetSession)) return;
         if (!this._streamActive || !this.available || !this.autoPlay) return;
         if (this._streamDebounceTimer) return;
         this._streamDebounceTimer = setTimeout(() => {
             this._streamDebounceTimer = null;
-            this._processStreamingSentences(accumulatedText);
+            this._processStreamingSentences(accumulatedText, targetSession);
         }, 150);
     }
 
-    _processStreamingSentences(accumulatedText) {
+    _processStreamingSentences(accumulatedText, sessionId) {
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) return;
         if (!this._streamActive) return;
 
         var text = accumulatedText
@@ -475,7 +542,13 @@ class AITTSManager {
         }
     }
 
-    streamingEnd(finalText) {
+    streamingEnd(finalText, sessionId) {
+        var targetSession = sessionId || this._streamSessionId;
+        if (targetSession && !this.canAutoSpeakForSession(targetSession)) {
+            this._streamActive = false;
+            this._streamSentencesSent = 0;
+            return;
+        }
         if (!this._streamActive) return;
         this._streamActive = false;
         if (this._streamDebounceTimer) {

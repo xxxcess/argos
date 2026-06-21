@@ -15,6 +15,9 @@ let audioChunks = [];
 let isRecording = false;
 let _recordingStopReason = 'manual';
 let _activeRecordingId = 0;
+let recordingSessionId = null;
+let recordingRequestId = 0;
+let recordingCancelled = false;
 
 // Browser STT state
 let _recognition = null;
@@ -457,6 +460,7 @@ function stopBrowserSTT() {
 }
 
 async function transcribeOnServer(audioBlob) {
+  const requestId = recordingRequestId;
   const formData = new FormData();
   formData.append('file', audioBlob, 'audio.webm');
   const response = await fetch('/api/stt/transcribe', {
@@ -470,10 +474,12 @@ async function transcribeOnServer(audioBlob) {
     throw new Error(error.detail?.message || 'Transcription failed');
   }
   const data = await response.json();
+  if (recordingCancelled || requestId !== recordingRequestId) return '';
   return _normalizeTranscript(data.text || '');
 }
 
 function insertTranscription(text, showToast, options = {}) {
+  if (recordingCancelled) return false;
   const transcript = _normalizeTranscript(text);
   if (!_hasFreshTranscript(transcript)) return false;
 
@@ -689,6 +695,9 @@ function initSttSettingsUi() {
 }
 
 export function startRecording(onFileCreated, showToast, showError, options = {}) {
+  recordingSessionId = options.sessionId || window.sessionModule?.getCurrentSessionId?.() || null;
+  recordingCancelled = false;
+  const requestId = ++recordingRequestId;
   const fromConversationLoop = options.fromConversationLoop === true;
   if (!fromConversationLoop && _conversationLoopAvailable()) {
     _loopActive = true;
@@ -723,6 +732,11 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
 
   navigator.mediaDevices.getUserMedia({ audio: true })
     .then((stream) => {
+      if (recordingCancelled || requestId !== recordingRequestId) {
+        try { stream.getTracks().forEach((track) => track.stop()); } catch (_) {}
+        _resetRecordingUi();
+        return;
+      }
       try { mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); }
       catch (_) { mediaRecorder = new MediaRecorder(stream); }
 
@@ -733,6 +747,12 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
         _stopVoiceActivityDetection();
+        if (recordingCancelled || requestId !== recordingRequestId) {
+          stopBrowserSTT();
+          audioChunks = [];
+          _releaseRecordingUi();
+          return;
+        }
         const stopReason = _recordingStopReason;
         const autoSubmit = _loopActive && stopReason === 'loop-auto';
         const discardForTts = _discardCurrentRecordingForTts || stopReason === 'loop-tts';
@@ -811,6 +831,10 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
       if (showToast) showToast(`Recording...${_loopActive ? ' · waiting for speech' : ''}`);
     })
     .catch((error) => {
+      if (recordingCancelled || requestId !== recordingRequestId) {
+        _resetRecordingUi();
+        return;
+      }
       console.error('Microphone access error:', error);
       if (showError) showError(`Microphone error: ${error.message}`);
       stopConversationLoop('silent');
@@ -833,6 +857,27 @@ export function stopRecording() {
   _stopRecordingInternal('manual');
 }
 
+export function cancelForMissionClose(sessionId) {
+  if (sessionId != null && recordingSessionId != null && String(sessionId) !== String(recordingSessionId)) {
+    return;
+  }
+  recordingCancelled = true;
+  recordingRequestId += 1;
+  stopConversationLoop('silent');
+  stopBrowserSTT();
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    try { mediaRecorder.stop(); } catch (_) {}
+  }
+  try {
+    if (mediaRecorder && mediaRecorder.stream) {
+      mediaRecorder.stream.getTracks().forEach((track) => track.stop());
+    }
+  } catch (_) {}
+  audioChunks = [];
+  recordingSessionId = null;
+  _resetRecordingUi();
+}
+
 export function getIsRecording() {
   return isRecording;
 }
@@ -847,6 +892,7 @@ export function init() {
 const voiceRecorderModule = {
   startRecording,
   stopRecording,
+  cancelForMissionClose,
   stopConversationLoop,
   getIsRecording,
   init,

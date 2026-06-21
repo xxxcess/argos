@@ -16,6 +16,7 @@ let sessions = [];
 let currentSessionId = null;
 let _sessionNavToken = 0;
 let _skipAutoSelect = false;
+const NEW_CHAT_DRAFT_KEY = 'odysseus-new-chat-draft';
 
 const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
@@ -26,6 +27,60 @@ let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
+
+function _readNewChatDraft() {
+  const draft = Storage.getJSON(NEW_CHAT_DRAFT_KEY, null);
+  return draft && typeof draft === 'object' ? draft : null;
+}
+
+function _writeNewChatDraft(draft = {}) {
+  Storage.setJSON(NEW_CHAT_DRAFT_KEY, Object.assign({ ts: Date.now() }, draft || {}));
+}
+
+function _clearNewChatDraft() {
+  Storage.remove(NEW_CHAT_DRAFT_KEY);
+}
+
+function _showNewChatUi({ focus = true } = {}) {
+  history.replaceState(null, '', window.location.pathname);
+  document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
+    el.classList.remove('active-session', 'active');
+  });
+
+  if (window.documentModule && window.documentModule.isPanelOpen && window.documentModule.isPanelOpen()) {
+    window.documentModule.closePanel();
+  }
+  const docBtn = document.getElementById('overflow-doc-btn');
+  if (docBtn) {
+    docBtn.classList.remove('active', 'has-docs');
+    docBtn.style.display = '';
+  }
+  const docInd = document.getElementById('doc-indicator-btn');
+  if (docInd) docInd.classList.remove('visible', 'active');
+
+  const box = document.getElementById('chat-history');
+  if (box) box.innerHTML = '';
+  if (window.chatModule && window.chatModule.showWelcomeScreen) {
+    window.chatModule.showWelcomeScreen();
+  }
+  updateModelPicker();
+
+  const metaEl = document.getElementById('current-meta');
+  if (metaEl) metaEl.textContent = 'New Chat';
+  const metaCountEl = document.getElementById('current-meta-count');
+  if (metaCountEl) metaCountEl.textContent = '';
+  const costEl = document.getElementById('session-cost-display');
+  if (costEl) {
+    costEl.textContent = '';
+    costEl.style.display = 'none';
+  }
+
+  const msgInput = document.getElementById('message');
+  if (msgInput) {
+    msgInput.disabled = false;
+    if (focus) msgInput.focus();
+  }
+}
 
 function _getIncognitoIds() {
   try { return JSON.parse(sessionStorage.getItem(_INCOGNITO_SESSIONS_KEY) || '[]'); } catch { return []; }
@@ -61,8 +116,9 @@ let _sessionListFocused = false;
 function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
+  _writeNewChatDraft({});
   uiModule.el('chat-history').innerHTML = '';
-  uiModule.el('current-meta').textContent = 'Odysseus Chat';
+  uiModule.el('current-meta').textContent = 'New Chat';
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   if (window.chatModule && window.chatModule.showWelcomeScreen) {
@@ -112,6 +168,19 @@ function _normalizeSessionsList(fetched) {
     unique.push(session);
   }
   return unique;
+}
+
+function _sessionActivityValue(session) {
+  return String(
+    session?.last_message_at ||
+    session?.updated_at ||
+    session?.created_at ||
+    ''
+  );
+}
+
+function _sortSessionsByActivity(rows) {
+  return rows.sort((a, b) => _sessionActivityValue(b).localeCompare(_sessionActivityValue(a)));
 }
 
 // Initialize dependencies from app.js (no-op: dependencies now imported directly)
@@ -1356,8 +1425,13 @@ export async function loadSessions() {
       const res = await fetch(`${API_BASE}/api/sessions`);
       fetched = await res.json();
     }
-    sessions = _normalizeSessionsList(fetched);
+    sessions = _sortSessionsByActivity(_normalizeSessionsList(fetched));
     renderSessionList();
+    try {
+      document.dispatchEvent(new CustomEvent('odysseus:sessions-updated', {
+        detail: { count: sessions.length }
+      }));
+    } catch (_) {}
 
     const sessionsSection = uiModule.el('sessions-section');
     if (sessions.length === 0) {
@@ -1384,9 +1458,18 @@ export async function loadSessions() {
         savedId = null;
       }
     }
-    const hasPendingChat = !!_pendingChat;
+    const persistedDraft = _readNewChatDraft();
+    const restoringNewChatDraft = !!(persistedDraft && !hashId && !savedId);
+    if (restoringNewChatDraft && !_pendingChat && (persistedDraft.url || persistedDraft.modelId || persistedDraft.endpointId)) {
+      _pendingChat = {
+        url: persistedDraft.url || '',
+        modelId: persistedDraft.modelId || '',
+        endpointId: persistedDraft.endpointId || '',
+      };
+    }
+    const hasNewChatDraft = !!_pendingChat || restoringNewChatDraft;
     let targetId = null;
-    if (hasPendingChat) {
+    if (hasNewChatDraft) {
       // A model was picked and the UI is showing a fresh New Chat, but the
       // session is not created until the first message. Background stream
       // completions call loadSessions() later; without this guard that reload
@@ -1424,7 +1507,7 @@ export async function loadSessions() {
     const _isFirstLoad = !sessionStorage.getItem('ody-session-active');
     if (_isFirstLoad) {
       sessionStorage.setItem('ody-session-active', '1');
-      if (!targetId) {
+      if (!targetId && !hasNewChatDraft) {
         try {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
@@ -1459,7 +1542,11 @@ export async function loadSessions() {
     }
 
     // No session selected — still enable input so slash commands (e.g. /setup) work
-    if (!targetId && !hasPendingChat) {
+    if (!targetId && hasNewChatDraft) {
+      _showNewChatUi({ focus: window.innerWidth > 768 });
+    }
+
+    if (!targetId && !hasNewChatDraft) {
       const msgInput = document.getElementById('message');
       if (msgInput) {
         msgInput.disabled = false;
@@ -1503,6 +1590,8 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     if (prevSessionId !== id && window.documentModule?.clearSelection) {
       try { window.documentModule.clearSelection(); } catch {}
     }
+    _pendingChat = null;
+    _clearNewChatDraft();
     currentSessionId = id;
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
@@ -1763,6 +1852,7 @@ let _pendingChat = null; // { url, modelId, endpointId }
 
 export function createDirectChat(url, modelId, endpointId) {
   _sessionNavToken++;
+  const previousSessionId = currentSessionId;
   // Detach any active stream so it doesn't interfere with the new chat
   if (window.chatModule && window.chatModule.detachCurrentStream) {
     window.chatModule.detachCurrentStream(currentSessionId);
@@ -1776,45 +1866,24 @@ export function createDirectChat(url, modelId, endpointId) {
 
   // Don't hit the API — just store the model info and prepare the UI
   _pendingChat = { url, modelId, endpointId };
+  _writeNewChatDraft({ url: url || '', modelId: modelId || '', endpointId: endpointId || '' });
   _skipAutoSelect = true;
   currentSessionId = null;
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:new-chat-start', {
+      detail: { previousSessionId }
+    }));
+  } catch (_) {}
   Storage.remove('lastSessionId');
-  history.replaceState(null, '', window.location.pathname);
-  document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
-    el.classList.remove('active-session', 'active');
-  });
+  _showNewChatUi();
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:new-chat-ready', {
+      detail: { previousSessionId }
+    }));
+  } catch (_) {}
 
-  // Close document panel — new chat has no docs
-  if (window.documentModule && window.documentModule.isPanelOpen()) {
-    window.documentModule.closePanel();
-  }
-  const docBtn = document.getElementById('overflow-doc-btn');
-  if (docBtn) {
-    docBtn.classList.remove('active', 'has-docs');
-    docBtn.style.display = ''; // show in overflow menu again
-  }
-  const docInd = document.getElementById('doc-indicator-btn');
-  if (docInd) docInd.classList.remove('visible', 'active');
-
-  // Clear chat area and show welcome
-  const box = document.getElementById('chat-history');
-  if (box) box.innerHTML = '';
-  if (window.chatModule && window.chatModule.showWelcomeScreen) {
-    window.chatModule.showWelcomeScreen();
-  }
-
-  // Update model picker to show the pending model
-  updateModelPicker();
-
-  // Update current-meta header
-  const metaEl = document.getElementById('current-meta');
-  if (metaEl) {
-    metaEl.textContent = 'New Chat';
-  }
-
-  // Enable input
   const msgInput = document.getElementById('message');
-  if (msgInput) { msgInput.disabled = false; msgInput.value = ''; msgInput.focus(); }
+  if (msgInput) msgInput.value = '';
 }
 
 /** Actually create the session in the DB. Called on first message send. */
@@ -1868,8 +1937,27 @@ export async function materializePendingSession() {
     try { window.documentModule.clearSelection(); } catch {}
   }
   currentSessionId = payload.id;
+  _clearNewChatDraft();
   Storage.set('lastSessionId', payload.id);
   history.replaceState(null, '', '#' + payload.id);
+  const metaEl = document.getElementById('current-meta');
+  if (metaEl) metaEl.textContent = payload.name || name || 'New Chat';
+  const metaCountEl = document.getElementById('current-meta-count');
+  if (metaCountEl) metaCountEl.textContent = '';
+  const costEl = document.getElementById('session-cost-display');
+  if (costEl) {
+    costEl.textContent = '';
+    costEl.style.display = 'none';
+  }
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:session-materialized', {
+      detail: {
+        sessionId: payload.id,
+        name: payload.name || name || '',
+        model: payload.model || pending.modelId || '',
+      }
+    }));
+  } catch (_) {}
 
   // Reload sidebar to show the new session — await it so the session
   // is fully registered before the caller proceeds (prevents race conditions)
@@ -1907,13 +1995,27 @@ export function getCurrentEndpointUrl() {
 
 export function setCurrentSessionId(id) {
   _sessionNavToken++;
+  if (id) {
+    _pendingChat = null;
+    _clearNewChatDraft();
+  }
   currentSessionId = id;
   if (!id) {
+    _writeNewChatDraft({});
     Storage.remove('lastSessionId');
     history.replaceState(null, '', window.location.pathname);
     document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
       el.classList.remove('active-session', 'active');
     });
+    const metaEl = document.getElementById('current-meta');
+    if (metaEl) metaEl.textContent = 'New Chat';
+    const metaCountEl = document.getElementById('current-meta-count');
+    if (metaCountEl) metaCountEl.textContent = '';
+    const costEl = document.getElementById('session-cost-display');
+    if (costEl) {
+      costEl.textContent = '';
+      costEl.style.display = 'none';
+    }
   }
 }
 
