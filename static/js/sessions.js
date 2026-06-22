@@ -16,6 +16,7 @@ let sessions = [];
 let currentSessionId = null;
 let _sessionNavToken = 0;
 let _skipAutoSelect = false;
+const NEW_CHAT_DRAFT_KEY = 'odysseus-new-chat-draft';
 
 const SIDEBAR_MAX_VISIBLE = 10;
 const FOLDER_MAX_VISIBLE = 5;
@@ -26,6 +27,106 @@ let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
+let _defaultChatCache = null;
+
+function _readNewChatDraft() {
+  const draft = Storage.getJSON(NEW_CHAT_DRAFT_KEY, null);
+  return draft && typeof draft === 'object' ? draft : null;
+}
+
+function _writeNewChatDraft(draft = {}) {
+  Storage.setJSON(NEW_CHAT_DRAFT_KEY, Object.assign({ ts: Date.now() }, draft || {}));
+}
+
+function _clearNewChatDraft() {
+  Storage.remove(NEW_CHAT_DRAFT_KEY);
+}
+
+async function _getDefaultChatConfig() {
+  const cached = _defaultChatCache || (window.__odysseusDefaultChat || null);
+  try {
+    const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
+    const dc = await res.json();
+    if (dc && dc.endpoint_url && dc.model) {
+      _defaultChatCache = dc;
+      try { window.__odysseusDefaultChat = dc; } catch (_) {}
+      return dc;
+    }
+  } catch (_) {}
+  return cached && cached.endpoint_url && cached.model ? cached : null;
+}
+
+async function _applyDefaultChatModelToSession(sessionId, meta) {
+  if (!sessionId || (meta && (meta.is_openclaw || sessionId === 'openclaw'))) return null;
+  const dc = await _getDefaultChatConfig();
+  if (!dc || !dc.endpoint_url || !dc.model) return null;
+  const currentModel = meta?.model || '';
+  const currentUrl = meta?.endpoint_url || '';
+  const currentEndpointId = meta?.endpoint_id || '';
+  if (currentModel === dc.model && currentUrl === dc.endpoint_url && String(currentEndpointId || '') === String(dc.endpoint_id || '')) {
+    return dc;
+  }
+
+  const fd = new FormData();
+  fd.append('model', dc.model);
+  fd.append('endpoint_url', dc.endpoint_url);
+  if (dc.endpoint_id) fd.append('endpoint_id', dc.endpoint_id);
+  fd.append('skip_validation', 'true');
+  const res = await fetch(`${API_BASE}/api/session/${sessionId}`, {
+    method: 'PATCH',
+    credentials: 'same-origin',
+    body: fd,
+  });
+  if (!res.ok) return null;
+  const sMeta = meta || sessions.find(s => String(s.id) === String(sessionId));
+  if (sMeta) {
+    sMeta.model = dc.model;
+    sMeta.endpoint_url = dc.endpoint_url;
+    sMeta.endpoint_id = dc.endpoint_id || sMeta.endpoint_id || '';
+  }
+  return dc;
+}
+
+function _showNewChatUi({ focus = true } = {}) {
+  history.replaceState(null, '', window.location.pathname);
+  document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
+    el.classList.remove('active-session', 'active');
+  });
+
+  if (window.documentModule && window.documentModule.isPanelOpen && window.documentModule.isPanelOpen()) {
+    window.documentModule.closePanel();
+  }
+  const docBtn = document.getElementById('overflow-doc-btn');
+  if (docBtn) {
+    docBtn.classList.remove('active', 'has-docs');
+    docBtn.style.display = '';
+  }
+  const docInd = document.getElementById('doc-indicator-btn');
+  if (docInd) docInd.classList.remove('visible', 'active');
+
+  const box = document.getElementById('chat-history');
+  if (box) box.innerHTML = '';
+  if (window.chatModule && window.chatModule.showWelcomeScreen) {
+    window.chatModule.showWelcomeScreen();
+  }
+  updateModelPicker();
+
+  const metaEl = document.getElementById('current-meta');
+  if (metaEl) metaEl.textContent = 'New Chat';
+  const metaCountEl = document.getElementById('current-meta-count');
+  if (metaCountEl) metaCountEl.textContent = '';
+  const costEl = document.getElementById('session-cost-display');
+  if (costEl) {
+    costEl.textContent = '';
+    costEl.style.display = 'none';
+  }
+
+  const msgInput = document.getElementById('message');
+  if (msgInput) {
+    msgInput.disabled = false;
+    if (focus) msgInput.focus();
+  }
+}
 
 function _getIncognitoIds() {
   try { return JSON.parse(sessionStorage.getItem(_INCOGNITO_SESSIONS_KEY) || '[]'); } catch { return []; }
@@ -61,8 +162,9 @@ let _sessionListFocused = false;
 function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
+  _writeNewChatDraft({});
   uiModule.el('chat-history').innerHTML = '';
-  uiModule.el('current-meta').textContent = 'Odysseus Chat';
+  uiModule.el('current-meta').textContent = 'New Chat';
   Storage.remove('lastSessionId');
   history.replaceState(null, '', window.location.pathname);
   if (window.chatModule && window.chatModule.showWelcomeScreen) {
@@ -112,6 +214,19 @@ function _normalizeSessionsList(fetched) {
     unique.push(session);
   }
   return unique;
+}
+
+function _sessionActivityValue(session) {
+  return String(
+    session?.last_message_at ||
+    session?.updated_at ||
+    session?.created_at ||
+    ''
+  );
+}
+
+function _sortSessionsByActivity(rows) {
+  return rows.sort((a, b) => _sessionActivityValue(b).localeCompare(_sessionActivityValue(a)));
 }
 
 // Initialize dependencies from app.js (no-op: dependencies now imported directly)
@@ -438,7 +553,7 @@ function createSessionItem(s) {
       if (dot) dot.click();
       return;
     }
-    selectSession(s.id);
+    openSidebarSession(s.id);
   });
 
   // Create a dropdown menu button
@@ -661,6 +776,10 @@ function createSessionItem(s) {
     if (wasCurrentSession && window.chatModule && window.chatModule.abortCurrentRequest) {
       window.chatModule.abortCurrentRequest();
     }
+    const idx = sessions.findIndex(x => String(x.id) === String(s.id));
+    const nextSession = sessions.filter(x => !x.archived && String(x.id) !== String(s.id))[Math.max(0, idx)] ||
+                        sessions.find(x => !x.archived && String(x.id) !== String(s.id));
+    const dashboardTargetId = wasCurrentSession ? nextSession?.id : currentSessionId;
     _deselectCurrentSession(s.id);
     _removeSessionFromLocalState(s.id);
     _skipAutoSelect = true;
@@ -683,6 +802,7 @@ function createSessionItem(s) {
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
     } catch (e) { /* network error — session may still exist server-side */ }
     await loadSessions();
+    window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);
   });
 
   archiveItem.addEventListener('click', async () => {
@@ -1356,8 +1476,13 @@ export async function loadSessions() {
       const res = await fetch(`${API_BASE}/api/sessions`);
       fetched = await res.json();
     }
-    sessions = _normalizeSessionsList(fetched);
+    sessions = _sortSessionsByActivity(_normalizeSessionsList(fetched));
     renderSessionList();
+    try {
+      document.dispatchEvent(new CustomEvent('odysseus:sessions-updated', {
+        detail: { count: sessions.length }
+      }));
+    } catch (_) {}
 
     const sessionsSection = uiModule.el('sessions-section');
     if (sessions.length === 0) {
@@ -1384,9 +1509,19 @@ export async function loadSessions() {
         savedId = null;
       }
     }
-    const hasPendingChat = !!_pendingChat;
+    const persistedDraft = _readNewChatDraft();
+    const restoringNewChatDraft = !!(persistedDraft && !hashId && !savedId);
+    if (restoringNewChatDraft && !_pendingChat && (persistedDraft.url || persistedDraft.modelId || persistedDraft.endpointId)) {
+      _pendingChat = {
+        url: persistedDraft.url || '',
+        modelId: persistedDraft.modelId || '',
+        endpointId: persistedDraft.endpointId || '',
+        source: persistedDraft.source || '',
+      };
+    }
+    const hasNewChatDraft = !!_pendingChat || restoringNewChatDraft;
     let targetId = null;
-    if (hasPendingChat) {
+    if (hasNewChatDraft) {
       // A model was picked and the UI is showing a fresh New Chat, but the
       // session is not created until the first message. Background stream
       // completions call loadSessions() later; without this guard that reload
@@ -1424,7 +1559,7 @@ export async function loadSessions() {
     const _isFirstLoad = !sessionStorage.getItem('ody-session-active');
     if (_isFirstLoad) {
       sessionStorage.setItem('ody-session-active', '1');
-      if (!targetId) {
+      if (!targetId && !hasNewChatDraft) {
         try {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
@@ -1436,7 +1571,7 @@ export async function loadSessions() {
             if (emptyDefault) {
               targetId = emptyDefault.id;
             } else {
-              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
               // On mobile, hide sidebar so user lands directly in chat
               if (window.innerWidth < 768) {
                 const sb = document.getElementById('sidebar');
@@ -1459,7 +1594,11 @@ export async function loadSessions() {
     }
 
     // No session selected — still enable input so slash commands (e.g. /setup) work
-    if (!targetId && !hasPendingChat) {
+    if (!targetId && hasNewChatDraft) {
+      _showNewChatUi({ focus: window.innerWidth > 768 });
+    }
+
+    if (!targetId && !hasNewChatDraft) {
       const msgInput = document.getElementById('message');
       if (msgInput) {
         msgInput.disabled = false;
@@ -1476,7 +1615,7 @@ export async function loadSessions() {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
           if (dc.endpoint_url && dc.model) {
-            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
           }
         } catch (_) { /* no default model — that's fine, user can /setup */ }
         _autoCreateInProgress = false;
@@ -1503,6 +1642,8 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     if (prevSessionId !== id && window.documentModule?.clearSelection) {
       try { window.documentModule.clearSelection(); } catch {}
     }
+    _pendingChat = null;
+    _clearNewChatDraft();
     currentSessionId = id;
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
@@ -1524,6 +1665,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       if (presetsModule && presetsModule.onSessionSwitch) presetsModule.onSessionSwitch(id);
     } catch (e) {}
     const meta = sessions.find(s => s.id === id);
+    const defaultChat = await _applyDefaultChatModelToSession(id, meta);
 
     // Detach any in-flight stream to background instead of aborting
     try {
@@ -1594,7 +1736,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       const data = await res.json();
       if (navToken !== _sessionNavToken || currentSessionId !== id) return;
       msgHistory = data.history || [];
-      modelName = data.model || null;
+      modelName = defaultChat?.model || data.model || null;
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached
       // session meta and refresh the picker so the displayed model can
@@ -1759,10 +1901,11 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
 }
 
 // Pending session — stored locally until the first message is sent
-let _pendingChat = null; // { url, modelId, endpointId }
+let _pendingChat = null; // { url, modelId, endpointId, source }
 
-export function createDirectChat(url, modelId, endpointId) {
+export function createDirectChat(url, modelId, endpointId, options = {}) {
   _sessionNavToken++;
+  const previousSessionId = currentSessionId;
   // Detach any active stream so it doesn't interfere with the new chat
   if (window.chatModule && window.chatModule.detachCurrentStream) {
     window.chatModule.detachCurrentStream(currentSessionId);
@@ -1775,46 +1918,30 @@ export function createDirectChat(url, modelId, endpointId) {
   }
 
   // Don't hit the API — just store the model info and prepare the UI
-  _pendingChat = { url, modelId, endpointId };
+  _pendingChat = { url, modelId, endpointId, source: options.source || 'user' };
+  _writeNewChatDraft({
+    url: url || '',
+    modelId: modelId || '',
+    endpointId: endpointId || '',
+    source: _pendingChat.source || '',
+  });
   _skipAutoSelect = true;
   currentSessionId = null;
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:new-chat-start', {
+      detail: { previousSessionId }
+    }));
+  } catch (_) {}
   Storage.remove('lastSessionId');
-  history.replaceState(null, '', window.location.pathname);
-  document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
-    el.classList.remove('active-session', 'active');
-  });
+  _showNewChatUi();
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:new-chat-ready', {
+      detail: { previousSessionId }
+    }));
+  } catch (_) {}
 
-  // Close document panel — new chat has no docs
-  if (window.documentModule && window.documentModule.isPanelOpen()) {
-    window.documentModule.closePanel();
-  }
-  const docBtn = document.getElementById('overflow-doc-btn');
-  if (docBtn) {
-    docBtn.classList.remove('active', 'has-docs');
-    docBtn.style.display = ''; // show in overflow menu again
-  }
-  const docInd = document.getElementById('doc-indicator-btn');
-  if (docInd) docInd.classList.remove('visible', 'active');
-
-  // Clear chat area and show welcome
-  const box = document.getElementById('chat-history');
-  if (box) box.innerHTML = '';
-  if (window.chatModule && window.chatModule.showWelcomeScreen) {
-    window.chatModule.showWelcomeScreen();
-  }
-
-  // Update model picker to show the pending model
-  updateModelPicker();
-
-  // Update current-meta header
-  const metaEl = document.getElementById('current-meta');
-  if (metaEl) {
-    metaEl.textContent = 'New Chat';
-  }
-
-  // Enable input
   const msgInput = document.getElementById('message');
-  if (msgInput) { msgInput.disabled = false; msgInput.value = ''; msgInput.focus(); }
+  if (msgInput) msgInput.value = '';
 }
 
 /** Actually create the session in the DB. Called on first message send. */
@@ -1868,8 +1995,27 @@ export async function materializePendingSession() {
     try { window.documentModule.clearSelection(); } catch {}
   }
   currentSessionId = payload.id;
+  _clearNewChatDraft();
   Storage.set('lastSessionId', payload.id);
   history.replaceState(null, '', '#' + payload.id);
+  const metaEl = document.getElementById('current-meta');
+  if (metaEl) metaEl.textContent = payload.name || name || 'New Chat';
+  const metaCountEl = document.getElementById('current-meta-count');
+  if (metaCountEl) metaCountEl.textContent = '';
+  const costEl = document.getElementById('session-cost-display');
+  if (costEl) {
+    costEl.textContent = '';
+    costEl.style.display = 'none';
+  }
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:session-materialized', {
+      detail: {
+        sessionId: payload.id,
+        name: payload.name || name || '',
+        model: payload.model || pending.modelId || '',
+      }
+    }));
+  } catch (_) {}
 
   // Reload sidebar to show the new session — await it so the session
   // is fully registered before the caller proceeds (prevents race conditions)
@@ -1907,14 +2053,37 @@ export function getCurrentEndpointUrl() {
 
 export function setCurrentSessionId(id) {
   _sessionNavToken++;
+  if (id) {
+    _pendingChat = null;
+    _clearNewChatDraft();
+  }
   currentSessionId = id;
   if (!id) {
+    _writeNewChatDraft({});
     Storage.remove('lastSessionId');
     history.replaceState(null, '', window.location.pathname);
     document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
       el.classList.remove('active-session', 'active');
     });
+    const metaEl = document.getElementById('current-meta');
+    if (metaEl) metaEl.textContent = 'New Chat';
+    const metaCountEl = document.getElementById('current-meta-count');
+    if (metaCountEl) metaCountEl.textContent = '';
+    const costEl = document.getElementById('session-cost-display');
+    if (costEl) {
+      costEl.textContent = '';
+      costEl.style.display = 'none';
+    }
   }
+}
+
+function openSidebarSession(sessionId) {
+  if (!sessionId) return;
+  if (window.sessionControlModule?.viewFullConversation) {
+    window.sessionControlModule.viewFullConversation(sessionId);
+    return;
+  }
+  selectSession(sessionId);
 }
 
 // Session list keyboard navigation: arrows to move, Delete to delete
@@ -1951,9 +2120,15 @@ async function _onSessionListKeydown(e) {
     if (!ok) return;
     _sessionListFocused = true;
     (async () => {
+      const wasCurrentSession = String(currentSessionId || '') === String(s.id);
+      const idx = sessions.findIndex(x => String(x.id) === String(s.id));
+      const nextSession = sessions.filter(x => !x.archived && String(x.id) !== String(s.id))[Math.max(0, idx)] ||
+                          sessions.find(x => !x.archived && String(x.id) !== String(s.id));
+      const dashboardTargetId = wasCurrentSession ? nextSession?.id : currentSessionId;
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
       _deselectCurrentSession(s.id);
       await loadSessions();
+      window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);
     })();
     return;
   }
@@ -1961,7 +2136,7 @@ async function _onSessionListKeydown(e) {
   if (e.key === 'Enter') {
     e.preventDefault();
     const sid = item.dataset.sessionId;
-    if (sid) selectSession(sid);
+    if (sid) openSidebarSession(sid);
     return;
   }
 }

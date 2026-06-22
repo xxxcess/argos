@@ -1,6 +1,22 @@
 // static/js/tts-ai.js
 // AI Text-to-Speech Module — supports server TTS and browser Web Speech API
 
+const TTS_INCLUDE_THINKING_STORAGE_KEY = 'odysseus-tts-include-thinking';
+
+function readStoredIncludeThinking() {
+    try {
+        return localStorage.getItem(TTS_INCLUDE_THINKING_STORAGE_KEY) === 'true';
+    } catch (_) {
+        return false;
+    }
+}
+
+function writeStoredIncludeThinking(value) {
+    try {
+        localStorage.setItem(TTS_INCLUDE_THINKING_STORAGE_KEY, value ? 'true' : 'false');
+    } catch (_) {}
+}
+
 class AITTSManager {
     constructor() {
         this.currentAudio = null;
@@ -11,11 +27,15 @@ class AITTSManager {
         this.playbackSpeed = 1;
         this._provider = 'disabled';
         this.autoPlay = false;
+        this.includeThinkingSections = readStoredIncludeThinking();
         this.cache = new Map(); // Client-side audio cache
 
         // Queue for sequential auto-play
         this._queue = [];       // Array of { text, button, resetFn }
         this._processing = false;
+        this._latestFinalTimer = null;
+        this._pendingLatestFinal = null;
+        this._latestFinalDelayMs = 1200;
 
         // Streaming sentence-by-sentence TTS state
         this._streamSentencesSent = 0;  // chars of plain text already queued
@@ -23,9 +43,19 @@ class AITTSManager {
         this._streamButton = null;
         this._streamResetFn = null;
         this._streamDebounceTimer = null;
+        this._streamSessionId = null;
+        this.activeSessionId = null;
+        this.ttsEnabledForActiveMission = true;
+        this._disabledAutoSessions = new Set();
 
         // Check if TTS service is available
         this.checkAvailability();
+    }
+
+    setIncludeThinkingSections(value) {
+        this.includeThinkingSections = !!value;
+        writeStoredIncludeThinking(this.includeThinkingSections);
+        this.clearCache();
     }
 
     async checkAvailability() {
@@ -34,6 +64,10 @@ class AITTSManager {
             try {
                 const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
                 const settings = await settingsRes.json();
+                if (Object.prototype.hasOwnProperty.call(settings || {}, 'tts_include_thinking')) {
+                    this.includeThinkingSections = settings.tts_include_thinking === true;
+                    writeStoredIncludeThinking(this.includeThinkingSections);
+                }
                 if (settings.tts_enabled === false) {
                     this.available = false;
                     this._provider = 'disabled';
@@ -66,12 +100,40 @@ class AITTSManager {
     }
 
     extractPlainText(content) {
-        // Strip <think>/<thinking> blocks (model reasoning)
-        let cleaned = content.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '');
+        const rawContent = String(content || '');
+        let cleaned;
+
+        if (this.includeThinkingSections) {
+            // Keep model thinking text for users who explicitly opt in, but
+            // remove raw reasoning wrappers/channel markers so the spoken text
+            // does not include implementation tags.
+            cleaned = rawContent
+                .replace(/<\/?(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi, '')
+                .replace(/<\|channel>thought\s*/gi, '')
+                .replace(/<\|channel>response\s*/gi, '')
+                .replace(/<channel\|>/gi, '');
+        } else {
+            // Strip raw model reasoning before any HTML parsing.
+            cleaned = rawContent
+                .replace(/<think(?:ing)?(?:\s+[^>]*)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+                .replace(/<thought(?:\s+[^>]*)?>[\s\S]*?<\/thought>/gi, '')
+                .replace(/<\|channel>thought[\s\S]*?<channel\|>/gi, '');
+        }
 
         // Create a temporary div to parse HTML/markdown
         const temp = document.createElement('div');
         temp.innerHTML = cleaned;
+
+        if (this.includeThinkingSections) {
+            // Rendered thinking sections include clickable headers such as
+            // "View thinking process". Keep the inner reasoning content but
+            // remove controls/labels so those UI words are not read aloud.
+            temp.querySelectorAll('.thinking-header, .thinking-toggle').forEach(el => el.remove());
+        } else {
+            // The markdown renderer turns reasoning into collapsible sections.
+            // textContent would otherwise include that collapsed content.
+            temp.querySelectorAll('.thinking-section').forEach(el => el.remove());
+        }
 
         // Remove code blocks
         temp.querySelectorAll('pre, code').forEach(el => el.remove());
@@ -219,6 +281,15 @@ class AITTSManager {
     }
 
     stop() {
+        if (this._latestFinalTimer) {
+            clearTimeout(this._latestFinalTimer);
+            this._latestFinalTimer = null;
+        }
+        if (this._pendingLatestFinal && this._pendingLatestFinal.resetFn) {
+            this._pendingLatestFinal.resetFn();
+        }
+        this._pendingLatestFinal = null;
+
         // Cancel streaming TTS
         this._streamActive = false;
         if (this._streamDebounceTimer) {
@@ -246,6 +317,35 @@ class AITTSManager {
         }
     }
 
+    setActiveMissionSession(sessionId, enabled = true) {
+        this.activeSessionId = sessionId || null;
+        this.ttsEnabledForActiveMission = enabled !== false;
+        if (this.activeSessionId && this.ttsEnabledForActiveMission) {
+            this._disabledAutoSessions.delete(String(this.activeSessionId));
+        }
+    }
+
+    disableAutomaticForSession(sessionId) {
+        if (sessionId != null) this._disabledAutoSessions.add(String(sessionId));
+        if (this.activeSessionId != null && String(this.activeSessionId) === String(sessionId)) {
+            this.activeSessionId = null;
+        }
+    }
+
+    canAutoSpeakForSession(sessionId) {
+        if (!sessionId) return false;
+        if (this._disabledAutoSessions.has(String(sessionId))) return false;
+        if (!this.ttsEnabledForActiveMission) return false;
+        if (!this.activeSessionId || String(this.activeSessionId) !== String(sessionId)) return false;
+        return true;
+    }
+
+    stopForMissionClose(sessionId) {
+        this.disableAutomaticForSession(sessionId);
+        this.ttsEnabledForActiveMission = false;
+        this.stop();
+    }
+
     /**
      * Enqueue a message for auto-play. Plays sequentially — each message
      * finishes before the next starts. Stopping any message clears the queue.
@@ -255,6 +355,20 @@ class AITTSManager {
         if (!this._processing) {
             this._processQueue();
         }
+    }
+
+    enqueueLatestFinal(text, button, resetFn, sessionId) {
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) return;
+        this.stop();
+        this._pendingLatestFinal = { text, button, resetFn, sessionId };
+        this._latestFinalTimer = setTimeout(() => {
+            const pending = this._pendingLatestFinal;
+            this._latestFinalTimer = null;
+            this._pendingLatestFinal = null;
+            if (!pending) return;
+            if (pending.sessionId && !this.canAutoSpeakForSession(pending.sessionId)) return;
+            this.enqueue(pending.text, pending.button, pending.resetFn);
+        }, this._latestFinalDelayMs);
     }
 
     async _processQueue() {
@@ -341,23 +455,31 @@ class AITTSManager {
 
     // ── Streaming TTS (sentence-by-sentence) ──
 
-    streamingStart() {
+    streamingStart(sessionId) {
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) {
+            this._streamActive = false;
+            return;
+        }
+        this._streamSessionId = sessionId || this.activeSessionId || null;
         this._streamSentencesSent = 0;
         this._streamActive = true;
         this._streamButton = null;
         this._streamResetFn = null;
     }
 
-    streamingUpdate(accumulatedText) {
+    streamingUpdate(accumulatedText, sessionId) {
+        var targetSession = sessionId || this._streamSessionId;
+        if (targetSession && !this.canAutoSpeakForSession(targetSession)) return;
         if (!this._streamActive || !this.available || !this.autoPlay) return;
         if (this._streamDebounceTimer) return;
         this._streamDebounceTimer = setTimeout(() => {
             this._streamDebounceTimer = null;
-            this._processStreamingSentences(accumulatedText);
+            this._processStreamingSentences(accumulatedText, targetSession);
         }, 150);
     }
 
-    _processStreamingSentences(accumulatedText) {
+    _processStreamingSentences(accumulatedText, sessionId) {
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) return;
         if (!this._streamActive) return;
 
         var text = accumulatedText
@@ -420,7 +542,13 @@ class AITTSManager {
         }
     }
 
-    streamingEnd(finalText) {
+    streamingEnd(finalText, sessionId) {
+        var targetSession = sessionId || this._streamSessionId;
+        if (targetSession && !this.canAutoSpeakForSession(targetSession)) {
+            this._streamActive = false;
+            this._streamSentencesSent = 0;
+            return;
+        }
         if (!this._streamActive) return;
         this._streamActive = false;
         if (this._streamDebounceTimer) {
@@ -452,8 +580,100 @@ class AITTSManager {
     }
 }
 
+function mountTtsThinkingSettingsUi() {
+    const ttsToggle = document.getElementById('set-ttsEnabledToggle');
+    const defaultMsg = document.getElementById('set-defaultChatMsg');
+    if (!ttsToggle || !defaultMsg) return false;
+
+    const ttsCard = ttsToggle.closest('.admin-card');
+    const defaultCard = defaultMsg.closest('.admin-card');
+    if (!ttsCard || !defaultCard) return false;
+
+    ttsCard.hidden = false;
+    ttsCard.style.removeProperty('display');
+    if (ttsCard.style.display === 'none') ttsCard.style.display = '';
+
+    if (defaultCard.nextSibling !== ttsCard) {
+        defaultCard.parentNode.insertBefore(ttsCard, defaultCard.nextSibling);
+    }
+
+    let includeToggle = document.getElementById('set-ttsIncludeThinkingToggle');
+    if (!includeToggle) {
+        const row = document.createElement('div');
+        row.className = 'settings-row';
+        row.id = 'set-ttsIncludeThinkingRow';
+        row.innerHTML = `
+          <label class="settings-label">Read thinking</label>
+          <div style="flex:1;display:flex;align-items:center;gap:8px;justify-content:space-between;">
+            <span class="admin-toggle-sub" style="margin:0;">Include model thinking/reasoning sections during read-aloud.</span>
+            <label class="admin-switch" title="Read thinking sections during TTS playback">
+              <input type="checkbox" id="set-ttsIncludeThinkingToggle">
+              <span class="admin-slider"></span>
+            </label>
+          </div>`;
+
+        const previewBtn = document.getElementById('set-ttsPreviewBtn');
+        const configWrap = previewBtn ? previewBtn.parentNode : ttsCard.querySelector('div[style*="flex-direction"]');
+        if (configWrap && previewBtn) configWrap.insertBefore(row, previewBtn);
+        else if (configWrap) configWrap.appendChild(row);
+        else ttsCard.appendChild(row);
+        includeToggle = document.getElementById('set-ttsIncludeThinkingToggle');
+    }
+
+    if (!includeToggle) return true;
+    const manager = window.aiTTSManager;
+    includeToggle.checked = manager ? manager.includeThinkingSections === true : readStoredIncludeThinking();
+
+    if (!includeToggle.dataset.boundTtsThinking) {
+        includeToggle.dataset.boundTtsThinking = '1';
+        includeToggle.addEventListener('change', async function() {
+            const value = includeToggle.checked;
+            if (window.aiTTSManager) window.aiTTSManager.setIncludeThinkingSections(value);
+            else writeStoredIncludeThinking(value);
+
+            try {
+                await fetch('/api/auth/settings', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tts_include_thinking: value })
+                });
+            } catch (_) {}
+            fetch('/api/tts/clear-cache', { method: 'POST', credentials: 'same-origin' }).catch(function(){});
+        });
+    }
+
+    fetch('/api/auth/settings', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(settings => {
+            if (Object.prototype.hasOwnProperty.call(settings || {}, 'tts_include_thinking')) {
+                const value = settings.tts_include_thinking === true;
+                includeToggle.checked = value;
+                if (window.aiTTSManager) window.aiTTSManager.setIncludeThinkingSections(value);
+                else writeStoredIncludeThinking(value);
+            }
+        })
+        .catch(function(){});
+
+    return true;
+}
+
+function initTtsThinkingSettingsUi() {
+    if (typeof document === 'undefined') return;
+    if (mountTtsThinkingSettingsUi()) return;
+    const observer = new MutationObserver(function() {
+        if (mountTtsThinkingSettingsUi()) observer.disconnect();
+    });
+    const start = function() {
+        if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+    else start();
+}
+
 // Create global AI TTS manager instance
 window.aiTTSManager = new AITTSManager();
+initTtsThinkingSettingsUi();
 
 // Function to add AI TTS button to a message element's action bar
 export function addAITTSButton(messageElement, text) {

@@ -92,38 +92,47 @@ function _modelExists(modelId, url) {
   });
 }
 
+function _defaultChatFromCache() {
+  const dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
+  if (!dc || !dc.model) return null;
+  return dc;
+}
+
 async function _ensureDefaultPendingChat() {
   if (!_deps || _defaultChatPickInFlight) return;
   if (_deps.getCurrentSessionId && _deps.getCurrentSessionId()) return;
+
   const pending = _deps.getPendingChat && _deps.getPendingChat();
-  if (pending && pending.modelId) return;
+  if (pending && pending.modelId && pending.source === 'user') return;
+
   _defaultChatPickInFlight = true;
   try {
     let dc = null;
+
     try {
-      const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
+      const res = await fetch(`${API_BASE}/api/default-chat`, {
+        credentials: 'same-origin',
+      });
       if (res.ok) dc = await res.json();
     } catch (_) {}
-    if (dc && dc.endpoint_url && dc.model) {
-      _deps.setPendingChat({
-        url: dc.endpoint_url,
-        modelId: dc.model,
-        endpointId: dc.endpoint_id || '',
-      });
-      try { window.__odysseusDefaultChat = dc; } catch (_) {}
-      updateModelPicker();
-      return;
+
+    const latestPending = _deps.getPendingChat && _deps.getPendingChat();
+    if (latestPending && latestPending.modelId && latestPending.source === 'user') return;
+
+    if (!dc || !dc.endpoint_url || !dc.model) {
+      dc = _defaultChatFromCache();
     }
-    // No configured default: preserve the old convenience fallback.
-    if (window.modelsModule && window.modelsModule.getCachedItems) {
-      const items = window.modelsModule.getCachedItems();
-      const first = items.find(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
-      if (first) {
-        const models = (first.models || []).concat(first.models_extra || []);
-        _deps.setPendingChat({ url: first.url, modelId: models[0], endpointId: first.endpoint_id });
-        updateModelPicker();
-      }
-    }
+
+    if (!dc || !dc.endpoint_url || !dc.model) return;
+
+    _deps.setPendingChat({
+      url: dc.endpoint_url,
+      modelId: dc.model,
+      endpointId: dc.endpoint_id || '',
+      source: 'default',
+    });
+    try { window.__odysseusDefaultChat = dc; } catch (_) {}
+    updateModelPicker();
   } finally {
     _defaultChatPickInFlight = false;
   }
@@ -538,7 +547,7 @@ function _initModelPickerDropdown() {
     }
     if (!currentSessionId && _pendingChat) {
       // Already have a deferred session — just update the model
-      _deps.setPendingChat({ url: m.url, modelId: m.mid, endpointId: m.endpointId });
+      _deps.setPendingChat({ url: m.url, modelId: m.mid, endpointId: m.endpointId, source: 'user' });
       // Header stays as session name — model switch only updates picker
       updateModelPicker();
       uiModule.showToast(`Using ${m.display}`);
@@ -715,7 +724,7 @@ export function updateModelPicker() {
     if (!_modelExists(modelId, s.endpoint_url || '')) {
       modelId = null;
     }
-  } else if (_pendingChat && _pendingChat.modelId) {
+  } else if (_pendingChat && _pendingChat.modelId && _pendingChat.source === 'user') {
     modelId = _pendingChat.modelId;
     if (!_modelExists(modelId, _pendingChat.url || '')) {
       _deps.setPendingChat(null);
@@ -743,12 +752,43 @@ export function updateModelPicker() {
       const fallback = items.find(item => !item.offline && (item.models || []).length > 0);
       if (fallback) {
         modelId = fallback.models[0];
-        _deps.setPendingChat({ url: fallback.url, modelId, endpointId: fallback.endpoint_id });
+        _deps.setPendingChat({ url: fallback.url, modelId, endpointId: fallback.endpoint_id, source: 'auto' });
       }
     }
   }
-  if (!modelId && !_autoSelectingDefault && window.modelsModule && window.modelsModule.getCachedItems) {
-    _ensureDefaultPendingChat();
+  if (!modelId) {
+    const dc = _defaultChatFromCache();
+    if (dc && _modelExists(dc.model, dc.endpoint_url || '')) {
+      modelId = dc.model;
+      if (!currentSessionId) {
+        _deps.setPendingChat({
+          url: dc.endpoint_url || '',
+          modelId,
+          endpointId: dc.endpoint_id || '',
+          source: 'default',
+        });
+      }
+    }
+  }
+
+  if (!modelId && !currentSessionId && !_autoSelectingDefault && window.modelsModule && window.modelsModule.getCachedItems) {
+    void _ensureDefaultPendingChat();
+
+    const items = window.modelsModule.getCachedItems();
+    const first = items.find(item =>
+      !item.offline && ((item.models || []).length || (item.models_extra || []).length)
+    );
+
+    if (first) {
+      const models = (first.models || []).concat(first.models_extra || []);
+      modelId = models[0];
+      _deps.setPendingChat({
+        url: first.url,
+        modelId,
+        endpointId: first.endpoint_id || '',
+        source: 'auto',
+      });
+    }
   }
 
   const displayName = modelId ? modelId.split('/').pop() : 'Select model';

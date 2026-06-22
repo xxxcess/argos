@@ -106,6 +106,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // Background streaming support
   const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics }
   const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
+  const _streamSnapshots = new Map();    // sessionId -> dashboard-facing stream snapshot
+  const _streamSubscribers = new Map();  // sessionId -> Set<listener>
+  const _allStreamSubscribers = new Set();
   let _streamSessionId = null; // Session ID for the currently active reader loop
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
@@ -114,6 +117,119 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   function hasActiveStream(sessionId) {
     return _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
            _resumingStreams.has(sessionId);
+  }
+
+  function _sessionMeta(sessionId) {
+    try { return sessionModule.getSessions().find(s => String(s.id) === String(sessionId)) || null; }
+    catch (_) { return null; }
+  }
+
+  function _snapshotFromEntry(sessionId, entry, patch) {
+    const meta = _sessionMeta(sessionId);
+    const now = Date.now();
+    const base = _streamSnapshots.get(sessionId) || {
+      sessionId,
+      status: 'idle',
+      latestPrompt: '',
+      latestResponse: '',
+      accumulatedResponse: '',
+      startedAt: now,
+      updatedAt: now,
+      error: null,
+      toolActivity: [],
+      sources: null,
+      metrics: null,
+      isBackground: false,
+      model: meta && meta.model || '',
+      provider: meta && meta.provider || '',
+      title: meta && meta.name || 'Untitled',
+      unreadCompletion: false,
+      needsAttention: false,
+    };
+    const accumulatedResponse = patch && Object.prototype.hasOwnProperty.call(patch, 'accumulatedResponse')
+      ? patch.accumulatedResponse
+      : (entry && entry.accumulated) || base.accumulatedResponse || '';
+    return Object.assign({}, base, {
+      title: meta && meta.name || base.title || 'Untitled',
+      model: meta && meta.model || base.model || '',
+      provider: meta && meta.provider || base.provider || '',
+      latestPrompt: (entry && entry.query) || base.latestPrompt || '',
+      latestResponse: accumulatedResponse,
+      accumulatedResponse,
+      sources: entry && entry.sourcesHtml || base.sources || null,
+      metrics: entry && entry.metrics || base.metrics || null,
+      updatedAt: now,
+    }, patch || {});
+  }
+
+  function _publishStreamSnapshot(sessionId, patch) {
+    if (!sessionId) return null;
+    const entry = _backgroundStreams.get(sessionId) || null;
+    const snapshot = _snapshotFromEntry(sessionId, entry, patch);
+    _streamSnapshots.set(sessionId, snapshot);
+    const perSession = _streamSubscribers.get(sessionId);
+    if (perSession) {
+      perSession.forEach(listener => { try { listener(snapshot); } catch (e) { console.warn('stream subscriber failed:', e); } });
+    }
+    _allStreamSubscribers.forEach(listener => { try { listener(snapshot); } catch (e) { console.warn('stream subscriber failed:', e); } });
+    try {
+      document.dispatchEvent(new CustomEvent('odysseus:stream-snapshot', { detail: snapshot }));
+    } catch (_) {}
+    return snapshot;
+  }
+
+  export function getSessionStreamSnapshot(sessionId) {
+    if (!sessionId) return null;
+    if (_backgroundStreams.has(sessionId)) {
+      return _snapshotFromEntry(sessionId, _backgroundStreams.get(sessionId), {
+        isBackground: sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sessionId,
+      });
+    }
+    return _streamSnapshots.get(sessionId) || null;
+  }
+
+  export function subscribeToSessionStream(sessionId, listener) {
+    if (!sessionId || typeof listener !== 'function') return function(){};
+    let set = _streamSubscribers.get(sessionId);
+    if (!set) {
+      set = new Set();
+      _streamSubscribers.set(sessionId, set);
+    }
+    set.add(listener);
+    const snapshot = getSessionStreamSnapshot(sessionId);
+    if (snapshot) setTimeout(() => listener(snapshot), 0);
+    return function unsubscribe() {
+      set.delete(listener);
+      if (!set.size) _streamSubscribers.delete(sessionId);
+    };
+  }
+
+  export function subscribeToAllStreams(listener) {
+    if (typeof listener !== 'function') return function(){};
+    _allStreamSubscribers.add(listener);
+    setTimeout(() => {
+      _streamSnapshots.forEach(snapshot => listener(snapshot));
+      _backgroundStreams.forEach((entry, sessionId) => listener(getSessionStreamSnapshot(sessionId)));
+    }, 0);
+    return function unsubscribe() { _allStreamSubscribers.delete(listener); };
+  }
+
+  export function getBackgroundStreams() {
+    const out = [];
+    _backgroundStreams.forEach((entry, sessionId) => {
+      out.push(getSessionStreamSnapshot(sessionId) || _snapshotFromEntry(sessionId, entry, {}));
+    });
+    return out;
+  }
+
+  export function getSessionStatus(sessionId) {
+    const snapshot = getSessionStreamSnapshot(sessionId);
+    if (snapshot) return snapshot.status;
+    if (sessionModule && sessionModule.getSessions) {
+      const meta = sessionModule.getSessions().find(s => String(s.id) === String(sessionId));
+      if (meta && meta.archived) return 'archived';
+    }
+    return 'idle';
   }
 
   // Sources box builder and toggleSources are now in chatRenderer.js
@@ -290,8 +406,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       return;
     }
 
-    // If currently streaming, stop it
-    if (isStreaming) {
+    // If currently streaming, stop it. Use the button mode as a fallback
+    // because the renderer may have detached while the composer still shows
+    // the stop control.
+    if (isStreaming || submitBtn?.dataset?.mode === 'streaming') {
+      if (window.aiTTSManager?.stop) window.aiTTSManager.stop();
       // Cancel server-side research if in progress
       const _cancelSid = sessionModule.getCurrentSessionId();
       if (_cancelSid && _researchingStreamIds.has(_cancelSid)) {
@@ -477,6 +596,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
 
     if (!sessionModule.getCurrentSessionId()) {
+      if (window.createDirectChatFromPreferredModel) {
+        const created = await window.createDirectChatFromPreferredModel();
+        if (created && sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
+          const ok = await sessionModule.materializePendingSession();
+          if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
+        } else if (created && sessionModule.getCurrentSessionId()) {
+          // The helper may eventually create a durable session directly.
+        }
+      }
+    }
+
+    if (!sessionModule.getCurrentSessionId()) {
       // Auto-create a session using default chat config. Always fetch fresh
       // so that a recent Settings change takes effect without a page reload.
       try {
@@ -491,7 +622,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
         }
         if (dc.endpoint_url && dc.model) {
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
           const ok = await sessionModule.materializePendingSession();
           if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
         } else {
@@ -543,6 +674,25 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     _streamSessionId = streamSessionId;
     const streamQuery = msg;
     _lastReaderActivity = Date.now();
+    if (window.aiTTSManager?.autoPlay && (!window.aiTTSManager.canAutoSpeakForSession || window.aiTTSManager.canAutoSpeakForSession(streamSessionId))) {
+      window.aiTTSManager.stop();
+    }
+    _publishStreamSnapshot(streamSessionId, {
+      status: 'streaming',
+      latestPrompt: streamQuery,
+      latestResponse: '',
+      accumulatedResponse: '',
+      startedAt: Date.now(),
+      isBackground: false,
+      error: null,
+      needsAttention: false,
+      unreadCompletion: false,
+    });
+    try {
+      document.dispatchEvent(new CustomEvent('odysseus:mission-stream-start', {
+        detail: { sessionId: streamSessionId, prompt: streamQuery }
+      }));
+    } catch (_) {}
 
     // Acquire Web Lock to hint browser not to discard this tab while streaming
     if (navigator.locks) {
@@ -1025,9 +1175,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let metrics = null;
       let isThinking = false;
       let thinkingStartTime = null;
-      // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
-      if (streamingTTS) window.aiTTSManager.streamingStart();
+      // Auto TTS is final-only: wait until the assistant response completes,
+      // then speak only the latest completed model message.
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
       let roundText = '';             // Text accumulated for current round
@@ -1307,6 +1456,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 query: streamQuery,
                 metrics: null,
               });
+              _publishStreamSnapshot(streamSessionId, {
+                status: 'streaming',
+                latestPrompt: streamQuery,
+                latestResponse: accumulated,
+                accumulatedResponse: accumulated,
+                isBackground: true,
+              });
               if (sessionModule && sessionModule.markStreaming) {
                 sessionModule.markStreaming(streamSessionId);
               }
@@ -1319,6 +1475,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               if (bgDone) {
                 bgDone.status = 'completed';
                 bgDone.accumulated = accumulated;
+                _publishStreamSnapshot(streamSessionId, {
+                  status: 'complete',
+                  latestPrompt: streamQuery,
+                  latestResponse: accumulated,
+                  accumulatedResponse: accumulated,
+                  isBackground: _isBg,
+                  unreadCompletion: !!_isBg,
+                  needsAttention: !!_isBg,
+                });
                 if (_isBg) {
                   try {
                     _notifyStreamComplete(streamSessionId, streamQuery);
@@ -1427,6 +1592,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 accumulated += _delta;
                 roundText += _delta;
                 currentAccumulated = accumulated; // Update global tracker
+                _publishStreamSnapshot(streamSessionId, {
+                  status: 'streaming',
+                  latestPrompt: streamQuery,
+                  latestResponse: accumulated,
+                  accumulatedResponse: accumulated,
+                  isBackground: _isBg,
+                });
                 // First token arrived — switch stop button from processing to streaming
                 if (wasEmpty && submitBtn && !_isBg) {
                   submitBtn.dataset.phase = 'receiving';
@@ -1667,8 +1839,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (spinner && spinner.element) spinner.destroy();
                   _renderStream();
                   _scheduleThinkingSpinner();
-                  // Feed streaming TTS with accumulated text
-                  if (streamingTTS) window.aiTTSManager.streamingUpdate(roundText);
                 }
               } else if (json.type === 'research_progress') {
                 if (_isBg) continue; // Skip DOM updates in background
@@ -2375,7 +2545,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   newBody.appendChild(spinner.createElement());
                   spinner.start();
                 }
-                if (streamingTTS) window.aiTTSManager._streamSentencesSent = 0;
                 uiModule.scrollHistory();
               } else if (json.type === 'budget_exceeded') {
                 if (_isBg) continue;
@@ -2642,9 +2811,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
           addAITTSButton(footerTarget, accumulated);
         }
-        // TTS auto-play: streaming mode flushes remaining text, non-streaming enqueues full message
-        if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
-          const ttsBtn = holder.querySelector('.ai-tts-button');
+        // TTS auto-play: speak only after the completed response is available.
+        if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay && (!window.aiTTSManager.canAutoSpeakForSession || window.aiTTSManager.canAutoSpeakForSession(streamSessionId))) {
+          const ttsBtn = footerTarget.querySelector('.ai-tts-button') || holder.querySelector('.ai-tts-button');
           if (ttsBtn) {
             var ICON_PLAY_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
             var ICON_STOP_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
@@ -2654,20 +2823,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               ttsBtn.style.color = '#6b7280';
               ttsBtn.title = 'Read aloud';
             };
-            if (streamingTTS) {
-              // Flush remaining partial sentence and attach the real button
-              window.aiTTSManager.streamingEnd(accumulated);
-              window.aiTTSManager.streamingAttachButton(ttsBtn, resetFn);
-              // If still playing sentences from the stream, show stop icon
-              if (window.aiTTSManager.isPlaying || window.aiTTSManager._processing) {
-                ttsBtn.innerHTML = ICON_STOP_TTS;
-                ttsBtn.classList.add('playing');
-                ttsBtn.style.color = '#ccc';
-                ttsBtn.title = 'Stop';
-              }
+            if (window.aiTTSManager.enqueueLatestFinal) {
+              window.aiTTSManager.enqueueLatestFinal(accumulated, ttsBtn, resetFn, streamSessionId);
             } else {
-              // Non-streaming fallback (autoPlay toggled mid-stream, etc.)
+              window.aiTTSManager.stop?.();
               window.aiTTSManager.enqueue(accumulated, ttsBtn, resetFn);
+            }
+            if (window.aiTTSManager.isPlaying || window.aiTTSManager._processing) {
+              ttsBtn.innerHTML = ICON_STOP_TTS;
+              ttsBtn.classList.add('playing');
+              ttsBtn.style.color = '#ccc';
+              ttsBtn.title = 'Stop';
             }
           }
         }
@@ -2737,13 +2903,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
         } else if (bgErr) {
           bgErr.status = 'error';
+          _publishStreamSnapshot(streamSessionId, {
+            status: 'error',
+            latestPrompt: streamQuery,
+            latestResponse: accumulated,
+            accumulatedResponse: accumulated,
+            isBackground: true,
+            error: err && err.message || 'Background stream error',
+            needsAttention: true,
+          });
           if (sessionModule && sessionModule.clearStreaming) {
             sessionModule.clearStreaming(streamSessionId);
           }
         }
       } else {
-        // Stop streaming TTS on any error/abort
-        if (streamingTTS && window.aiTTSManager) window.aiTTSManager.stop();
+        // If a response fails or is aborted, do not let queued audio continue.
+        if (window.aiTTSManager) window.aiTTSManager.stop();
 
         if (currentAbort && currentAbort.signal.aborted) {
           const abortReason = currentAbort._reason || '';
@@ -2905,6 +3080,17 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const _isBgFinally = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
 
       if (!_isBgFinally) {
+        if (accumulated) {
+          _publishStreamSnapshot(streamSessionId, {
+            status: 'complete',
+            latestPrompt: streamQuery,
+            latestResponse: accumulated,
+            accumulatedResponse: accumulated,
+            isBackground: false,
+            unreadCompletion: false,
+            needsAttention: false,
+          });
+        }
         // Reset button to idle state
         updateSubmitButton('idle', submitBtn);
 
@@ -2980,12 +3166,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         _webLockRelease = null;
       }
 
-      // Refresh session list after a delay (picks up auto-generated names)
-      setTimeout(() => {
-        if (sessionModule && sessionModule.loadSessions) {
-          sessionModule.loadSessions();
-        }
-      }, 3000);
+      // Refresh immediately so a newly materialized chat appears as current
+      // after its first turn. Keep a delayed follow-up for async auto-naming.
+      if (sessionModule && sessionModule.loadSessions) {
+        sessionModule.loadSessions().catch(() => {});
+        setTimeout(() => {
+          sessionModule.loadSessions().catch(() => {});
+        }, 3000);
+      }
     }
   }
 
@@ -2998,19 +3186,50 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // the server run — otherwise closing the tab would kill the background task,
   // defeating the whole point. Only the Stop button cancels the server run.
   export function abortCurrentRequest(stopServer = false) {
+    const _abortSid = _streamSessionId
+      || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
     if (currentAbort) {
       currentAbort.abort();
       // Don't set to null here - let catch block handle it
     }
+    if (_abortSid) {
+      _publishStreamSnapshot(_abortSid, {
+        status: stopServer ? 'stopped' : 'streaming',
+        isBackground: !stopServer,
+        needsAttention: false,
+      });
+    }
     if (stopServer) {
       try {
-        const _sid = _streamSessionId
-          || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
+        const _sid = _abortSid;
         if (_sid) {
           fetch(`/api/chat/stop/${encodeURIComponent(_sid)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
         }
       } catch (_) {}
     }
+  }
+
+  export function stopSessionGeneration(sessionId) {
+    if (!sessionId) return;
+    if (window.aiTTSManager?.stop) window.aiTTSManager.stop();
+    const entry = _backgroundStreams.get(sessionId);
+    if (entry && entry.abortCtrl) {
+      try { entry.abortCtrl._reason = 'user-stop'; } catch (_) {}
+      try { entry.abortCtrl.abort(); } catch (_) {}
+      entry.status = 'stopped';
+    } else if (String(_streamSessionId || '') === String(sessionId)) {
+      abortCurrentRequest(true);
+    }
+    try {
+      fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+      fetch(`${API_BASE}/api/session/${sessionId}/mark-stopped`, { method: 'POST' }).catch(() => {});
+    } catch (_) {}
+    _publishStreamSnapshot(sessionId, {
+      status: 'stopped',
+      isBackground: false,
+      needsAttention: false,
+    });
+    if (sessionModule && sessionModule.clearStreaming) sessionModule.clearStreaming(sessionId);
   }
 
   // ── Stall watchdog ──────────────────────────────────────────────
@@ -3172,8 +3391,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    */
   export function detachCurrentStream(sessionId) {
     if (!isStreaming || !currentAbort) {
-      // Not streaming — fall through to abort
-      abortCurrentRequest();
+      // Nothing is actively streaming for this renderer; closing or switching
+      // views should not publish a synthetic background stream.
       return;
     }
     // Store background stream state
@@ -3185,6 +3404,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       abortCtrl: currentAbort,
       query: currentHolder ? (currentHolder._researchQuery || '') : '',
       metrics: null,
+    });
+    _publishStreamSnapshot(sessionId, {
+      status: 'streaming',
+      latestResponse: currentAccumulated,
+      accumulatedResponse: currentAccumulated,
+      isBackground: true,
+      unreadCompletion: false,
+      needsAttention: false,
     });
     // Mark session with pulsing dot in sidebar
     if (sessionModule && sessionModule.markStreaming) {
@@ -4848,6 +5075,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     displayMetrics: chatRenderer.displayMetrics,
     handleChatSubmit,
     abortCurrentRequest,
+    stopSessionGeneration,
     detachCurrentStream,
     checkBackgroundStream,
     resumeStream,
@@ -4868,6 +5096,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     continueFrom,
     _appendViewReportLink,
     hasActiveStream,
+    getSessionStreamSnapshot,
+    subscribeToSessionStream,
+    subscribeToAllStreams,
+    getBackgroundStreams,
+    getSessionStatus,
   };
 
   // Single delegated handler for tool-call fold/expand. One listener on
