@@ -37,7 +37,11 @@ def test_new_chat_paths_persist_and_clear_draft_marker():
         "export function createDirectChat",
         "/** Actually create the session in the DB.",
     )
-    assert "_writeNewChatDraft({ url: url || '', modelId: modelId || '', endpointId: endpointId || '' });" in create_body
+    assert "_writeNewChatDraft({" in create_body
+    assert "url: url || ''," in create_body
+    assert "modelId: modelId || ''," in create_body
+    assert "endpointId: endpointId || ''," in create_body
+    assert "source: _pendingChat.source || ''," in create_body
     assert "Storage.remove('lastSessionId');" in create_body
     assert "_showNewChatUi();" in create_body
 
@@ -55,3 +59,36 @@ def test_new_chat_paths_persist_and_clear_draft_marker():
         "export function hasPendingChat()",
     )
     assert "_clearNewChatDraft();" in materialize_body
+
+
+def test_select_session_applies_ai_default_chat_model_before_history_load():
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    helper_body = _slice(
+        source,
+        "async function _applyDefaultChatModelToSession",
+        "function _showNewChatUi",
+    )
+    default_helper = _slice(
+        source,
+        "async function _getDefaultChatConfig",
+        "async function _applyDefaultChatModelToSession",
+    )
+    select_body = _slice(
+        source,
+        "export async function selectSession",
+        "// Guard: if the fetched history is empty",
+    )
+
+    assert "fetch(`${API_BASE}/api/default-chat`" in default_helper
+    assert "const dc = await _getDefaultChatConfig();" in helper_body
+    assert "fetch(`${API_BASE}/api/session/${sessionId}`" in helper_body
+    assert "method: 'PATCH'" in helper_body
+    assert "fd.append('model', dc.model);" in helper_body
+    assert "fd.append('endpoint_url', dc.endpoint_url);" in helper_body
+    assert "sMeta.model = dc.model;" in helper_body
+
+    default_pos = select_body.index("const defaultChat = await _applyDefaultChatModelToSession(id, meta);")
+    picker_pos = select_body.index("updateModelPicker();")
+    history_pos = select_body.index("const res = await fetch(`${API_BASE}/api/history/${id}`);")
+    assert default_pos < picker_pos < history_pos
+    assert "modelName = defaultChat?.model || data.model || null;" in select_body

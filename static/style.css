@@ -2258,6 +2258,9 @@ body.bg-pattern-sparkles {
     body.mission-dashboard-visible .chat-top-bar {
       display: none !important;
     }
+    body.mission-dashboard-visible #scroll-bottom-btn {
+      display: none !important;
+    }
     .mission-control {
       flex: 1;
       min-height: 0;
@@ -2342,16 +2345,62 @@ body.bg-pattern-sparkles {
     .mission-panel-head,
     .mission-card-top,
     .mission-card-actions,
-    .mission-panel-actions,
     .mission-drawer-head,
     .mission-operation-actions {
       display: flex;
       align-items: center;
       gap: 8px;
     }
+    .mission-panel-heading {
+      min-width: 0;
+    }
+    .mission-panel-heading h2 {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .mission-panel-controls {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .mission-panel-icon-btn {
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      border-radius: 7px;
+    }
+    .mission-panel-icon-btn.active,
+    .mission-panel-icon-btn[aria-pressed="true"] {
+      color: color-mix(in srgb, var(--brand-color, var(--red)) 88%, var(--fg));
+      border-color: color-mix(in srgb, var(--brand-color, var(--red)) 45%, var(--border));
+      background: color-mix(in srgb, var(--brand-color, var(--red)) 12%, transparent);
+    }
+    .mission-card-top {
+      justify-content: space-between;
+      align-items: flex-start;
+      min-width: 0;
+    }
+    .mission-card-heading {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
     .mission-chat-card .mission-card-actions {
-      flex-wrap: wrap;
-      margin-top: auto;
+      justify-content: flex-end;
+      flex-wrap: nowrap;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .mission-card-icon-btn {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 7px;
     }
     .mission-command-meta,
     .mission-section-header,
@@ -2403,6 +2452,12 @@ body.bg-pattern-sparkles {
       letter-spacing: 0;
       font-weight: 600;
     }
+    .mission-section-subtitle {
+      margin-top: 2px;
+      color: color-mix(in srgb, var(--fg) 45%, transparent);
+      font-size: 10px;
+      line-height: 1.2;
+    }
     .mission-pager,
     .mission-recent-controls {
       display: flex;
@@ -2420,6 +2475,100 @@ body.bg-pattern-sparkles {
       flex-direction: column;
       gap: 16px;
       margin-top: 14px;
+    }
+    .mission-activity-feed {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .mission-activity-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-height: 46px;
+      min-width: 0;
+      border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+      border-radius: 8px;
+      padding: 7px 9px;
+      background: color-mix(in srgb, var(--bg) 60%, var(--panel));
+      color: var(--fg);
+      font: inherit;
+      line-height: normal;
+      text-align: left;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .mission-activity-row:hover {
+      border-color: color-mix(in srgb, var(--fg) 42%, var(--border));
+      background: color-mix(in srgb, var(--fg) 4%, var(--panel));
+    }
+    .mission-activity-row:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--red) 70%, var(--fg));
+      outline-offset: 2px;
+    }
+    .mission-activity-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--fg) 30%, transparent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 5%, transparent);
+    }
+    .mission-activity-dot.status-success {
+      background: var(--color-success);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--color-success) 55%, transparent);
+    }
+    .mission-activity-dot.status-error {
+      background: var(--red);
+      box-shadow: 0 0 8px color-mix(in srgb, var(--red) 55%, transparent);
+    }
+    .mission-activity-dot.status-running {
+      background: #60a5fa;
+      animation: task-log-pulse 1.4s ease-in-out infinite;
+    }
+    .mission-activity-dot.status-queued {
+      background: #fbbf24;
+    }
+    .mission-activity-main {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .mission-activity-title {
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .mission-activity-preview {
+      color: color-mix(in srgb, var(--fg) 56%, transparent);
+      font-size: 11px;
+      line-height: 1.25;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: 0.9;
+    }
+    .mission-activity-side {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 3px;
+      min-width: max-content;
+      line-height: 1;
+    }
+    .mission-activity-time {
+      color: color-mix(in srgb, var(--fg) 44%, transparent);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
     }
     .mission-chat-card,
     .mission-operation-item {
@@ -2519,13 +2668,14 @@ body.bg-pattern-sparkles {
     .mission-panel-chat {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 6px;
       margin-top: 10px;
       height: min(50vh, 560px);
       max-height: 50vh;
       min-height: 220px;
       min-width: 0;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       overscroll-behavior: contain;
       scrollbar-gutter: stable;
       -webkit-overflow-scrolling: touch;
@@ -2536,32 +2686,103 @@ body.bg-pattern-sparkles {
       animation: none;
       margin-top: 0;
       margin-bottom: 0;
-      overflow: visible;
+      overflow: hidden;
       flex: 0 0 auto;
+      min-width: 0;
     }
     .mission-panel-msg.msg-user {
       max-width: min(82%, 680px);
     }
     .mission-panel-msg.msg-ai {
-      width: min(88%, 760px);
-      max-width: 88%;
+      width: min(80vw, 100%);
+      max-width: min(80vw, 100%);
+      margin-left: auto;
+      margin-right: auto;
+      align-self: center;
     }
     .mission-panel-chat .agent-thread {
-      width: min(88%, 760px);
-      max-width: 88%;
-      margin-top: 2px;
-      margin-bottom: 2px;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      overflow: hidden;
+      margin-top: 0;
+      margin-bottom: 0;
+      padding-top: 2px;
+      padding-bottom: 2px;
       flex: 0 0 auto;
     }
     .mission-panel-chat .agent-thinking-dots {
-      width: min(88%, 760px);
-      max-width: 88%;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       flex: 0 0 auto;
     }
     .mission-panel-msg .body {
       white-space: pre-wrap;
-      overflow: visible;
+      overflow: hidden;
       max-height: none;
+      min-width: 0;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .mission-panel-chat * {
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    .mission-panel-chat pre,
+    .mission-panel-chat code,
+    .mission-panel-chat .agent-thread-cmd,
+    .mission-panel-chat .agent-thread-content,
+    .mission-panel-chat .thinking-content-inner {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      overflow-x: hidden;
+    }
+    .mission-panel-msg .body > .thinking-section:first-child:last-child {
+      margin-block: 0;
+    }
+    .mission-panel-chat .thinking-section {
+      margin: 1px 0;
+      border-color: color-mix(in srgb, var(--brand-color, var(--red)) 22%, var(--border));
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--fg) 2%, transparent);
+      box-shadow: none;
+    }
+    .mission-panel-chat .thinking-header {
+      min-height: 24px;
+      padding: 2px 8px;
+      gap: 7px;
+      background: color-mix(in srgb, var(--brand-color, var(--red)) 6%, transparent);
+      border-bottom: 0;
+    }
+    .mission-panel-chat .thinking-header:hover {
+      background: color-mix(in srgb, var(--brand-color, var(--red)) 9%, transparent);
+    }
+    .mission-panel-chat .thinking-header-left {
+      color: color-mix(in srgb, var(--brand-color, var(--red)) 82%, var(--fg));
+      font-size: 11px;
+    }
+    .mission-panel-chat .thinking-toggle {
+      color: color-mix(in srgb, var(--brand-color, var(--red)) 76%, var(--fg));
+    }
+    .mission-panel-chat .live-think-timer {
+      font-size: 10px !important;
+      opacity: 0.5 !important;
+    }
+    .mission-panel-chat .thinking-content {
+      padding: 0 8px;
+    }
+    .mission-panel-chat .thinking-content.expanded {
+      max-height: 120px;
+      padding: 6px 8px;
+      border-top: 1px solid color-mix(in srgb, var(--brand-color, var(--red)) 14%, transparent);
+    }
+    .mission-panel-chat .thinking-content-inner {
+      font-size: 11px;
+      line-height: 1.4;
+      opacity: 0.78;
     }
     .mission-latest-block {
       border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
@@ -2584,24 +2805,6 @@ body.bg-pattern-sparkles {
       overflow: auto;
       font-size: 12px;
       line-height: 1.45;
-    }
-    .mission-activity-strip {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      margin: 10px 0;
-    }
-    .mission-activity-strip span {
-      border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-      border-radius: 999px;
-      padding: 2px 7px;
-      color: color-mix(in srgb, var(--fg) 48%, transparent);
-      font-size: 10px;
-    }
-    .mission-activity-strip span.active {
-      border-color: color-mix(in srgb, var(--red) 55%, var(--border));
-      color: var(--fg);
-      background: color-mix(in srgb, var(--red) 9%, transparent);
     }
     .mission-search {
       display: inline-flex;
@@ -2690,11 +2893,24 @@ body.bg-pattern-sparkles {
       }
       .mission-command-meta,
       .mission-section-header,
-      .mission-panel-head,
-      .mission-card-actions,
       .mission-operation-item {
         align-items: stretch;
         flex-direction: column;
+      }
+      .mission-card-top {
+        align-items: flex-start;
+      }
+      .mission-chat-card .mission-card-actions {
+        align-items: center;
+        flex-direction: row;
+        flex-wrap: wrap;
+      }
+      .mission-panel-head {
+        align-items: flex-start;
+      }
+      .mission-panel-controls {
+        margin-left: auto;
+        flex-wrap: wrap;
       }
       .mission-recent-controls {
         width: 100%;
@@ -2729,12 +2945,27 @@ body.bg-pattern-sparkles {
       .mission-latest {
         grid-template-columns: 1fr;
       }
+      .mission-activity-row {
+        grid-template-columns: auto minmax(0, 1fr);
+      }
+      .mission-activity-side {
+        grid-column: 2;
+        align-items: flex-start;
+        flex-direction: row;
+        flex-wrap: wrap;
+      }
       .mission-panel-msg.msg-user,
-      .mission-panel-msg.msg-ai,
       .mission-panel-chat .agent-thread,
       .mission-panel-chat .agent-thinking-dots {
         width: 100%;
         max-width: 100%;
+      }
+      .mission-panel-msg.msg-ai {
+        width: min(80vw, 100%);
+        max-width: min(80vw, 100%);
+        margin-left: auto;
+        margin-right: auto;
+        align-self: center;
       }
       .mission-operations-drawer {
         top: auto;
@@ -22919,6 +23150,10 @@ body:not(.welcome-ready) #welcome-screen {
 }
 .task-log-row:hover {
   background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.task-log-row-focus {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 65%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
 }
 .task-log-row.expanded { padding: 8px 10px 6px; }
 .task-log-row-head {

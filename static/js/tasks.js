@@ -17,6 +17,7 @@ let _tasksFetched = false;   // first-fetch sentinel — `false` → show loadin
 let _escHandler = null;
 let _viewingRuns = null; // task id when viewing run history
 let _clockInterval = null;
+let _pendingActivityFocus = null;
 
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -1866,8 +1867,11 @@ async function _renderActivityView() {
 
   const _actList = document.getElementById('tasks-activity-list');
   if (_activityEntries.length) {
+    const focusEntry = _findActivityEntry(_pendingActivityFocus);
+    if (focusEntry && _isNotification(focusEntry)) _solo = 'notifications';
     _buildChips();
     _applyFilter();
+    _focusActivityEntry(_pendingActivityFocus);
   } else if (_actList) {
     _actList.appendChild(spinnerModule.createLoadingRow('Loading…'));
   }
@@ -1883,34 +1887,12 @@ async function _renderActivityView() {
       list.innerHTML = '<div style="opacity:0.5;padding:12px;">No activity yet. Scheduled tasks will log here once they run.</div>';
       return;
     }
-    _activityEntries = runs.map(r => {
-      let resultText = r.result || r.error || '';
-      if (!resultText) {
-        if (r.status === 'queued')  resultText = '_Queued — waiting for a free slot…_';
-        if (r.status === 'running') resultText = '_Running…_';
-      }
-      return {
-        // Surface the actual task_type ('llm' | 'research' | 'action') so the
-        // chat-worthy check in _renderActivityEntry can decide between "Open
-        // in chat" (llm/research) and "Copy log" (action). Was hardcoded
-        // 'task', which never matched and made Open-in-chat dead code.
-        kind: r.task_type || 'llm',
-        taskName: r.task_name || (r.task_type === 'action' ? (r.action || 'Action') : 'Task'),
-        taskId: r.task_id,
-        action: r.action || '',
-        result: resultText,
-        prompt: '',
-        ts: r.finished_at || r.started_at,
-        status: r.status,
-        model: r.model || '',
-        endpointUrl: r.endpoint_url || '',
-        sessionId: r.session_id || '',
-        researchId: r.research_id || '',
-        output_target: r.output_target || 'session',
-      };
-    });
+    _activityEntries = runs.map(_activityEntryFromRun);
+    const focusEntry = _findActivityEntry(_pendingActivityFocus);
+    if (focusEntry && _isNotification(focusEntry)) _solo = 'notifications';
     _buildChips();
     _applyFilter();
+    _focusActivityEntry(_pendingActivityFocus);
   } catch (e) {
     const list = document.getElementById('tasks-activity-list');
     if (list) list.innerHTML = `<div style="opacity:0.5;padding:12px;">Failed to load activity: ${_escHtml(e.message || String(e))}</div>`;
@@ -1918,6 +1900,67 @@ async function _renderActivityView() {
 }
 
 let _activityEntries = [];
+
+function _activityEntryFromRun(r) {
+  let resultText = r.result || r.error || '';
+  if (!resultText) {
+    if (r.status === 'queued')  resultText = '_Queued — waiting for a free slot…_';
+    if (r.status === 'running') resultText = '_Running…_';
+  }
+  return {
+    // Surface the actual task_type ('llm' | 'research' | 'action') so the
+    // chat-worthy check in _renderActivityEntry can decide between "Open
+    // in chat" (llm/research) and "Copy log" (action).
+    runId: r.id || '',
+    kind: r.task_type || 'llm',
+    taskName: r.task_name || (r.task_type === 'action' ? (r.action || 'Action') : 'Task'),
+    taskId: r.task_id,
+    action: r.action || '',
+    result: resultText,
+    prompt: '',
+    ts: r.finished_at || r.started_at,
+    status: r.status,
+    model: r.model || '',
+    endpointUrl: r.endpoint_url || '',
+    sessionId: r.session_id || '',
+    researchId: r.research_id || '',
+    output_target: r.output_target || 'session',
+  };
+}
+
+function _activityFocusMatches(entry, focus) {
+  if (!entry || !focus) return false;
+  if (focus.runId && entry.runId && String(entry.runId) === String(focus.runId)) return true;
+  return !!(
+    focus.taskId &&
+    String(entry.taskId || '') === String(focus.taskId) &&
+    (!focus.ts || String(entry.ts || '') === String(focus.ts))
+  );
+}
+
+function _findActivityEntry(focus) {
+  if (!focus) return null;
+  return _activityEntries.find(entry => _activityFocusMatches(entry, focus)) || null;
+}
+
+function _focusActivityEntry(focus) {
+  if (!focus) return;
+  setTimeout(() => {
+    const rows = Array.from(document.querySelectorAll('#tasks-activity-list .task-log-row'));
+    const row = rows.find(el => {
+      if (focus.runId && el.dataset.runId && String(el.dataset.runId) === String(focus.runId)) return true;
+      return !!(
+        focus.taskId &&
+        String(el.dataset.taskId || '') === String(focus.taskId) &&
+        (!focus.ts || String(el.dataset.ts || '') === String(focus.ts))
+      );
+    });
+    if (!row) return;
+    row.classList.add('expanded', 'task-log-row-focus');
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => row.classList.remove('task-log-row-focus'), 2200);
+  }, 120);
+}
 
 function _stackActivityEntries(entries) {
   const out = [];
@@ -2344,7 +2387,7 @@ function _renderActivityEntry(entry) {
   if (_isSkipped) {
     const reason = (entry.result || '').trim();
     return `
-      <div class="task-log-row is-skipped" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
+      <div class="task-log-row is-skipped" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" data-run-id="${_escHtml(entry.runId || '')}" data-task-id="${_escHtml(entry.taskId || '')}" data-ts="${_escHtml(entry.ts || '')}" style="${styleVars}">
         <div class="task-log-row-head">
           ${statusDot}
           <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
@@ -2357,7 +2400,7 @@ function _renderActivityEntry(entry) {
     `;
   }
   return `
-    <div class="task-log-row${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" style="${styleVars}">
+    <div class="task-log-row${long ? ' is-long' : ''}${_isRunning ? ' is-running' : ''}" data-kind="${_escHtml(entry.kind)}" data-entry-idx="${entryIdx}" data-run-id="${_escHtml(entry.runId || '')}" data-task-id="${_escHtml(entry.taskId || '')}" data-ts="${_escHtml(entry.ts || '')}" style="${styleVars}">
       <div class="task-log-row-head">
         ${statusDot}
         <span class="task-log-task-icon">${_taskIcon({ action: entry.action, task_type: entry.kind })}</span>
@@ -2505,6 +2548,8 @@ export function openTasks(focusId, opts) {
   if (_open) {
     // Already open — just focus the requested task / apply filter.
     if (o.filter !== undefined) { _taskFilter = o.filter; _renderList(); }
+    if (o.activityFocus) _pendingActivityFocus = o.activityFocus;
+    if (o.tab === 'activity') { _switchTab('activity'); return; }
     if (focusId) _focusTask(focusId);
     return;
   }
@@ -2609,11 +2654,11 @@ export function openTasks(focusId, opts) {
   // populated shell (header/search/sort/empty list with a spinner row) instead
   // of an empty modal-body that fills in after the fetch resolves — that delay
   // was visible as a "flicker" right after opening.
-  _activeTab = 'tasks';
-  _switchTab('tasks');
+  _activeTab = o.tab === 'activity' ? 'activity' : 'tasks';
+  _switchTab(_activeTab);
   _fetchTasks().then(() => {
     // Re-render so the list swaps the Loading row for real cards.
-    _renderList();
+    if (_activeTab === 'tasks') _renderList();
     _syncPauseAllButton();
     if (_pendingFocusTaskId) {
       _focusTask(_pendingFocusTaskId);
@@ -2621,6 +2666,11 @@ export function openTasks(focusId, opts) {
     }
     _runFirstOpenOnboarding();
   });
+}
+
+export function openActivity(activityFocus = null) {
+  _pendingActivityFocus = activityFocus || null;
+  openTasks(null, { tab: 'activity', activityFocus: _pendingActivityFocus });
 }
 
 let _pendingFocusTaskId = null;
@@ -2726,6 +2776,6 @@ function stopNotificationPolling() {
 // Start polling on module load
 startNotificationPolling();
 
-const tasksModule = { openTasks, closeTasks, isTasksOpen, startNotificationPolling, stopNotificationPolling };
+const tasksModule = { openTasks, openActivity, closeTasks, isTasksOpen, startNotificationPolling, stopNotificationPolling };
 export default tasksModule;
 window.tasksModule = tasksModule;

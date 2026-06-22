@@ -1,4 +1,4 @@
-// static/js/missionControl.js
+// static/js/sessionControl.js
 // Session Control dashboard layered over the existing chat/session pipeline.
 
 import uiModule from './ui.js';
@@ -30,12 +30,18 @@ const state = {
   chatsPage: 0,
   operationsOpen: false,
   snapshots: new Map(),
+  recentActivity: [],
+  recentActivityLoading: false,
+  recentActivityError: '',
+  recentActivityLoadedAt: 0,
+  activePanelAutoScroll: true,
 };
 
 const els = {};
 let _composerHome = null;
 let _deckResizeTimer = null;
 let _activePanelRenderRaf = null;
+let _activityFetchPromise = null;
 
 function esc(value) {
   return uiModule.esc(String(value == null ? '' : value));
@@ -47,10 +53,12 @@ function icon(name) {
     close: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
     stop: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
     open: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>',
+    downToLine: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>',
     chevronLeft: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
     chevronRight: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
     menu: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>',
     search: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>',
+    refresh: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>',
   };
   return icons[name] || '';
 }
@@ -68,6 +76,46 @@ function sessionMeta(sessionId) {
 
 function labelForStatus(status) {
   return STATUS_LABELS[status || 'idle'] || STATUS_LABELS.idle;
+}
+
+function taskStatusLabel(status) {
+  if (status === 'success') return 'Complete';
+  if (status === 'error') return 'Needs Attention';
+  if (status === 'running') return 'Running';
+  if (status === 'queued') return 'Queued';
+  if (status === 'skipped') return 'Skipped';
+  if (status === 'aborted') return 'Stopped';
+  return status ? status[0].toUpperCase() + status.slice(1) : 'Activity';
+}
+
+function relativeTime(ts) {
+  if (!ts) return '';
+  const t = new Date(ts).getTime();
+  if (!Number.isFinite(t)) return '';
+  const diff = Math.max(0, Date.now() - t);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec || 1}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
+function activityPreview(run) {
+  const text = String(run.result || run.error || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+  if (run.status === 'queued') return 'Queued and waiting for a worker.';
+  if (run.status === 'running') return 'Running now.';
+  return 'No result text captured.';
+}
+
+function activityKind(run) {
+  if (run.output_target === 'notification') return 'Notification';
+  if (run.task_type === 'research') return 'Research';
+  if (run.task_type === 'action') return run.action ? run.action.replace(/_/g, ' ') : 'Action';
+  return 'Task';
 }
 
 function statusClass(statusLabel, snap) {
@@ -118,6 +166,9 @@ function stripIds(root, options = {}) {
     header.dataset.thinkingId = id;
     content.id = id;
     toggle.id = `${id}-toggle`;
+    content.classList.remove('expanded');
+    toggle.classList.remove('expanded');
+    header.setAttribute('aria-expanded', 'false');
   });
   return root;
 }
@@ -259,6 +310,16 @@ function buildShell() {
       <div id="mission-composer-slot"></div>
     </div>
     <section id="mission-active-panel" class="mission-active-panel" aria-labelledby="mission-active-title" aria-live="polite"></section>
+    <section class="mission-section mission-recent-activity-section" aria-labelledby="mission-activity-title">
+      <div class="mission-section-header">
+        <div>
+          <h2 id="mission-activity-title">Recent Activity</h2>
+          <div class="mission-section-subtitle">Task run results</div>
+        </div>
+        <button type="button" class="input-icon-btn" id="mission-activity-refresh" aria-label="Refresh recent activity">${icon('refresh')}</button>
+      </div>
+      <div id="mission-activity-feed" class="mission-activity-feed" aria-label="Recent task activity"></div>
+    </section>
     <section class="mission-section" aria-labelledby="mission-recent-title">
       <div class="mission-section-header">
         <h2 id="mission-recent-title">Recent Chats</h2>
@@ -293,6 +354,8 @@ function buildShell() {
   els.draftNote = root.querySelector('#mission-draft-note');
   els.composerSlot = root.querySelector('#mission-composer-slot');
   els.activePanel = root.querySelector('#mission-active-panel');
+  els.activityFeed = root.querySelector('#mission-activity-feed');
+  els.activityRefresh = root.querySelector('#mission-activity-refresh');
   els.chatsDeck = root.querySelector('#mission-chats-deck');
   els.operationsBtn = root.querySelector('#mission-operations-btn');
   els.opsCount = root.querySelector('#mission-ops-count');
@@ -390,23 +453,69 @@ function startNewMissionDraft() {
   document.getElementById('message')?.focus();
 }
 
+function isComposingNewSession() {
+  return !!(
+    state.dashboardVisible &&
+    state.mode === 'new-mission' &&
+    !state.isActiveMissionOpen &&
+    !state.activePanelSessionId
+  );
+}
+
 function focusMission(sessionId) {
   if (!sessionId) return;
   state.activePanelSessionId = sessionId;
   state.isActiveMissionOpen = true;
   state.mode = 'active-mission';
+  state.activePanelAutoScroll = true;
   sessionModule.setCurrentSessionId(sessionId);
   setDashboardVisible(true);
   updateAll();
   document.getElementById('message')?.focus();
 }
 
+function closeActivePanelForFullConversation() {
+  state.activePanelSessionId = null;
+  state.isActiveMissionOpen = false;
+  state.mode = 'new-mission';
+  if (els.activePanel) {
+    els.activePanel.hidden = true;
+    els.activePanel.innerHTML = '';
+    delete els.activePanel.dataset.shellKey;
+    delete els.activePanel.dataset.sessionId;
+  }
+  if (window.aiTTSManager?.setActiveMissionSession) {
+    window.aiTTSManager.setActiveMissionSession(null, false);
+  }
+}
+
 function viewFullConversation(sessionId) {
   if (!sessionId) return;
+  closeActivePanelForFullConversation();
   setDashboardVisible(false);
   hideFullChatWelcome();
   if (String(sessionModule.getCurrentSessionId?.() || '') === String(sessionId)) return;
   Promise.resolve(sessionModule.selectSession(sessionId)).finally(hideFullChatWelcome);
+}
+
+function viewNewChatDraft() {
+  resetToNewSessionUi();
+  setDashboardVisible(false);
+  const history = document.getElementById('chat-history');
+  if (history) {
+    history.hidden = false;
+    history.innerHTML = '';
+  }
+  if (chatModule?.showWelcomeScreen) chatModule.showWelcomeScreen();
+  document.getElementById('message')?.focus();
+}
+
+function showDashboardAfterSessionDelete(nextSessionId = null) {
+  if (nextSessionId) {
+    focusMission(nextSessionId);
+    return;
+  }
+  startNewMissionDraft();
 }
 
 function closeActiveMission(options = {}) {
@@ -447,6 +556,15 @@ function stopGeneration(sessionId) {
     state.snapshots.set(String(sessionId), Object.assign({}, snap, { status: 'stopped', needsAttention: false }));
   }
   updateAll();
+}
+
+function stopActiveGeneration() {
+  const sessionId = state.activePanelSessionId || sessionModule.getCurrentSessionId?.();
+  if (!sessionId) return false;
+  const snap = snapshotFor(sessionId);
+  if (snap?.status !== 'streaming' && !chatModule.hasActiveStream?.(sessionId)) return false;
+  stopGeneration(sessionId);
+  return true;
 }
 
 function endVoiceLoop(sessionId) {
@@ -529,14 +647,16 @@ function renderChats() {
       return `
         <article class="mission-chat-card" data-session-id="${esc(s.id)}">
           <div class="mission-card-top">
-            <span class="mission-card-title">${esc(s.name || 'Untitled')}</span>
+            <div class="mission-card-heading">
+              <span class="mission-card-title">${esc(s.name || 'Untitled')}</span>
+              <div class="mission-card-meta">${esc((s.model || '').split('/').pop() || 'Model')} · ${esc(sessionType(s))}</div>
+            </div>
+            <div class="mission-card-actions" aria-label="Chat actions">
+              <span class="${esc(statusClass(status, snap))}">${esc(status)}</span>
+              <button type="button" class="input-icon-btn mission-card-icon-btn mission-open-chat" aria-label="Open chat" title="Open chat">${icon('open')}</button>
+            </div>
           </div>
-          <div class="mission-card-meta">${esc((s.model || '').split('/').pop() || 'Model')} · ${esc(sessionType(s))}</div>
           <div class="mission-card-preview">${esc(prompt || 'No prompt preview')}</div>
-          <div class="mission-card-actions">
-            <span class="${esc(statusClass(status, snap))}">${esc(status)}</span>
-            <button type="button" class="memory-toolbar-btn mission-open-chat">${icon('open')} Open Chat</button>
-          </div>
         </article>
       `;
     }).join('');
@@ -546,6 +666,99 @@ function renderChats() {
   const next = document.getElementById('mission-chats-next');
   if (prev) prev.disabled = state.chatsPage <= 0;
   if (next) next.disabled = state.chatsPage >= maxPage;
+}
+
+async function loadRecentActivity(force = false) {
+  if (!els.activityFeed) return;
+  const fresh = Date.now() - state.recentActivityLoadedAt < 30000;
+  if (!force && (state.recentActivityLoading || (fresh && state.recentActivityLoadedAt))) return;
+  if (_activityFetchPromise) return _activityFetchPromise;
+  state.recentActivityLoading = true;
+  state.recentActivityError = '';
+  renderRecentActivity();
+  _activityFetchPromise = fetch('/api/tasks/runs/recent?limit=8', { credentials: 'same-origin' })
+    .then(async res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      state.recentActivity = data.runs || [];
+      state.recentActivityLoadedAt = Date.now();
+    })
+    .catch(err => {
+      state.recentActivityError = err?.message || String(err || 'Failed to load activity');
+      state.recentActivity = [];
+    })
+    .finally(() => {
+      state.recentActivityLoading = false;
+      _activityFetchPromise = null;
+      renderRecentActivity();
+    });
+  return _activityFetchPromise;
+}
+
+function renderRecentActivity() {
+  if (!els.activityFeed) return;
+  if (state.recentActivityLoading && !state.recentActivity.length) {
+    els.activityFeed.innerHTML = '<div class="mission-empty">Loading task activity...</div>';
+    return;
+  }
+  if (state.recentActivityError) {
+    els.activityFeed.innerHTML = `<div class="mission-empty">Activity unavailable: ${esc(state.recentActivityError)}</div>`;
+    return;
+  }
+  if (!state.recentActivity.length) {
+    els.activityFeed.innerHTML = '<div class="mission-empty">No task activity yet.</div>';
+    return;
+  }
+  els.activityFeed.innerHTML = state.recentActivity.slice(0, 6).map(run => {
+    const ts = run.finished_at || run.started_at || '';
+    const status = taskStatusLabel(run.status);
+    return `
+      <button type="button" class="mission-activity-row" data-run-id="${esc(run.id || '')}" data-task-id="${esc(run.task_id || '')}" data-ts="${esc(ts)}">
+        <span class="mission-activity-dot status-${esc(String(run.status || 'info').toLowerCase())}" aria-hidden="true"></span>
+        <span class="mission-activity-main">
+          <span class="mission-activity-title">${esc(run.task_name || 'Task')}</span>
+          <span class="mission-activity-preview">${esc(activityPreview(run))}</span>
+        </span>
+        <span class="mission-activity-side">
+          <span class="${esc(statusClass(status === 'Complete' ? 'complete' : status.toLowerCase().replace(/\s+/g, '-')))}">${esc(status)}</span>
+          <span class="mission-activity-time">${esc(relativeTime(ts) || activityKind(run))}</span>
+        </span>
+      </button>
+    `;
+  }).join('');
+  els.activityFeed.querySelectorAll('.mission-activity-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const focus = {
+        runId: row.dataset.runId || '',
+        taskId: row.dataset.taskId || '',
+        ts: row.dataset.ts || '',
+      };
+      if (window.tasksModule?.openActivity) window.tasksModule.openActivity(focus);
+      else document.getElementById('tool-tasks-btn')?.click();
+    });
+  });
+}
+
+function scrollActivePanelToBottom() {
+  const chat = els.activePanel?.querySelector('.mission-panel-chat');
+  if (!chat) return;
+  chat.scrollTop = chat.scrollHeight;
+  requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+}
+
+function updateActivePanelBottomButton() {
+  const btn = els.activePanel?.querySelector('#mission-scroll-bottom');
+  if (!btn) return;
+  btn.classList.toggle('active', state.activePanelAutoScroll);
+  btn.setAttribute('aria-pressed', state.activePanelAutoScroll ? 'true' : 'false');
+  btn.title = state.activePanelAutoScroll ? 'Auto-scroll locked to bottom' : 'Lock auto-scroll to bottom';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function toggleActivePanelAutoScroll() {
+  state.activePanelAutoScroll = !state.activePanelAutoScroll;
+  if (state.activePanelAutoScroll) scrollActivePanelToBottom();
+  updateActivePanelBottomButton();
 }
 
 function renderActivePanel() {
@@ -576,22 +789,21 @@ function renderActivePanel() {
     els.activePanel.dataset.sessionId = sid;
     els.activePanel.innerHTML = `
       <div class="mission-panel-head">
-        <div>
+        <div class="mission-panel-heading">
           <h2 id="mission-active-title">${esc(sessionTitle(sid))}</h2>
           <div class="mission-card-meta" data-mission-panel-meta>${esc((s?.model || snap?.model || '').split('/').pop() || 'Model')} · ${esc(labelForStatus(status))}</div>
         </div>
-        <span class="${esc(statusClass(labelForStatus(status), snap))}" data-mission-panel-status>${esc(labelForStatus(status))}</span>
+        <div class="mission-panel-controls" aria-label="Active session controls">
+          <span class="${esc(statusClass(labelForStatus(status), snap))}" data-mission-panel-status>${esc(labelForStatus(status))}</span>
+          <button type="button" class="input-icon-btn mission-panel-icon-btn active" id="mission-scroll-bottom" aria-label="Auto-scroll locked to bottom" aria-pressed="true" title="Auto-scroll locked to bottom">${icon('downToLine')}</button>
+          <button type="button" class="input-icon-btn mission-panel-icon-btn" id="mission-view-full" aria-label="View full conversation" title="View full conversation">${icon('open')}</button>
+          <button type="button" class="input-icon-btn mission-panel-icon-btn" id="mission-close-active" aria-label="Close session" title="Close session">${icon('close')}</button>
+        </div>
       </div>
       <div class="mission-panel-chat" aria-label="Latest session exchange"></div>
-      <div class="mission-activity-strip" aria-label="Activity">
-        ${['Preparing','Tool call running','Research active','Listening','Transcribing','Responding','Speaking','Complete','Stopped','Error'].map(label => `<span class="${label.toLowerCase().includes(labelForStatus(status).toLowerCase()) ? 'active' : ''}">${label}</span>`).join('')}
-      </div>
-      <div class="mission-panel-actions">
-        <button type="button" class="memory-toolbar-btn" id="mission-view-full">${icon('open')} View Full Conversation</button>
-        <button type="button" class="memory-toolbar-btn" id="mission-close-active">${icon('close')} Close Session</button>
-      </div>
     `;
     els.activePanel.querySelector('#mission-view-full')?.addEventListener('click', () => viewFullConversation(sid));
+    els.activePanel.querySelector('#mission-scroll-bottom')?.addEventListener('click', toggleActivePanelAutoScroll);
     els.activePanel.querySelector('#mission-close-active')?.addEventListener('click', closeActiveMission);
   }
   const chatMirror = els.activePanel.querySelector('.mission-panel-chat');
@@ -602,9 +814,11 @@ function renderActivePanel() {
     if (chatMirror) chatMirror.dataset.renderKey = renderKey;
   }
   if (chatMirror) {
-    if (shouldFollow) chatMirror.scrollTop = chatMirror.scrollHeight;
+    chatMirror.onscroll = updateActivePanelBottomButton;
+    if (state.activePanelAutoScroll || shouldFollow) scrollActivePanelToBottom();
     else chatMirror.scrollTop = previousScrollTop;
   }
+  updateActivePanelBottomButton();
 }
 
 function operationsItems() {
@@ -674,6 +888,8 @@ function renderPalette() {
 function updateAll() {
   updateComposerMode();
   renderActivePanel();
+  renderRecentActivity();
+  loadRecentActivity();
   renderChats();
   renderOperations();
 }
@@ -681,6 +897,7 @@ function updateAll() {
 function bindEvents() {
   document.getElementById('mission-chats-prev')?.addEventListener('click', () => { state.chatsPage = Math.max(0, state.chatsPage - 1); renderChats(); });
   document.getElementById('mission-chats-next')?.addEventListener('click', () => { state.chatsPage += 1; renderChats(); });
+  els.activityRefresh?.addEventListener('click', () => loadRecentActivity(true));
   els.operationsBtn?.addEventListener('click', () => { state.operationsOpen = !state.operationsOpen; renderOperations(); });
   els.search?.addEventListener('input', e => { state.query = e.target.value || ''; state.chatsPage = 0; renderChats(); });
   els.filter?.addEventListener('change', e => { state.filter = e.target.value; state.chatsPage = 0; renderChats(); });
@@ -763,10 +980,10 @@ function bindEvents() {
 export function init() {
   if (!buildShell()) return;
   bindEvents();
-  setDashboardVisible(true);
-  updateAll();
+  startNewMissionDraft();
 }
 
-const missionControlModule = { init, closeActiveMission, focusMission, viewFullConversation, startNewMissionDraft };
-window.missionControlModule = missionControlModule;
-export default missionControlModule;
+const sessionControlModule = { init, closeActiveMission, focusMission, viewFullConversation, viewNewChatDraft, showDashboardAfterSessionDelete, startNewMissionDraft, isComposingNewSession, stopActiveGeneration };
+window.sessionControlModule = sessionControlModule;
+window.missionControlModule = sessionControlModule;
+export default sessionControlModule;

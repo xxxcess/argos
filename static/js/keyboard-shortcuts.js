@@ -207,13 +207,14 @@ export function initKeyboardShortcuts(modules) {
         fetch(`${API_BASE}/api/session/${sid}`, { method: 'DELETE' }).then(async () => {
           await sessionModule.loadSessions();
           if (nextSession) {
-            await sessionModule.selectSession(nextSession.id);
+            window.sessionControlModule?.showDashboardAfterSessionDelete?.(nextSession.id);
           } else {
             sessionModule.setCurrentSessionId(null);
             el('chat-history').innerHTML = '';
             el('current-meta').textContent = 'Odysseus Chat';
             Storage.remove('lastSessionId');
             if (chatModule && chatModule.showWelcomeScreen) chatModule.showWelcomeScreen();
+            window.sessionControlModule?.showDashboardAfterSessionDelete?.();
           }
         });
       });
@@ -238,7 +239,11 @@ export function initKeyboardShortcuts(modules) {
         .then(async data => {
           if (data) {
             await sessionModule.loadSessions();
-            await sessionModule.selectSession(data.id);
+            if (window.sessionControlModule?.viewFullConversation) {
+              window.sessionControlModule.viewFullConversation(data.id);
+            } else {
+              await sessionModule.selectSession(data.id);
+            }
           }
         });
       return;

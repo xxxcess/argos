@@ -91,6 +91,12 @@ function _modelExists(modelId, url) {
   });
 }
 
+function _defaultChatFromCache() {
+  const dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
+  if (!dc || !dc.model) return null;
+  return dc;
+}
+
 /**
  * Initialize the model picker dropdown.
  * @param {Object} deps
@@ -499,7 +505,7 @@ function _initModelPickerDropdown() {
     }
     if (!currentSessionId && _pendingChat) {
       // Already have a deferred session — just update the model
-      _deps.setPendingChat({ url: m.url, modelId: m.mid, endpointId: m.endpointId });
+      _deps.setPendingChat({ url: m.url, modelId: m.mid, endpointId: m.endpointId, source: 'user' });
       // Header stays as session name — model switch only updates picker
       updateModelPicker();
       uiModule.showToast(`Using ${m.display}`);
@@ -656,7 +662,7 @@ export function updateModelPicker() {
     if (!_modelExists(modelId, s.endpoint_url || '')) {
       modelId = null;
     }
-  } else if (_pendingChat && _pendingChat.modelId) {
+  } else if (_pendingChat && _pendingChat.modelId && _pendingChat.source === 'user') {
     modelId = _pendingChat.modelId;
     if (!_modelExists(modelId, _pendingChat.url || '')) {
       _deps.setPendingChat(null);
@@ -684,10 +690,25 @@ export function updateModelPicker() {
       const fallback = items.find(item => !item.offline && (item.models || []).length > 0);
       if (fallback) {
         modelId = fallback.models[0];
-        _deps.setPendingChat({ url: fallback.url, modelId, endpointId: fallback.endpoint_id });
+        _deps.setPendingChat({ url: fallback.url, modelId, endpointId: fallback.endpoint_id, source: 'auto' });
       }
     }
   }
+  if (!modelId) {
+    const dc = _defaultChatFromCache();
+    if (dc && _modelExists(dc.model, dc.endpoint_url || '')) {
+      modelId = dc.model;
+      if (!currentSessionId) {
+        _deps.setPendingChat({
+          url: dc.endpoint_url || '',
+          modelId,
+          endpointId: dc.endpoint_id || '',
+          source: 'default',
+        });
+      }
+    }
+  }
+
   if (!modelId && !_autoSelectingDefault && window.modelsModule && window.modelsModule.getCachedItems) {
     const items = window.modelsModule.getCachedItems();
     const first = items.find(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
@@ -695,7 +716,7 @@ export function updateModelPicker() {
       const models = (first.models || []).concat(first.models_extra || []);
       modelId = models[0];
       if (!currentSessionId) {
-        _deps.setPendingChat({ url: first.url, modelId, endpointId: first.endpoint_id });
+        _deps.setPendingChat({ url: first.url, modelId, endpointId: first.endpoint_id, source: 'auto' });
       } else {
         if (s) { s.model = modelId; s.endpoint_url = first.url; }
         _autoSelectingDefault = true;

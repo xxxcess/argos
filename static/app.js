@@ -45,7 +45,7 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
-import missionControlModule from './js/missionControl.js';
+import sessionControlModule from './js/sessionControl.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -79,6 +79,7 @@ async function _refreshDefaultChat() {
     if (d && d.endpoint_url && d.model) {
       _defaultChat = d;
       try { window.__odysseusDefaultChat = d; } catch (_) {}
+      try { sessionModule.updateModelPicker?.(); } catch (_) {}
       return d;
     }
   } catch (_) {}
@@ -92,8 +93,14 @@ async function _createDirectChatFromPreferredModel() {
   if (!sessionModule) return false;
 
   const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
-  if (pending && pending.url && pending.modelId) {
-    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId);
+  if (pending && pending.url && pending.modelId && pending.source !== 'auto' && pending.source !== 'default') {
+    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, { source: 'user' });
+    return true;
+  }
+
+  const dc = await _refreshDefaultChat();
+  if (dc) {
+    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
     return true;
   }
 
@@ -101,20 +108,14 @@ async function _createDirectChatFromPreferredModel() {
   const currentId = sessionModule.getCurrentSessionId();
   const current = sessions.find(s => s.id === currentId);
   if (current && current.endpoint_url && current.model) {
-    sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
-    return true;
-  }
-
-  const dc = await _refreshDefaultChat();
-  if (dc) {
-    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+    sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id, { source: 'fallback' });
     return true;
   }
 
   const withModel = sessions.filter(s => s.endpoint_url && s.model);
   if (withModel.length > 0) {
     const last = withModel[0]; // sessions are sorted by recent
-    sessionModule.createDirectChat(last.endpoint_url, last.model, last.endpoint_id);
+    sessionModule.createDirectChat(last.endpoint_url, last.model, last.endpoint_id, { source: 'fallback' });
     return true;
   }
 
@@ -3018,7 +3019,10 @@ function initializeEventListeners() {
       // Clear research mode if active
       const _resChk = el('research-toggle');
       if (_resChk && _resChk.checked) _syncResearchIndicator(false);
-      if (await _createDirectChatFromPreferredModel()) return;
+      if (await _createDirectChatFromPreferredModel()) {
+        sessionControlModule?.viewNewChatDraft?.();
+        return;
+      }
       // No models at all — show welcome screen
       sessionModule.setCurrentSessionId(null);
       if (documentModule && documentModule.isPanelOpen && documentModule.isPanelOpen()) documentModule.closePanel();
@@ -3029,6 +3033,7 @@ function initializeEventListeners() {
       if (chatModule && chatModule.showWelcomeScreen) {
         chatModule.showWelcomeScreen();
       }
+      sessionControlModule?.viewNewChatDraft?.();
       document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
     });
   }
@@ -3044,6 +3049,7 @@ function initializeEventListeners() {
       if (_closeCompareIfActive()) return;
       _deactivateIncognito();
       _startFreshChat();
+      sessionControlModule?.viewNewChatDraft?.();
       document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
       // Focus the composer synchronously so mobile keyboards pop open.
       // iOS Safari only honours programmatic focus inside the original click
@@ -3063,7 +3069,10 @@ function initializeEventListeners() {
       if (presetsModule && presetsModule.deactivateCharacter) presetsModule.deactivateCharacter();
       // Clear research toggle when starting a fresh chat (not via research button)
       _syncResearchIndicator(false);
-      if (await _createDirectChatFromPreferredModel()) return;
+      if (await _createDirectChatFromPreferredModel()) {
+        sessionControlModule?.viewNewChatDraft?.();
+        return;
+      }
       // No models at all — show welcome screen
       sessionModule.setCurrentSessionId(null);
       if (documentModule && documentModule.isPanelOpen && documentModule.isPanelOpen()) documentModule.closePanel();
@@ -3072,6 +3081,7 @@ function initializeEventListeners() {
       const box = el('chat-history');
       if (box) box.innerHTML = '';
       if (chatModule && chatModule.showWelcomeScreen) chatModule.showWelcomeScreen();
+      sessionControlModule?.viewNewChatDraft?.();
       document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
     });
   }
@@ -3104,7 +3114,9 @@ function initializeEventListeners() {
         if (res.ok) {
           await sessionModule.loadSessions();
           if (nextSession) {
-            await sessionModule.selectSession(nextSession.id);
+            sessionControlModule?.showDashboardAfterSessionDelete?.(nextSession.id);
+          } else {
+            sessionControlModule?.showDashboardAfterSessionDelete?.();
           }
           uiModule.showToast('Session deleted');
         } else {
@@ -3380,7 +3392,7 @@ function startOdysseusApp() {
   searchModule.init(API_BASE);
   chatModule.init(API_BASE);
   chatModule.initListeners();
-  missionControlModule.init();
+  sessionControlModule.init();
   groupModule.init(API_BASE);
   // Initialize compare module
   if (compareModule) {
@@ -3539,6 +3551,10 @@ function startOdysseusApp() {
       return;
     }
 
+    if (sessionControlModule?.isComposingNewSession?.() && sessionModule?.getCurrentSessionId?.()) {
+      sessionModule.setCurrentSessionId(null);
+    }
+
     return originalSubmit.call(chatModule, e);
   }
 
@@ -3652,12 +3668,30 @@ function startOdysseusApp() {
   }
 
   if (sendBtn) {
-    sendBtn.addEventListener('click', (e) => {
+    sendBtn.addEventListener('click', async (e) => {
       e.preventDefault();
 
-      // If recording, stop recording
+      // Stop controls have priority over all send/new-chat/mic routing.
+      // Recording stop should preserve and transcribe captured audio; once
+      // recording is no longer active, the same button can interrupt any
+      // active response stream in full chat or Session Control.
       if (sendBtn.dataset.mode === 'recording' || voiceRecorderModule.getIsRecording()) {
         voiceRecorderModule.stopRecording();
+        return;
+      }
+      if (sendBtn.dataset.mode === 'streaming') {
+        voiceRecorderModule.stopConversationLoop?.('manual');
+        handleSubmit(e);
+        return;
+      }
+      const currentStreamingSessionId = sessionModule?.getCurrentSessionId?.();
+      if (currentStreamingSessionId && chatModule?.hasActiveStream?.(currentStreamingSessionId)) {
+        voiceRecorderModule.stopConversationLoop?.('manual');
+        chatModule.stopSessionGeneration?.(currentStreamingSessionId);
+        return;
+      }
+      if (sessionControlModule?.stopActiveGeneration?.()) {
+        voiceRecorderModule.stopConversationLoop?.('manual');
         return;
       }
 
@@ -3667,13 +3701,7 @@ function startOdysseusApp() {
       // New chat mode — empty input, no attachments, no STT
       if (!hasText && !hasFiles && sendBtn.dataset.mode === 'newchat') {
         if (sessionModule) {
-          const sessions = sessionModule.getSessions();
-          const currentId = sessionModule.getCurrentSessionId();
-          const current = sessions.find(s => s.id === currentId);
-          if (current && current.endpoint_url && current.model) {
-            sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
-          } else {
-            // Fallback to rail button
+          if (!await _createDirectChatFromPreferredModel()) {
             const railNew = el('rail-new-session');
             if (railNew) railNew.click();
           }

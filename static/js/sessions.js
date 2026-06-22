@@ -27,6 +27,7 @@ let _autoCreateInProgress = false; // guard against recursive auto-create
 const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key for incognito session IDs
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
+let _defaultChatCache = null;
 
 function _readNewChatDraft() {
   const draft = Storage.getJSON(NEW_CHAT_DRAFT_KEY, null);
@@ -39,6 +40,51 @@ function _writeNewChatDraft(draft = {}) {
 
 function _clearNewChatDraft() {
   Storage.remove(NEW_CHAT_DRAFT_KEY);
+}
+
+async function _getDefaultChatConfig() {
+  const cached = _defaultChatCache || (window.__odysseusDefaultChat || null);
+  try {
+    const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
+    const dc = await res.json();
+    if (dc && dc.endpoint_url && dc.model) {
+      _defaultChatCache = dc;
+      try { window.__odysseusDefaultChat = dc; } catch (_) {}
+      return dc;
+    }
+  } catch (_) {}
+  return cached && cached.endpoint_url && cached.model ? cached : null;
+}
+
+async function _applyDefaultChatModelToSession(sessionId, meta) {
+  if (!sessionId || (meta && (meta.is_openclaw || sessionId === 'openclaw'))) return null;
+  const dc = await _getDefaultChatConfig();
+  if (!dc || !dc.endpoint_url || !dc.model) return null;
+  const currentModel = meta?.model || '';
+  const currentUrl = meta?.endpoint_url || '';
+  const currentEndpointId = meta?.endpoint_id || '';
+  if (currentModel === dc.model && currentUrl === dc.endpoint_url && String(currentEndpointId || '') === String(dc.endpoint_id || '')) {
+    return dc;
+  }
+
+  const fd = new FormData();
+  fd.append('model', dc.model);
+  fd.append('endpoint_url', dc.endpoint_url);
+  if (dc.endpoint_id) fd.append('endpoint_id', dc.endpoint_id);
+  fd.append('skip_validation', 'true');
+  const res = await fetch(`${API_BASE}/api/session/${sessionId}`, {
+    method: 'PATCH',
+    credentials: 'same-origin',
+    body: fd,
+  });
+  if (!res.ok) return null;
+  const sMeta = meta || sessions.find(s => String(s.id) === String(sessionId));
+  if (sMeta) {
+    sMeta.model = dc.model;
+    sMeta.endpoint_url = dc.endpoint_url;
+    sMeta.endpoint_id = dc.endpoint_id || sMeta.endpoint_id || '';
+  }
+  return dc;
 }
 
 function _showNewChatUi({ focus = true } = {}) {
@@ -507,7 +553,7 @@ function createSessionItem(s) {
       if (dot) dot.click();
       return;
     }
-    selectSession(s.id);
+    openSidebarSession(s.id);
   });
 
   // Create a dropdown menu button
@@ -730,6 +776,10 @@ function createSessionItem(s) {
     if (wasCurrentSession && window.chatModule && window.chatModule.abortCurrentRequest) {
       window.chatModule.abortCurrentRequest();
     }
+    const idx = sessions.findIndex(x => String(x.id) === String(s.id));
+    const nextSession = sessions.filter(x => !x.archived && String(x.id) !== String(s.id))[Math.max(0, idx)] ||
+                        sessions.find(x => !x.archived && String(x.id) !== String(s.id));
+    const dashboardTargetId = wasCurrentSession ? nextSession?.id : currentSessionId;
     _deselectCurrentSession(s.id);
     _removeSessionFromLocalState(s.id);
     _skipAutoSelect = true;
@@ -752,6 +802,7 @@ function createSessionItem(s) {
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
     } catch (e) { /* network error — session may still exist server-side */ }
     await loadSessions();
+    window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);
   });
 
   archiveItem.addEventListener('click', async () => {
@@ -1465,6 +1516,7 @@ export async function loadSessions() {
         url: persistedDraft.url || '',
         modelId: persistedDraft.modelId || '',
         endpointId: persistedDraft.endpointId || '',
+        source: persistedDraft.source || '',
       };
     }
     const hasNewChatDraft = !!_pendingChat || restoringNewChatDraft;
@@ -1519,7 +1571,7 @@ export async function loadSessions() {
             if (emptyDefault) {
               targetId = emptyDefault.id;
             } else {
-              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+              await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
               // On mobile, hide sidebar so user lands directly in chat
               if (window.innerWidth < 768) {
                 const sb = document.getElementById('sidebar');
@@ -1563,7 +1615,7 @@ export async function loadSessions() {
           const dcRes = await fetch(`${API_BASE}/api/default-chat`);
           const dc = await dcRes.json();
           if (dc.endpoint_url && dc.model) {
-            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+            await createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'default' });
           }
         } catch (_) { /* no default model — that's fine, user can /setup */ }
         _autoCreateInProgress = false;
@@ -1613,6 +1665,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       if (presetsModule && presetsModule.onSessionSwitch) presetsModule.onSessionSwitch(id);
     } catch (e) {}
     const meta = sessions.find(s => s.id === id);
+    const defaultChat = await _applyDefaultChatModelToSession(id, meta);
 
     // Detach any in-flight stream to background instead of aborting
     try {
@@ -1683,7 +1736,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
       const data = await res.json();
       if (navToken !== _sessionNavToken || currentSessionId !== id) return;
       msgHistory = data.history || [];
-      modelName = data.model || null;
+      modelName = defaultChat?.model || data.model || null;
       // The model returned by /api/history is the authoritative one the
       // backend will use for this session. Write it back into the cached
       // session meta and refresh the picker so the displayed model can
@@ -1848,9 +1901,9 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
 }
 
 // Pending session — stored locally until the first message is sent
-let _pendingChat = null; // { url, modelId, endpointId }
+let _pendingChat = null; // { url, modelId, endpointId, source }
 
-export function createDirectChat(url, modelId, endpointId) {
+export function createDirectChat(url, modelId, endpointId, options = {}) {
   _sessionNavToken++;
   const previousSessionId = currentSessionId;
   // Detach any active stream so it doesn't interfere with the new chat
@@ -1865,8 +1918,13 @@ export function createDirectChat(url, modelId, endpointId) {
   }
 
   // Don't hit the API — just store the model info and prepare the UI
-  _pendingChat = { url, modelId, endpointId };
-  _writeNewChatDraft({ url: url || '', modelId: modelId || '', endpointId: endpointId || '' });
+  _pendingChat = { url, modelId, endpointId, source: options.source || 'user' };
+  _writeNewChatDraft({
+    url: url || '',
+    modelId: modelId || '',
+    endpointId: endpointId || '',
+    source: _pendingChat.source || '',
+  });
   _skipAutoSelect = true;
   currentSessionId = null;
   try {
@@ -2019,6 +2077,15 @@ export function setCurrentSessionId(id) {
   }
 }
 
+function openSidebarSession(sessionId) {
+  if (!sessionId) return;
+  if (window.sessionControlModule?.viewFullConversation) {
+    window.sessionControlModule.viewFullConversation(sessionId);
+    return;
+  }
+  selectSession(sessionId);
+}
+
 // Session list keyboard navigation: arrows to move, Delete to delete
 async function _onSessionListKeydown(e) {
   const item = e.target.closest('.list-item[data-session-id]');
@@ -2052,9 +2119,15 @@ async function _onSessionListKeydown(e) {
     if (!ok) return;
     _sessionListFocused = true;
     (async () => {
+      const wasCurrentSession = String(currentSessionId || '') === String(s.id);
+      const idx = sessions.findIndex(x => String(x.id) === String(s.id));
+      const nextSession = sessions.filter(x => !x.archived && String(x.id) !== String(s.id))[Math.max(0, idx)] ||
+                          sessions.find(x => !x.archived && String(x.id) !== String(s.id));
+      const dashboardTargetId = wasCurrentSession ? nextSession?.id : currentSessionId;
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
       _deselectCurrentSession(s.id);
       await loadSessions();
+      window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);
     })();
     return;
   }
@@ -2062,7 +2135,7 @@ async function _onSessionListKeydown(e) {
   if (e.key === 'Enter') {
     e.preventDefault();
     const sid = item.dataset.sessionId;
-    if (sid) selectSession(sid);
+    if (sid) openSidebarSession(sid);
     return;
   }
 }
