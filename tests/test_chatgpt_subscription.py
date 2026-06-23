@@ -1,3 +1,5 @@
+import json
+
 from src.chatgpt_subscription import (
     RESPONSES_TEXT_TOOL_PROTOCOL,
     build_responses_input,
@@ -46,3 +48,20 @@ def test_subscription_protocol_xml_is_executable_when_fenced_calls_are_disabled(
     assert len(blocks) == 1
     assert blocks[0].tool_type == "web_search"
     assert blocks[0].content == "latest GPT-5.5 release notes"
+
+
+def test_subscription_tool_code_preserves_structured_skill_fields():
+    response = """<tool_code>
+{tool => 'manage_skills', args => '{"action":"add","name":"listen-to-music","procedure":["Open YouTube","Click the official video"]}'}
+</tool_code>"""
+
+    blocks = parse_tool_blocks(response, skip_fenced=True)
+
+    assert len(blocks) == 1
+    assert blocks[0].tool_type == "manage_skills"
+    assert json.loads(blocks[0].content)["procedure"] == [
+        "Open YouTube",
+        "Click the official video",
+    ]
+    assert "manage_skills" in RESPONSES_TEXT_TOOL_PROTOCOL
+    assert "<tool_code>" in RESPONSES_TEXT_TOOL_PROTOCOL
