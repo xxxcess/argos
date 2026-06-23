@@ -1,0 +1,182 @@
+name: Apply tool-code JSON envelope fix
+
+on:
+  push:
+    branches:
+      - fix-subscription-tool-code-json-envelopes
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore: bootstrap tool code JSON envelope fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Preserve quoted JSON tool-code arguments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          parser_path = Path("src/tool_parsing.py")
+          text = parser_path.read_text(encoding="utf-8")
+          start = text.index("def _parse_tool_code_block(raw: str)")
+          end = text.index("\ndef parse_tool_blocks", start)
+          replacement = '''def _decode_tool_code_json_args(raw: str) -> Optional[dict]:
+              """Decode a JSON object passed through the textual ``args =>`` form.
+
+              Subscription models commonly wrap the object in either a JSON string
+              (``args => "{\\"action\\": ...}"``) or a single-quoted envelope
+              (``args => '{"action": ...}'``). Preserve the outer text until it
+              has been decoded; stripping quotes first turns the first form into
+              invalid ``\\"...`` JSON.
+              """
+              raw = (raw or "").strip()
+              if not raw:
+                  return None
+              candidates = [raw]
+              if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+                  candidates.append(raw[1:-1])
+              for candidate in candidates:
+                  try:
+                      decoded = json.loads(candidate)
+                  except json.JSONDecodeError:
+                      continue
+                  if isinstance(decoded, dict):
+                      return decoded
+                  if isinstance(decoded, str):
+                      try:
+                          nested = json.loads(decoded)
+                      except json.JSONDecodeError:
+                          continue
+                      if isinstance(nested, dict):
+                          return nested
+              return None
+
+
+          def _parse_tool_code_block(raw: str) -> Optional[ToolBlock]:
+              """Parse a <tool_code>{tool => 'name', args => '...'}</tool_code> block.
+
+              Structured ``args`` are routed through the same converter as native
+              function calls, including quoted JSON envelopes emitted by ChatGPT
+              Subscription models. Raw scalar and XML-parameter fallbacks remain
+              available for MiniMax-style calls.
+              """
+              tool_match = re.search(r"tool\\s*=>\\s*['\\\"](\\S+?)['\\\"]", raw)
+              if not tool_match:
+                  return None
+              tool_name = tool_match.group(1).lower().replace('-', '_')
+              for prefix in ("mcp__", "cli_mcp_server_", "desktop_commander_", "mcp_code_executor_"):
+                  if tool_name.startswith(prefix):
+                      tool_name = tool_name[len(prefix):]
+                      break
+              mapped = _TOOL_NAME_MAP.get(tool_name)
+
+              args_match = re.search(r"args\\s*=>\\s*([\\s\\S]*?)\\s*$", raw, re.DOTALL)
+              args_body = args_match.group(1).strip() if args_match else ""
+              decoded_args = _decode_tool_code_json_args(args_body)
+              if decoded_args is not None:
+                  from src.tool_schemas import function_call_to_tool_block
+                  block = function_call_to_tool_block(mapped or tool_name, json.dumps(decoded_args))
+                  if block:
+                      return block
+                  if tool_name:
+                      return ToolBlock(mapped or tool_name, json.dumps(decoded_args))
+
+              xml_params = {}
+              for pm in re.finditer(r"<(\\w+)>([\\s\\S]*?)</\\1>", args_body):
+                  xml_params[pm.group(1)] = pm.group(2).strip()
+              if xml_params:
+                  from src.tool_schemas import function_call_to_tool_block
+                  block = function_call_to_tool_block(mapped or tool_name, json.dumps(xml_params))
+                  if block:
+                      return block
+
+              if mapped:
+                  scalar_args = args_body.strip("'\\\"")
+                  if mapped == "bash":
+                      content = xml_params.get("command", scalar_args)
+                  elif mapped == "python":
+                      content = xml_params.get("code", scalar_args)
+                  elif mapped == "web_search":
+                      content = xml_params.get("query", scalar_args)
+                  elif mapped == "web_fetch":
+                      content = xml_params.get("url", scalar_args)
+                  elif mapped in ("read_file", "write_file"):
+                      content = xml_params.get("path", xml_params.get("file_path", scalar_args))
+                  else:
+                      content = "\\n".join(f"{k}: {v}" for k, v in xml_params.items()) if xml_params else scalar_args
+                  if content:
+                      return ToolBlock(mapped, content.strip())
+              elif tool_name and args_body:
+                  return ToolBlock(tool_name, args_body.strip("'\\\""))
+              return None
+          '''
+          parser_path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+
+          subscription_path = Path("src/chatgpt_subscription.py")
+          subscription = subscription_path.read_text(encoding="utf-8")
+          old = '''For `manage_skills` with `action: "add"`, always use `<tool_code>` and send
+`procedure`, `pitfalls`, `verification`, `tags`, and other list fields as JSON
+arrays. Never put an entire SKILL.md document or Markdown body inside
+`procedure`; each array element must be one complete step.
+'''
+          new = '''For `manage_skills` with `action: "add"`, always use `<tool_code>` and send
+`procedure`, `pitfalls`, `verification`, `tags`, and other list fields as JSON
+arrays. Never put an entire SKILL.md document or Markdown body inside
+`procedure`; each array element must be one complete step. For `action: "edit"`,
+send a complete SKILL.md string in `content`; do not send partial `procedure`
+fields. Use a direct JSON object after `args =>` when possible, for example
+`args => {"action":"edit","name":"skill","content":"---\\n..."}`.
+'''
+          if old not in subscription:
+              raise SystemExit("subscription protocol anchor not found")
+          subscription_path.write_text(subscription.replace(old, new, 1), encoding="utf-8")
+
+          test_path = Path("tests/test_chatgpt_subscription.py")
+          tests = test_path.read_text(encoding="utf-8")
+          if "test_subscription_tool_code_decodes_quoted_json_envelopes" not in tests:
+              tests += '''\n\ndef test_subscription_tool_code_decodes_quoted_json_envelopes():
+                  payload = {
+                      "action": "edit",
+                      "name": "listen-to-music",
+                      "content": "---\\nname: listen-to-music\\n---\\n\\n## Procedure\\n\\n1. Open YouTube",
+                  }
+                  payload_json = json.dumps(payload, separators=(",", ":"))
+                  responses = [
+                      f'<tool_code>\\n{{tool => "manage_skills", args => {json.dumps(payload_json)}}}\\n</tool_code>',
+                      f"<tool_code>\\n{{tool => 'manage_skills', args => '{payload_json}'}}\\n</tool_code>",
+                  ]
+
+                  for response in responses:
+                      blocks = parse_tool_blocks(response, skip_fenced=True)
+                      assert len(blocks) == 1
+                      assert blocks[0].tool_type == "manage_skills"
+                      assert json.loads(blocks[0].content) == payload
+          '''
+              test_path.write_text(tests, encoding="utf-8")
+          PY
+          python -m py_compile src/tool_parsing.py src/chatgpt_subscription.py tests/test_chatgpt_subscription.py
+          python - <<'PY'
+          import json
+          from src.tool_parsing import parse_tool_blocks
+          payload = {"action": "edit", "name": "listen-to-music", "content": "---\\nname: listen-to-music\\n---"}
+          wire = json.dumps(json.dumps(payload, separators=(",", ":")))
+          response = f'<tool_code>\n{{tool => "manage_skills", args => {wire}}}\n</tool_code>'
+          blocks = parse_tool_blocks(response, skip_fenced=True)
+          assert len(blocks) == 1
+          assert json.loads(blocks[0].content) == payload
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/_bootstrap-tool-code-json-envelope-fix.yml
+          git add src/tool_parsing.py src/chatgpt_subscription.py tests/test_chatgpt_subscription.py
+          git commit -m "fix: decode quoted tool-code JSON envelopes"
+          git push origin HEAD:fix-subscription-tool-code-json-envelopes
