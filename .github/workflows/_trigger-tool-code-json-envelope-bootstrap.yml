@@ -1,0 +1,28 @@
+name: Trigger tool-code JSON envelope fix
+
+on:
+  pull_request:
+    branches:
+      - nightly
+
+permissions:
+  contents: write
+
+jobs:
+  arm:
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: Trigger one-time patch runner
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/_trigger-tool-code-json-envelope-bootstrap.yml
+          git commit -m "chore: bootstrap tool code JSON envelope fix"
+          git push origin HEAD:fix-subscription-tool-code-json-envelopes
