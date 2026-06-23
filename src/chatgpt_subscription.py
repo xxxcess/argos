@@ -30,6 +30,42 @@ CHATGPT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 _AUTH_REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _AUTH_REFRESH_LOCKS_GUARD = threading.Lock()
 
+# The ChatGPT Subscription/Codex adapter currently uses the Responses text
+# stream and does not receive a provider-native `tools` array. It must therefore
+# have one unambiguous, executable textual protocol. Argos parses the XML
+# `<tool_call><invoke ...>` form independently of fenced-code parsing, including
+# for API/native-model classifications, so this remains executable when fenced
+# blocks are intentionally treated as illustrative examples.
+#
+# Keep this as a developer message close to the active request instead of
+# appending it to the large system prompt. The latter is cached, user-editable
+# context can be nearby, and the instruction must be highly salient at the
+# moment a tool is needed.
+RESPONSES_TEXT_TOOL_PROTOCOL = """\
+TOOL EXECUTION PROTOCOL FOR THIS REQUEST
+
+The native function-call channel is unavailable in this ChatGPT Subscription
+runtime. When the instructions list an available tool and that tool is needed,
+call it by emitting ONLY this XML form (never a Markdown code fence and never a
+prose promise to act):
+
+<tool_call>
+<invoke name="exact_tool_name">
+<parameter name="exact_argument_name">argument value</parameter>
+</invoke>
+</tool_call>
+
+Rules:
+- Use the exact tool name and exact argument names from the available-tool
+  instructions.
+- Emit one <parameter> element for every required argument. Put JSON text inside
+  a parameter only when that argument itself requires a structured value.
+- A response containing a tool call must not include explanations, plans, or
+  user-facing prose. Wait for the tool result, then continue.
+- Never claim that an action was taken unless its tool result confirms it.
+- When no listed tool is needed, answer normally and do not emit XML.
+"""
+
 
 def _database_handles():
     from core.database import ProviderAuthSession, SessionLocal, utcnow_naive
@@ -299,17 +335,50 @@ def to_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(502, str(exc))
 
 
-def build_responses_input(messages: list[dict]) -> list[dict]:
+def _message_content_as_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text") or part.get("content") or "")
+            for part in content
+            if isinstance(part, dict)
+        )
+    return "" if content is None else str(content)
+
+
+def _tool_protocol_input_item() -> dict:
+    return {
+        "role": "developer",
+        "content": [{"type": "input_text", "text": RESPONSES_TEXT_TOOL_PROTOCOL}],
+    }
+
+
+def build_responses_input(messages: list[dict], *, inject_tool_protocol: bool = True) -> list[dict]:
+    """Convert canonical Argos history to Responses input items.
+
+    ChatGPT Subscription does not currently receive a native `tools` payload
+    from the adapter. Put the XML protocol immediately before the latest input
+    item, where it stays salient throughout multi-round tool execution. The
+    parser accepts this XML form even for models classified as native callers.
+    """
     input_items: list[dict] = []
+    protocol_index: Optional[int] = None
+
     for msg in messages or []:
         role = msg.get("role") or "user"
         if role == "tool":
             role = "user"
-        content = msg.get("content")
-        if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
-        else:
-            text = "" if content is None else str(content)
+        content = _message_content_as_text(msg.get("content"))
         input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+        item = {"role": role, "content": [{"type": input_type, "text": content}]}
+        input_items.append(item)
+        if role == "user":
+            protocol_index = len(input_items) - 1
+
+    if inject_tool_protocol:
+        # A tool-result envelope is represented as a user item too, so inserting
+        # immediately before the most recent user input covers both a first tool
+        # request and the next agent round after a tool execution.
+        insert_at = protocol_index if protocol_index is not None else len(input_items)
+        input_items.insert(insert_at, _tool_protocol_input_item())
+
     return input_items
