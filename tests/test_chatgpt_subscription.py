@@ -65,3 +65,31 @@ def test_subscription_tool_code_preserves_structured_skill_fields():
     ]
     assert "manage_skills" in RESPONSES_TEXT_TOOL_PROTOCOL
     assert "<tool_code>" in RESPONSES_TEXT_TOOL_PROTOCOL
+
+
+def test_subscription_tool_code_decodes_transcript_quoted_json_envelopes():
+    payload = {
+        "action": "edit",
+        "name": "listen-to-music",
+        "content": "---\nname: listen-to-music\n---\n\n## Procedure\n\n1. Open YouTube",
+        "procedure": ["This field is preserved for parser coverage."],
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    responses = [
+        f'<tool_code>\n{{tool => "manage_skills", args => {json.dumps(payload_json)}}}\n</tool_code>',
+        f"<tool_code>\n{{tool => 'manage_skills', args => '{payload_json}'}}\n</tool_code>",
+    ]
+
+    # The subscription request builder installs the parser compatibility hook.
+    build_responses_input([], inject_tool_protocol=False)
+
+    for response in responses:
+        blocks = parse_tool_blocks(response, skip_fenced=True)
+        assert len(blocks) == 1
+        assert blocks[0].tool_type == "manage_skills"
+        assert json.loads(blocks[0].content) == payload
+
+
+def test_subscription_protocol_requires_full_content_for_skill_edits():
+    assert "action: \"edit\"" in RESPONSES_TEXT_TOOL_PROTOCOL
+    assert "complete SKILL.md string in `content`" in RESPONSES_TEXT_TOOL_PROTOCOL
