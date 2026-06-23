@@ -248,7 +248,7 @@ def exchange_authorization_code(authorization_code: str, code_verifier: str, tim
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={
             "grant_type": "authorization_code",
-            "authorization_code": authorization_code,
+            "code": authorization_code,
             "redirect_uri": CHATGPT_OAUTH_REDIRECT_URI,
             "client_id": CHATGPT_OAUTH_CLIENT_ID,
             "code_verifier": code_verifier,
