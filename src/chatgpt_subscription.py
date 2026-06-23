@@ -55,11 +55,24 @@ prose promise to act):
 </invoke>
 </tool_call>
 
+For a tool argument that is an array or object, use the raw-JSON `<tool_code>`
+form instead. XML parameter text is scalar and would otherwise flatten the
+structured value into a string:
+
+<tool_code>
+{tool => "exact_tool_name", args => '{"argument_name": ["first value", "second value"]}'}
+</tool_code>
+
+For `manage_skills` with `action: "add"`, always use `<tool_code>` and send
+`procedure`, `pitfalls`, `verification`, `tags`, and other list fields as JSON
+arrays. Never put an entire SKILL.md document or Markdown body inside
+`procedure`; each array element must be one complete step.
+
 Rules:
 - Use the exact tool name and exact argument names from the available-tool
   instructions.
-- Emit one <parameter> element for every required argument. Put JSON text inside
-  a parameter only when that argument itself requires a structured value.
+- Emit one <parameter> element for every required scalar argument. Use
+  `<tool_code>` whenever any argument is structured.
 - A response containing a tool call must not include explanations, plans, or
   user-facing prose. Wait for the tool result, then continue.
 - Never claim that an action was taken unless its tool result confirms it.
@@ -235,7 +248,7 @@ def exchange_authorization_code(authorization_code: str, code_verifier: str, tim
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data={
             "grant_type": "authorization_code",
-            "code": authorization_code,
+            "authorization_code": authorization_code,
             "redirect_uri": CHATGPT_OAUTH_REDIRECT_URI,
             "client_id": CHATGPT_OAUTH_CLIENT_ID,
             "code_verifier": code_verifier,
