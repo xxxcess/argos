@@ -7,9 +7,11 @@ and resolves a fresh bearer token at request time.
 
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -60,13 +62,15 @@ form instead. XML parameter text is scalar and would otherwise flatten the
 structured value into a string:
 
 <tool_code>
-{tool => "exact_tool_name", args => '{"argument_name": ["first value", "second value"]}'}
+{tool => "exact_tool_name", args => {"argument_name": ["first value", "second value"]}}
 </tool_code>
 
 For `manage_skills` with `action: "add"`, always use `<tool_code>` and send
 `procedure`, `pitfalls`, `verification`, `tags`, and other list fields as JSON
 arrays. Never put an entire SKILL.md document or Markdown body inside
-`procedure`; each array element must be one complete step.
+`procedure`; each array element must be one complete step. For `action: "edit"`,
+send a complete SKILL.md string in `content`; partial `procedure`, `pitfalls`,
+or `verification` fields are not an edit payload.
 
 Rules:
 - Use the exact tool name and exact argument names from the available-tool
@@ -78,6 +82,90 @@ Rules:
 - Never claim that an action was taken unless its tool result confirms it.
 - When no listed tool is needed, answer normally and do not emit XML.
 """
+
+
+def _decode_quoted_tool_code_args(raw: str) -> Optional[Dict[str, Any]]:
+    """Decode a structured textual ``args =>`` value without stripping first.
+
+    ChatGPT Subscription models emit both a JSON-string envelope such as
+    ``args => "{\\"action\\":...}"`` and a single-quoted envelope such as
+    ``args => '{"action":...}'``. The legacy parser removes outer quotes before
+    decoding, which leaves the former as invalid escaped JSON. This decoder
+    accepts raw objects and both envelopes, returning only JSON objects.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+
+    candidates = [raw]
+    try:
+        literal = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        literal = None
+    if isinstance(literal, str) and literal != raw:
+        candidates.append(literal)
+
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        candidates.append(raw[1:-1])
+
+    for candidate in candidates:
+        try:
+            decoded = json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+        if isinstance(decoded, str):
+            try:
+                nested = json.loads(decoded)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(nested, dict):
+                return nested
+    return None
+
+
+def _install_quoted_tool_code_compatibility() -> None:
+    """Preserve subscription model JSON arguments before the shared parser strips.
+
+    The shared text-tool parser predates the Subscription protocol and treats
+    ``args =>`` as a scalar. Install a narrowly scoped compatibility wrapper on
+    first subscription request, then delegate every non-JSON form to the
+    existing parser unchanged.
+    """
+    try:
+        import src.tool_parsing as tool_parsing
+    except Exception:
+        return
+
+    if getattr(tool_parsing, "_chatgpt_subscription_quoted_args_compat", False):
+        return
+    fallback = getattr(tool_parsing, "_parse_tool_code_block", None)
+    if not callable(fallback):
+        return
+
+    def _parse_tool_code_block(raw: str):
+        tool_match = re.search(r"tool\s*=>\s*['\"](\S+?)['\"]", raw or "")
+        args_match = re.search(r"args\s*=>\s*([\s\S]*?)\s*$", raw or "", re.DOTALL)
+        args = _decode_quoted_tool_code_args(args_match.group(1) if args_match else "")
+        if tool_match and args is not None:
+            tool_name = tool_match.group(1).lower().replace("-", "_")
+            for prefix in ("cli_mcp_server_", "desktop_commander_", "mcp_code_executor_"):
+                if tool_name.startswith(prefix):
+                    tool_name = tool_name[len(prefix):]
+                    break
+            mapped = getattr(tool_parsing, "_TOOL_NAME_MAP", {}).get(tool_name, tool_name)
+            try:
+                from src.tool_schemas import function_call_to_tool_block
+                block = function_call_to_tool_block(mapped, json.dumps(args))
+            except Exception:
+                block = None
+            if block:
+                return block
+        return fallback(raw)
+
+    tool_parsing._parse_tool_code_block = _parse_tool_code_block
+    tool_parsing._chatgpt_subscription_quoted_args_compat = True
 
 
 def _database_handles():
@@ -373,6 +461,7 @@ def build_responses_input(messages: list[dict], *, inject_tool_protocol: bool = 
     item, where it stays salient throughout multi-round tool execution. The
     parser accepts this XML form even for models classified as native callers.
     """
+    _install_quoted_tool_code_compatibility()
     input_items: list[dict] = []
     protocol_index: Optional[int] = None
 
