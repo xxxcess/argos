@@ -30,8 +30,9 @@ substantially more likely to cause memory pressure or long CPU fallbacks.
    an enabled **Image** endpoint, and saves it as your Image Default.
 6. Open **Settings → AI Defaults → Image Generation** to confirm
    **Local Diffusers Image / local-sd-turbo** is selected.
-7. Ask normal chat to generate an image. A selected local Image Default wins over
-   a tool call that names `gpt-image-1` or `dall-e-2`.
+7. Ask normal chat to generate an image. The normal chat image tool and agent
+   `generate_image` tool both route through the selected local Image Default,
+   even when an LLM names `gpt-image-1` or `dall-e-2`.
 
 The first startup downloads the model into the Hugging Face cache. The server
 binds to loopback only, and its task remains visible/manageable through
