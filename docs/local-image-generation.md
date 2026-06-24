@@ -18,34 +18,40 @@ Start with **SD Turbo** at **512×512**:
 Do not begin with SDXL, SD 3.5, or FLUX on an 8 GB unified-memory Mac. They are
 substantially more likely to cause memory pressure or long CPU fallbacks.
 
-## Install the optional runtime
+## Fully integrated UI flow
 
-In the same virtual environment used to run the server, install:
+1. Open **Cookbook → Serve**.
+2. Use the **Diffusers Image Server** card.
+3. Click **Install runtime**. This creates a normal Cookbook task that installs
+   `diffusers[torch]`, `transformers`, `accelerate`, and `safetensors`; monitor it
+   in **Cookbook → Running**.
+4. Keep **SD Turbo — recommended** selected and click **Start local image server**.
+5. Cookbook starts the process on loopback, converts its discovered endpoint to
+   an enabled **Image** endpoint, and saves it as your Image Default.
+6. Open **Settings → AI Defaults → Image Generation** to confirm
+   **Local Diffusers Image / local-sd-turbo** is selected.
+7. Ask normal chat to generate an image. A selected local Image Default wins over
+   a tool call that names `gpt-image-1` or `dall-e-2`.
 
-```bash
-uv pip install 'diffusers[torch]' transformers accelerate safetensors
-```
+The first startup downloads the model into the Hugging Face cache. The server
+binds to loopback only, and its task remains visible/manageable through
+Cookbook.
 
-The Cookbook Dependencies tab should use this exact optional package set. The
-main Argos `requirements.txt` intentionally does not include it.
+## Manual server operation
 
-## Start the local server
-
-From the repository root:
+The UI is the recommended route. For development or headless operation, start
+it from the repository root:
 
 ```bash
 PYTORCH_ENABLE_MPS_FALLBACK=1 \
 python -m src.local_image_server \
   --profile sd-turbo \
-  --served-model-id sd-turbo \
+  --served-model-id local-sd-turbo \
   --device auto \
   --host 127.0.0.1 \
   --port 7861 \
   --max-size 512
 ```
-
-The first startup downloads the selected model to the Hugging Face cache. The
-server binds to loopback only. It refuses public bind addresses by design.
 
 Confirm that it is running:
 
@@ -54,9 +60,8 @@ curl http://127.0.0.1:7861/health
 curl http://127.0.0.1:7861/v1/models
 ```
 
-## Connect it to Argos
-
-Add an enabled endpoint in **Settings → Services → Add Models**:
+When registering a manually started server, add an enabled endpoint in
+**Settings → Services → Add Models**:
 
 - **Name:** `Local Diffusers Image`
 - **Base URL:** `http://127.0.0.1:7861/v1`
@@ -69,12 +74,13 @@ Argos discovers the exposed model from `/v1/models` and generates through:
 POST /v1/images/generations
 ```
 
-The server returns OpenAI-compatible `b64_json` PNG data, which Argos already
-persists in Gallery.
+The server returns OpenAI-compatible `b64_json` PNG data, which Argos persists
+in Gallery.
 
-## Advanced SD 1.5 profile
+## Advanced SD 1.5-compatible profile
 
-`sd15-lcm` is an advanced profile for a compatible, accessible SD 1.5 model:
+`sd15-lcm` is an advanced low-resolution profile for an accessible SD 1.5
+compatible repository:
 
 ```bash
 python -m src.local_image_server \
@@ -89,11 +95,10 @@ concurrent generations do not load multiple pipelines into 8 GB memory.
 
 ## Troubleshooting
 
-- **`Diffusers runtime is not installed`**: install the optional dependencies
-  into the server's virtual environment.
+- **`Diffusers runtime is not installed`**: use **Cookbook → Serve → Install runtime**.
 - **MPS unavailable**: use `--device auto`; it falls back to CUDA or CPU.
   CPU is supported but slow.
 - **Model download/authentication failure**: choose an accessible Hugging Face
   repository, or configure the token in the environment used by the server.
-- **Image too large**: lower it to 512×512, or explicitly raise `--max-size`
-  only after confirming your hardware can handle it.
+- **Image too large**: the integrated `local-*` defaults clamp normal tool calls
+  to 512×512. Raise `--max-size` only after confirming the hardware can handle it.
