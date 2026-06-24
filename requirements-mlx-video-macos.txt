@@ -1,0 +1,4 @@
+# Optional native Apple Silicon video-generation runtime.
+# Install only inside Argos's native macOS virtual environment.
+# Do not add this file to Docker/Linux requirements.
+mlx-video>=0.4.0
