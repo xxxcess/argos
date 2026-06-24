@@ -79,3 +79,10 @@ def test_health_reports_selected_profile_and_device():
     assert health["model"] == "sd-turbo"
     assert health["device"] == "mps"
     assert health["max_size"] == 512
+
+
+def test_models_are_discoverable_before_pipeline_load():
+    service = LocalImageService(PROFILES["sd-turbo"], "local-sd-turbo")
+    assert service.pipeline is None
+    assert service.health()["status"] == "starting"
+    assert service.served_model_id == "local-sd-turbo"
