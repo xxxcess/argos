@@ -5,6 +5,7 @@
 // loads. Keep these side-effect imports here because storage.js is the first UI
 // module loaded by index.html on every page.
 import './localImageIntegration.js';
+import './localImageFreshLoad.js';
 import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 
