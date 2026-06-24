@@ -26,35 +26,55 @@ def test_cap_local_size_preserves_small_valid_requests_and_clamps_defaults():
     assert _cap_local_size("cat\nlocal-sd-turbo") == "cat\nlocal-sd-turbo\n512x512"
 
 
-def test_installed_wrapper_uses_context_local_endpoint(monkeypatch):
-    calls = []
+def test_installed_wrapper_routes_selected_endpoint_without_model_lookup(monkeypatch):
+    fallback_calls = []
+    direct_calls = []
 
-    def resolver(spec, owner=None):
-        return ("https://cloud.example/v1/chat/completions", spec, {})
+    async def legacy_generate(content, session_id=None, owner=None):
+        fallback_calls.append((content, session_id, owner))
+        return {"legacy": True}
 
-    async def generate(content, session_id=None, owner=None):
-        calls.append(content)
-        return {"ok": True}
-
-    module = SimpleNamespace(_resolve_model=resolver, do_generate_image=generate)
+    module = SimpleNamespace(do_generate_image=legacy_generate)
     install_image_generation_defaults(module)
 
     selected = ConfiguredImageEndpoint(
         endpoint_id="local-image",
+        endpoint_name="Local Diffusers Image",
         model="local-sd-turbo",
         base_url="http://127.0.0.1:7861/v1",
         headers={},
+        is_local=True,
     )
+
+    async def direct_generate(content, endpoint, *, session_id=None, owner=None):
+        direct_calls.append((content, endpoint, session_id, owner))
+        return {"image_url": "/api/generated-image/cat.png"}
+
     monkeypatch.setattr(
         "src.image_generation_defaults.resolve_configured_image_endpoint",
         lambda owner: selected,
     )
+    monkeypatch.setattr("src.image_generation_defaults.generate_configured_image", direct_generate)
 
-    result = asyncio.run(module.do_generate_image("a cat\ngpt-image-1\n1024x1024\nhigh", owner="alice"))
+    result = asyncio.run(module.do_generate_image("a cat\ngpt-image-1\n1024x1024\nhigh", session_id="s1", owner="alice"))
 
-    assert result == {"ok": True}
-    assert calls == ["a cat\nlocal-sd-turbo\n512x512\nhigh"]
-    url, model, _headers = module._resolve_model("local-sd-turbo", owner="alice")
-    # Outside the wrapped request no context override remains.
-    assert url.startswith("https://cloud.example")
-    assert model == "local-sd-turbo"
+    assert result == {"image_url": "/api/generated-image/cat.png"}
+    assert fallback_calls == []
+    assert direct_calls == [("a cat\ngpt-image-1\n1024x1024\nhigh", selected, "s1", "alice")]
+
+
+def test_unconfigured_wrapper_keeps_legacy_cloud_path(monkeypatch):
+    fallback_calls = []
+
+    async def legacy_generate(content, session_id=None, owner=None):
+        fallback_calls.append((content, session_id, owner))
+        return {"legacy": True}
+
+    module = SimpleNamespace(do_generate_image=legacy_generate)
+    install_image_generation_defaults(module)
+    monkeypatch.setattr("src.image_generation_defaults.resolve_configured_image_endpoint", lambda owner: None)
+
+    result = asyncio.run(module.do_generate_image("a cloud cat", owner="alice"))
+
+    assert result == {"legacy": True}
+    assert fallback_calls == [("a cloud cat", None, "alice")]
