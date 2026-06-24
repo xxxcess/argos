@@ -247,33 +247,33 @@ function sameLocalServer(endpoint) {
   } catch (_) { return false; }
 }
 
-async function registerStartedServer() {
-  for (let i = 0; i < 20; i += 1) {
+async function registerStartedServer(initialEndpointId = '') {
+  let endpointId = initialEndpointId || '';
+  for (let i = 0; !endpointId && i < 20; i += 1) {
     const endpoints = await fetchJson('/api/model-endpoints').catch(() => []);
     const serverEndpoint = (endpoints || []).find(sameLocalServer);
-    if (serverEndpoint) {
-      await fetchJson(`/api/model-endpoints/${encodeURIComponent(serverEndpoint.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: LOCAL_ENDPOINT_NAME,
-          model_type: 'image',
-          endpoint_kind: 'local',
-          pinned_models: [LOCAL_MODEL_ID],
-          is_enabled: true,
-        }),
-      });
-      await refreshImageDefaults();
-      const select = byId('set-imgEndpointSelect');
-      if (select) select.value = serverEndpoint.id;
-      renderModelOptions(LOCAL_MODEL_ID);
-      await saveImageDefaults();
-      window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated'));
-      return true;
-    }
-    await sleep(750);
+    if (serverEndpoint) endpointId = serverEndpoint.id;
+    else await sleep(750);
   }
-  return false;
+  if (!endpointId) return false;
+  await fetchJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: LOCAL_ENDPOINT_NAME,
+      model_type: 'image',
+      endpoint_kind: 'local',
+      pinned_models: [LOCAL_MODEL_ID],
+      is_enabled: true,
+    }),
+  });
+  await refreshImageDefaults();
+  const select = byId('set-imgEndpointSelect');
+  if (select) select.value = endpointId;
+  renderModelOptions(LOCAL_MODEL_ID);
+  await saveImageDefaults();
+  window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated'));
+  return true;
 }
 
 async function startLocalServer() {
@@ -281,12 +281,12 @@ async function startLocalServer() {
   if (button) button.disabled = true;
   setStatus('Starting local SD Turbo in Cookbook…', false);
   try {
-    await startCookbookTask(
+    const task = await startCookbookTask(
       'stabilityai/sd-turbo',
       'PYTORCH_ENABLE_MPS_FALLBACK=1 python3 -m src.local_image_server --profile sd-turbo --served-model-id local-sd-turbo --device auto --host 127.0.0.1 --port 7861 --max-size 512'
     );
     if (window.cookbookModule?.open) window.cookbookModule.open({ tab: 'Running' });
-    const registered = await registerStartedServer();
+    const registered = await registerStartedServer(task.endpoint_id || '');
     if (!registered) {
       setStatus('Launch task started. The server will appear here once it reaches /v1/models; refresh this card after startup.', false);
     } else {
