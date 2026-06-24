@@ -3,6 +3,8 @@
 // this card supplies an image-specific, memory-safe command and promotes its
 // auto-created endpoint to model_type="image" immediately after launch.
 
+import { launchTrackedLocalImageTask } from './localImageCookbookTasks.js';
+
 const LOCAL_PORT = 7861;
 const LOCAL_ENDPOINT_NAME = 'Local Diffusers Image';
 const PROFILES = {
@@ -83,15 +85,13 @@ async function installRuntime() {
   if (button) button.disabled = true;
   status('Starting Diffusers dependency task…');
   try {
-    await jsonFetch('/api/model/serve', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        repo_id: 'pip-diffusers',
-        cmd: "python3 -m pip install --no-cache-dir 'diffusers[torch]' transformers accelerate safetensors",
-      }),
+    await launchTrackedLocalImageTask({
+      name: 'Diffusers runtime',
+      repoId: 'pip-diffusers',
+      cmd: "python3 -m pip install --no-cache-dir 'diffusers[torch]' transformers accelerate safetensors",
+      fields: { backend: 'diffusers', _dep: 'diffusers' },
     });
-    status('Install task started. Open Running to follow progress, then launch the image server.');
-    window.cookbookModule?.open?.({ tab: 'Running' });
+    status('Install task started. Follow progress in Active, then launch the image server.');
   } catch (err) {
     status(`Could not start install: ${err.message}`, true);
   } finally {
@@ -114,16 +114,14 @@ async function startServer() {
     const repo = customRepo || profile.repo;
     const model = customRepo ? `local-${profileId}` : profile.model;
     const repoArg = customRepo ? ` --model-repo ${customRepo}` : '';
-    const result = await jsonFetch('/api/model/serve', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        repo_id: repo,
-        cmd: `PYTORCH_ENABLE_MPS_FALLBACK=1 python3 -m src.local_image_server --profile ${profileId}${repoArg} --served-model-id ${model} --device auto --host 127.0.0.1 --port ${LOCAL_PORT} --max-size 512`,
-      }),
+    await launchTrackedLocalImageTask({
+      name: `Local ${profileId}`,
+      repoId: repo,
+      cmd: `PYTORCH_ENABLE_MPS_FALLBACK=1 python3 -m src.local_image_server --profile ${profileId}${repoArg} --served-model-id ${model} --device auto --host 127.0.0.1 --port ${LOCAL_PORT} --max-size 512`,
+      fields: { backend: 'diffusers', port: String(LOCAL_PORT), image_profile: profileId },
     });
-    await promoteEndpoint(result.endpoint_id, model);
+    await promoteEndpoint('', model);
     status(`Local ${profileId} is selected in AI Defaults. Generate an image through normal chat.`);
-    window.cookbookModule?.open?.({ tab: 'Running' });
   } catch (err) {
     status(`Could not launch local image server: ${err.message}`, true);
   } finally {
