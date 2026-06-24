@@ -776,10 +776,6 @@ function createSessionItem(s) {
     if (wasCurrentSession && window.chatModule && window.chatModule.abortCurrentRequest) {
       window.chatModule.abortCurrentRequest();
     }
-    const idx = sessions.findIndex(x => String(x.id) === String(s.id));
-    const nextSession = sessions.filter(x => !x.archived && String(x.id) !== String(s.id))[Math.max(0, idx)] ||
-                        sessions.find(x => !x.archived && String(x.id) !== String(s.id));
-    const dashboardTargetId = wasCurrentSession ? nextSession?.id : currentSessionId;
     _deselectCurrentSession(s.id);
     _removeSessionFromLocalState(s.id);
     _skipAutoSelect = true;
@@ -802,7 +798,7 @@ function createSessionItem(s) {
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
     } catch (e) { /* network error — session may still exist server-side */ }
     await loadSessions();
-    window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);
+    window.sessionControlModule?.showDashboardAfterSessionDelete?.();
   });
 
   archiveItem.addEventListener('click', async () => {
@@ -2120,15 +2116,10 @@ async function _onSessionListKeydown(e) {
     if (!ok) return;
     _sessionListFocused = true;
     (async () => {
-      const wasCurrentSession = String(currentSessionId || '') === String(s.id);
-      const idx = sessions.findIndex(x => String(x.id) === String(s.id));
-      const nextSession = sessions.filter(x => !x.archived && String(x.id) !== String(s.id))[Math.max(0, idx)] ||
-                          sessions.find(x => !x.archived && String(x.id) !== String(s.id));
-      const dashboardTargetId = wasCurrentSession ? nextSession?.id : currentSessionId;
       await fetch(`${API_BASE}/api/session/${s.id}`, { method: 'DELETE' });
       _deselectCurrentSession(s.id);
       await loadSessions();
-      window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);
+      window.sessionControlModule?.showDashboardAfterSessionDelete?.();
     })();
     return;
   }

@@ -35,12 +35,15 @@ const state = {
   recentActivityError: '',
   recentActivityLoadedAt: 0,
   activePanelAutoScroll: true,
+  speakingSessions: new Set(),
 };
 
 const els = {};
 let _composerHome = null;
+let _attachmentHome = null;
 let _deckResizeTimer = null;
 let _activePanelRenderRaf = null;
+let _activePanelScrollTimer = null;
 let _activityFetchPromise = null;
 
 function esc(value) {
@@ -128,7 +131,12 @@ function statusClass(statusLabel, snap) {
 }
 
 function snapshotFor(sessionId) {
-  return state.snapshots.get(String(sessionId)) || chatModule.getSessionStreamSnapshot?.(sessionId) || null;
+  const key = String(sessionId);
+  const base = state.snapshots.get(key) || chatModule.getSessionStreamSnapshot?.(sessionId) || null;
+  if (state.speakingSessions.has(key)) {
+    return Object.assign({ sessionId }, base || {}, { status: 'speaking', isBackground: false, needsAttention: false });
+  }
+  return base;
 }
 
 function renderBubbleContent(element, text) {
@@ -260,6 +268,7 @@ function setDashboardVisible(visible) {
 
 function moveComposerIntoCommandBar() {
   const bar = document.querySelector('.chat-input-bar');
+  const attachStrip = document.getElementById('attach-strip');
   if (!bar || !els.composerSlot || els.composerSlot.contains(bar)) return;
   if (!_composerHome && bar.parentNode) {
     _composerHome = {
@@ -267,16 +276,34 @@ function moveComposerIntoCommandBar() {
       nextSibling: bar.nextSibling,
     };
   }
+  if (attachStrip && !_attachmentHome && attachStrip.parentNode) {
+    _attachmentHome = {
+      parent: attachStrip.parentNode,
+      nextSibling: attachStrip.nextSibling,
+    };
+  }
+  if (attachStrip && !els.composerSlot.contains(attachStrip)) {
+    els.composerSlot.appendChild(attachStrip);
+  }
   els.composerSlot.appendChild(bar);
 }
 
 function restoreComposerToChat() {
   const bar = document.querySelector('.chat-input-bar');
-  if (!bar || !_composerHome || !_composerHome.parent || bar.parentNode === _composerHome.parent) return;
-  if (_composerHome.nextSibling && _composerHome.nextSibling.parentNode === _composerHome.parent) {
-    _composerHome.parent.insertBefore(bar, _composerHome.nextSibling);
-  } else {
-    _composerHome.parent.appendChild(bar);
+  const attachStrip = document.getElementById('attach-strip');
+  if (attachStrip && _attachmentHome && _attachmentHome.parent && attachStrip.parentNode !== _attachmentHome.parent) {
+    if (_attachmentHome.nextSibling && _attachmentHome.nextSibling.parentNode === _attachmentHome.parent) {
+      _attachmentHome.parent.insertBefore(attachStrip, _attachmentHome.nextSibling);
+    } else {
+      _attachmentHome.parent.appendChild(attachStrip);
+    }
+  }
+  if (bar && _composerHome && _composerHome.parent && bar.parentNode !== _composerHome.parent) {
+    if (_composerHome.nextSibling && _composerHome.nextSibling.parentNode === _composerHome.parent) {
+      _composerHome.parent.insertBefore(bar, _composerHome.nextSibling);
+    } else {
+      _composerHome.parent.appendChild(bar);
+    }
   }
   const input = document.getElementById('message');
   if (input) input.placeholder = 'Message Odysseus...';
@@ -510,11 +537,7 @@ function viewNewChatDraft() {
   document.getElementById('message')?.focus();
 }
 
-function showDashboardAfterSessionDelete(nextSessionId = null) {
-  if (nextSessionId) {
-    focusMission(nextSessionId);
-    return;
-  }
+function showDashboardAfterSessionDelete() {
   startNewMissionDraft();
 }
 
@@ -739,7 +762,27 @@ function renderRecentActivity() {
   });
 }
 
-function scrollActivePanelToBottom() {
+function clearActivePanelScrollTimer() {
+  if (_activePanelScrollTimer) {
+    clearTimeout(_activePanelScrollTimer);
+    _activePanelScrollTimer = null;
+  }
+}
+
+function scrollActivePanelToBottom(options = {}) {
+  const delayMs = Math.max(0, Number(options.delayMs || 0));
+  clearActivePanelScrollTimer();
+  const run = () => {
+    _activePanelScrollTimer = null;
+    const chat = els.activePanel?.querySelector('.mission-panel-chat');
+    if (!chat) return;
+    chat.scrollTop = chat.scrollHeight;
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  };
+  if (delayMs > 0) {
+    _activePanelScrollTimer = setTimeout(run, delayMs);
+    return;
+  }
   const chat = els.activePanel?.querySelector('.mission-panel-chat');
   if (!chat) return;
   chat.scrollTop = chat.scrollHeight;
@@ -758,12 +801,14 @@ function updateActivePanelBottomButton() {
 function toggleActivePanelAutoScroll() {
   state.activePanelAutoScroll = !state.activePanelAutoScroll;
   if (state.activePanelAutoScroll) scrollActivePanelToBottom();
+  else clearActivePanelScrollTimer();
   updateActivePanelBottomButton();
 }
 
 function renderActivePanel() {
   if (!els.activePanel) return;
   if (!state.isActiveMissionOpen || !state.activePanelSessionId) {
+    clearActivePanelScrollTimer();
     els.activePanel.hidden = true;
     els.activePanel.innerHTML = '';
     return;
@@ -815,7 +860,7 @@ function renderActivePanel() {
   }
   if (chatMirror) {
     chatMirror.onscroll = updateActivePanelBottomButton;
-    if (state.activePanelAutoScroll || shouldFollow) scrollActivePanelToBottom();
+    if (state.activePanelAutoScroll || shouldFollow) scrollActivePanelToBottom({ delayMs: 1000 });
     else chatMirror.scrollTop = previousScrollTop;
   }
   updateActivePanelBottomButton();
@@ -916,6 +961,15 @@ function bindEvents() {
   chatModule.subscribeToAllStreams?.(snapshot => {
     if (!snapshot?.sessionId) return;
     state.snapshots.set(String(snapshot.sessionId), snapshot);
+    updateAll();
+  });
+
+  document.addEventListener('odysseus:tts-playback-state', e => {
+    const sid = e.detail?.sessionId;
+    if (!sid) return;
+    const key = String(sid);
+    if (e.detail?.speaking) state.speakingSessions.add(key);
+    else state.speakingSessions.delete(key);
     updateAll();
   });
 

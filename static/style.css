@@ -2464,10 +2464,66 @@ body.bg-pattern-sparkles {
       color: color-mix(in srgb, var(--red) 82%, var(--fg));
       font-size: 11px;
     }
+    #mission-composer-slot {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+      width: 100%;
+    }
+    #mission-composer-slot .attach-strip {
+      order: 0;
+      max-width: none;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      min-height: 0;
+    }
     .mission-control .chat-input-bar {
+      order: 1;
       max-width: none;
       border-radius: 8px;
       background: var(--input-bg, var(--bg));
+    }
+    #mission-composer-slot .attach-strip:has(.thumb-image) {
+      order: 0;
+      width: auto;
+      max-width: min(34vw, 240px);
+      flex: 0 1 auto;
+      align-self: center;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      overflow-y: visible;
+      margin: 4px 5px 4px 0;
+      padding: 8px 8px 8px 2px;
+      scrollbar-width: thin;
+    }
+    #mission-composer-slot:has(.attach-strip .thumb-image) {
+      flex-direction: row;
+      align-items: stretch;
+    }
+    #mission-composer-slot:has(.attach-strip .thumb-image) .chat-input-bar {
+      flex: 1 1 min(620px, 100%);
+      min-width: 0;
+    }
+    #mission-composer-slot .attach-strip:has(.thumb-image) .thumb-image {
+      flex: 0 0 auto;
+      margin: 0 4px 0 0;
+    }
+    #mission-composer-slot .attach-strip:has(.thumb-image) .thumb:not(.thumb-image) {
+      max-width: 110px;
+    }
+    @media (max-width: 720px) {
+      #mission-composer-slot:has(.attach-strip .thumb-image) {
+        flex-direction: column;
+      }
+      #mission-composer-slot .attach-strip:has(.thumb-image) {
+        order: 0;
+        width: 100%;
+        max-width: none;
+        align-self: stretch;
+        margin: 0;
+      }
     }
     body.mission-dashboard-visible .mission-control .model-picker-menu {
       top: calc(100% + 8px);

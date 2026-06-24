@@ -80,9 +80,29 @@ def test_mission_control_exposes_post_delete_dashboard_navigation():
         "function closeActiveMission",
     )
 
-    assert "focusMission(nextSessionId);" in helper_body
     assert "startNewMissionDraft();" in helper_body
+    assert "focusMission(" not in helper_body
     assert "showDashboardAfterSessionDelete" in source[source.index("const sessionControlModule"):]
+
+
+def test_mission_control_moves_attachment_strip_with_dashboard_composer():
+    source = SESSION_CONTROL_JS.read_text(encoding="utf-8")
+    move_body = _slice(
+        source,
+        "function moveComposerIntoCommandBar()",
+        "function restoreComposerToChat()",
+    )
+    restore_body = _slice(
+        source,
+        "function restoreComposerToChat()",
+        "function buildShell()",
+    )
+
+    assert "let _attachmentHome = null;" in source
+    assert "document.getElementById('attach-strip')" in move_body
+    assert "els.composerSlot.appendChild(attachStrip);" in move_body
+    assert "_attachmentHome.parent.insertBefore(attachStrip" in restore_body
+    assert "_attachmentHome.parent.appendChild(attachStrip);" in restore_body
 
 
 def test_submit_clears_stale_session_id_for_mission_new_session_mode():
@@ -124,6 +144,15 @@ def test_mission_active_panel_header_uses_icon_controls_and_scroll_lock_toggle()
     assert "state.activePanelAutoScroll = !state.activePanelAutoScroll;" in toggle_body
     assert "scrollActivePanelToBottom();" in toggle_body
 
+    scroll_body = _slice(
+        source,
+        "function scrollActivePanelToBottom(options = {})",
+        "function updateActivePanelBottomButton()",
+    )
+    assert "setTimeout(run, delayMs)" in scroll_body
+    assert "clearActivePanelScrollTimer();" in scroll_body
+    assert "delayMs: 1000" in render_body
+
 
 def test_mission_dashboard_recent_activity_sits_before_recent_chats_and_opens_tasks_activity():
     source = SESSION_CONTROL_JS.read_text(encoding="utf-8")
@@ -140,7 +169,7 @@ def test_mission_dashboard_recent_activity_sits_before_recent_chats_and_opens_ta
     render_body = _slice(
         source,
         "function renderRecentActivity()",
-        "function scrollActivePanelToBottom()",
+        "function clearActivePanelScrollTimer()",
     )
     assert "/api/tasks/runs/recent?limit=8" in source
     assert "window.tasksModule?.openActivity" in render_body
@@ -238,3 +267,22 @@ def test_mission_dashboard_hides_global_scroll_button_and_uses_full_width_replie
     )
     assert ".mission-activity-row" in activity_rule
     assert "grid-template-columns: auto minmax(0, 1fr) auto;" in activity_rule
+
+
+def test_mission_dashboard_attachment_strip_anchors_to_command_input():
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    composer_rule = _slice(
+        css,
+        "#mission-composer-slot {",
+        "body.mission-dashboard-visible .mission-control .model-picker-menu",
+    )
+
+    assert "#mission-composer-slot .attach-strip" in composer_rule
+    assert "order: 0;" in composer_rule
+    assert "#mission-composer-slot:has(.attach-strip .thumb-image)" in composer_rule
+    assert "flex-direction: row;" in composer_rule
+    assert "#mission-composer-slot .attach-strip:has(.thumb-image)" in composer_rule
+    assert "order: 0;" in composer_rule
+    assert "margin: 4px 5px 4px 0;" in composer_rule
+    assert "padding: 8px 8px 8px 2px;" in composer_rule
+    assert "max-width: min(34vw, 240px);" in composer_rule

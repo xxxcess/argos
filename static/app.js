@@ -3106,18 +3106,10 @@ function initializeEventListeners() {
       const name = current ? current.name : 'this session';
       if (!await uiModule.styledConfirm(`Delete "${name}"?`, { confirmText: 'Delete', danger: true })) return;
       try {
-        // Find the next session below the current one before deleting
-        const idx = sessions.findIndex(s => s.id === currentId);
-        const nextSession = sessions.filter(s => !s.archived && s.id !== currentId)[Math.max(0, idx)] ||
-                            sessions.find(s => !s.archived && s.id !== currentId);
         const res = await fetch(`${API_BASE}/api/session/${currentId}`, { method: 'DELETE' });
         if (res.ok) {
           await sessionModule.loadSessions();
-          if (nextSession) {
-            sessionControlModule?.showDashboardAfterSessionDelete?.(nextSession.id);
-          } else {
-            sessionControlModule?.showDashboardAfterSessionDelete?.();
-          }
+          sessionControlModule?.showDashboardAfterSessionDelete?.();
           uiModule.showToast('Session deleted');
         } else {
           uiModule.showError('Failed to delete session');
@@ -3675,9 +3667,21 @@ function startOdysseusApp() {
       // Recording stop should preserve and transcribe captured audio; once
       // recording is no longer active, the same button can interrupt any
       // active response stream in full chat or Session Control.
-      if (sendBtn.dataset.mode === 'recording' || voiceRecorderModule.getIsRecording()) {
-        voiceRecorderModule.stopRecording();
+      const hasReadyText = messageInput && messageInput.value.trim().length > 0;
+      if (voiceRecorderModule.getIsRecording()) {
+        voiceRecorderModule.stopRecording({
+          submitLoopTranscript: voiceRecorderModule.isConversationLoopActive?.() === true,
+        });
         return;
+      }
+      if (sendBtn.dataset.mode === 'recording') {
+        if (hasReadyText) {
+          sendBtn.dataset.mode = '';
+          sendBtn.classList.remove('recording');
+        } else {
+          voiceRecorderModule.stopRecording();
+          return;
+        }
       }
       if (sendBtn.dataset.mode === 'streaming') {
         voiceRecorderModule.stopConversationLoop?.('manual');

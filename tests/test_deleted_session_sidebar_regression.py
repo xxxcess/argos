@@ -13,8 +13,8 @@ def test_rail_delete_uses_hard_delete_endpoint():
 
     assert "fetch(`${API_BASE}/api/session/${currentId}`, { method: 'DELETE' })" in rail_block
     assert "api/session/${currentId}/archive" not in rail_block
-    assert "sessionControlModule?.showDashboardAfterSessionDelete?.(nextSession.id);" in rail_block
     assert "sessionControlModule?.showDashboardAfterSessionDelete?.();" in rail_block
+    assert "showDashboardAfterSessionDelete?.(nextSession" not in rail_block
     assert "sessionModule.selectSession(nextSession.id)" not in rail_block
 
 
@@ -28,10 +28,12 @@ def test_confirmed_session_deletes_return_to_session_control_dashboard():
     shortcut_block = keyboard_source[keyboard_source.index("if (_matchesCombo(e, kb.delete_session))"):]
     shortcut_block = shortcut_block[:shortcut_block.index("if (_matchesCombo(e, kb.new_session))")]
 
-    assert "window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);" in delete_menu_block
-    assert "window.sessionControlModule?.showDashboardAfterSessionDelete?.(dashboardTargetId || null);" in focused_delete_block
-    assert "window.sessionControlModule?.showDashboardAfterSessionDelete?.(nextSession.id);" in shortcut_block
+    assert "window.sessionControlModule?.showDashboardAfterSessionDelete?.();" in delete_menu_block
+    assert "window.sessionControlModule?.showDashboardAfterSessionDelete?.();" in focused_delete_block
     assert "window.sessionControlModule?.showDashboardAfterSessionDelete?.();" in shortcut_block
+    assert "dashboardTargetId" not in delete_menu_block
+    assert "dashboardTargetId" not in focused_delete_block
+    assert "showDashboardAfterSessionDelete?.(nextSession" not in shortcut_block
 
 
 def test_deleted_sessions_are_pruned_from_local_sidebar_state():

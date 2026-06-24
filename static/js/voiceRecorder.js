@@ -754,7 +754,7 @@ export function startRecording(onFileCreated, showToast, showError, options = {}
           return;
         }
         const stopReason = _recordingStopReason;
-        const autoSubmit = _loopActive && stopReason === 'loop-auto';
+        const autoSubmit = _loopActive && (stopReason === 'loop-auto' || stopReason === 'loop-manual-submit');
         const discardForTts = _discardCurrentRecordingForTts || stopReason === 'loop-tts';
         const loopRecording = autoSubmit || stopReason === 'loop-timeout' || discardForTts;
         const hadVoiceActivity = _speechDetected || _browserSpeechDetected || !_vadAvailable;
@@ -852,9 +852,18 @@ function _stopRecordingInternal(reason) {
   else _resetRecordingUi();
 }
 
-export function stopRecording() {
+export function stopRecording(options = {}) {
+  const submitLoopTranscript = options && options.submitLoopTranscript === true;
+  if (_loopActive && submitLoopTranscript) {
+    _stopRecordingInternal('loop-manual-submit');
+    return;
+  }
   if (_loopActive) stopConversationLoop('manual');
   _stopRecordingInternal('manual');
+}
+
+export function isConversationLoopActive() {
+  return _loopActive;
 }
 
 export function cancelForMissionClose(sessionId) {
@@ -894,6 +903,7 @@ const voiceRecorderModule = {
   stopRecording,
   cancelForMissionClose,
   stopConversationLoop,
+  isConversationLoopActive,
   getIsRecording,
   init,
   refreshSttProvider,

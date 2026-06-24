@@ -200,22 +200,16 @@ export function initKeyboardShortcuts(modules) {
       if (s.is_important) { uiModule.showToast('Unstar before deleting'); return; }
       uiModule.styledConfirm('Delete this session?', { confirmText: 'Delete', danger: true }).then(ok => {
         if (!ok) return;
-        const allSessions = sessionModule.getSessions();
-        const idx = allSessions.findIndex(x => x.id === sid);
-        const nextSession = allSessions.filter(x => !x.archived && x.id !== sid)[Math.max(0, idx)] ||
-                            allSessions.find(x => !x.archived && x.id !== sid);
         fetch(`${API_BASE}/api/session/${sid}`, { method: 'DELETE' }).then(async () => {
           await sessionModule.loadSessions();
-          if (nextSession) {
-            window.sessionControlModule?.showDashboardAfterSessionDelete?.(nextSession.id);
-          } else {
+          if (!sessionModule.getSessions().some(x => !x.archived)) {
             sessionModule.setCurrentSessionId(null);
             el('chat-history').innerHTML = '';
             el('current-meta').textContent = 'Odysseus Chat';
             Storage.remove('lastSessionId');
             if (chatModule && chatModule.showWelcomeScreen) chatModule.showWelcomeScreen();
-            window.sessionControlModule?.showDashboardAfterSessionDelete?.();
           }
+          window.sessionControlModule?.showDashboardAfterSessionDelete?.();
         });
       });
       return;

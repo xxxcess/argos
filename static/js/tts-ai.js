@@ -35,7 +35,7 @@ class AITTSManager {
         this._processing = false;
         this._latestFinalTimer = null;
         this._pendingLatestFinal = null;
-        this._latestFinalDelayMs = 1200;
+        this._playbackSessionId = null;
 
         // Streaming sentence-by-sentence TTS state
         this._streamSentencesSent = 0;  // chars of plain text already queued
@@ -50,6 +50,17 @@ class AITTSManager {
 
         // Check if TTS service is available
         this.checkAvailability();
+    }
+
+    _emitPlaybackState(speaking, sessionId = null) {
+        const sid = sessionId || this._playbackSessionId || this.activeSessionId || null;
+        if (speaking) this._playbackSessionId = sid;
+        else if (!sessionId || String(this._playbackSessionId || '') === String(sessionId || '')) this._playbackSessionId = null;
+        try {
+            document.dispatchEvent(new CustomEvent('odysseus:tts-playback-state', {
+                detail: { sessionId: sid, speaking: !!speaking }
+            }));
+        } catch (_) {}
     }
 
     setIncludeThinkingSections(value) {
@@ -248,8 +259,19 @@ class AITTSManager {
             const audioUrl = await this.synthesize(text);
 
             this.currentAudio = new Audio(audioUrl);
+            this.currentAudio.onended = () => {
+                this.isPlaying = false;
+                this._emitPlaybackState(false);
+                this.currentAudio = null;
+            };
+            this.currentAudio.onerror = () => {
+                this.isPlaying = false;
+                this._emitPlaybackState(false);
+                this.currentAudio = null;
+            };
             await this.currentAudio.play();
             this.isPlaying = true;
+            this._emitPlaybackState(true);
             // Note: onended should be set by the caller (addAITTSButton)
             // to reset button state when audio finishes
 
@@ -259,7 +281,7 @@ class AITTSManager {
         }
     }
 
-    _playBrowser(plainText) {
+    _playBrowser(plainText, sessionId = null) {
         return new Promise((resolve, reject) => {
             const utterance = new SpeechSynthesisUtterance(plainText);
             const voice = this._findBrowserVoice();
@@ -268,15 +290,18 @@ class AITTSManager {
 
             utterance.onend = () => {
                 this.isPlaying = false;
+                this._emitPlaybackState(false, sessionId);
                 resolve();
             };
             utterance.onerror = (e) => {
                 this.isPlaying = false;
+                this._emitPlaybackState(false, sessionId);
                 reject(new Error('Browser TTS error: ' + e.error));
             };
 
             window.speechSynthesis.speak(utterance);
             this.isPlaying = true;
+            this._emitPlaybackState(true, sessionId);
         });
     }
 
@@ -289,6 +314,7 @@ class AITTSManager {
             this._pendingLatestFinal.resetFn();
         }
         this._pendingLatestFinal = null;
+        const stoppedSessionId = this._playbackSessionId;
 
         // Cancel streaming TTS
         this._streamActive = false;
@@ -315,6 +341,7 @@ class AITTSManager {
             this.currentAudio = null;
             this.isPlaying = false;
         }
+        if (stoppedSessionId) this._emitPlaybackState(false, stoppedSessionId);
     }
 
     setActiveMissionSession(sessionId, enabled = true) {
@@ -350,8 +377,8 @@ class AITTSManager {
      * Enqueue a message for auto-play. Plays sequentially — each message
      * finishes before the next starts. Stopping any message clears the queue.
      */
-    enqueue(text, button, resetFn) {
-        this._queue.push({ text, button, resetFn });
+    enqueue(text, button, resetFn, sessionId = null) {
+        this._queue.push({ text, button, resetFn, sessionId });
         if (!this._processing) {
             this._processQueue();
         }
@@ -360,15 +387,8 @@ class AITTSManager {
     enqueueLatestFinal(text, button, resetFn, sessionId) {
         if (sessionId && !this.canAutoSpeakForSession(sessionId)) return;
         this.stop();
-        this._pendingLatestFinal = { text, button, resetFn, sessionId };
-        this._latestFinalTimer = setTimeout(() => {
-            const pending = this._pendingLatestFinal;
-            this._latestFinalTimer = null;
-            this._pendingLatestFinal = null;
-            if (!pending) return;
-            if (pending.sessionId && !this.canAutoSpeakForSession(pending.sessionId)) return;
-            this.enqueue(pending.text, pending.button, pending.resetFn);
-        }, this._latestFinalDelayMs);
+        if (sessionId && !this.canAutoSpeakForSession(sessionId)) return;
+        this.enqueue(text, button, resetFn, sessionId);
     }
 
     async _processQueue() {
@@ -392,7 +412,7 @@ class AITTSManager {
     }
 
     async _playQueueItem(item) {
-        const { text, button, resetFn } = item;
+        const { text, button, resetFn, sessionId } = item;
         const ICON_LOADING = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="9" stroke-dasharray="42" stroke-dashoffset="12" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite"/></circle></svg>';
         var ICON_STOP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
 
@@ -415,7 +435,7 @@ class AITTSManager {
 
             if (this.useBrowserTTS) {
                 const plainText = this.extractPlainText(text);
-                await this._playBrowser(plainText);
+                await this._playBrowser(plainText, sessionId);
             } else {
                 if (this.currentAudio) {
                     this.currentAudio.pause();
@@ -431,20 +451,24 @@ class AITTSManager {
                     audio.onended = () => {
                         this.isPlaying = false;
                         if (this.currentAudio === audio) this.currentAudio = null;
+                        this._emitPlaybackState(false, sessionId);
                         resolve();
                     };
                     audio.onerror = (e) => {
                         this.isPlaying = false;
                         if (this.currentAudio === audio) this.currentAudio = null;
+                        this._emitPlaybackState(false, sessionId);
                         reject(new Error('Audio playback error'));
                     };
                     audio.onpause = () => {
                         if (this.currentAudio !== audio) {
+                            this._emitPlaybackState(false, sessionId);
                             resolve();
                         }
                     };
                     audio.play().then(() => {
                         this.isPlaying = true;
+                        this._emitPlaybackState(true, sessionId);
                     }).catch(reject);
                 });
             }
