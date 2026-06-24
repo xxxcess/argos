@@ -67,20 +67,22 @@ def _save_for_user(user: Optional[str], prefs: dict):
 
 
 def setup_prefs_routes():
-    router = APIRouter(prefix="/api/prefs", tags=["preferences"])
+    # Keep the original public preference paths exact while allowing sibling
+    # feature routers to mount at their own root-level API prefixes.
+    router = APIRouter(tags=["preferences"])
 
-    @router.get("")
+    @router.get("/api/prefs")
     async def get_all_prefs(request: Request):
         user = get_current_user(request)
         return _load_for_user(user)
 
-    @router.get("/{key}")
+    @router.get("/api/prefs/{key}")
     async def get_pref(request: Request, key: str):
         user = get_current_user(request)
         prefs = _load_for_user(user)
         return {"key": key, "value": prefs.get(key)}
 
-    @router.put("/{key}")
+    @router.put("/api/prefs/{key}")
     async def set_pref(request: Request, key: str, body: dict):
         user = get_current_user(request)
         prefs = _load_for_user(user)
@@ -88,9 +90,6 @@ def setup_prefs_routes():
         _save_for_user(user, prefs)
         return {"key": key, "value": prefs[key]}
 
-    # The app already includes this router during startup.  Include the video
-    # router here so the feature can own its lifecycle without widening app.py.
     from routes.video_routes import setup_video_routes
     router.include_router(setup_video_routes())
-
     return router
