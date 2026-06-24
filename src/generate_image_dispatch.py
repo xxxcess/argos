@@ -12,9 +12,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from src.image_tool_payload import normalize_image_tool_content
 
-def _tool_description(content: str) -> str:
-    prompt = str(content or "").split("\n", 1)[0].strip()
+
+def _tool_description(content: Any) -> str:
+    """Build a concise tool label from either JSON or legacy tool content."""
+
+    prompt = normalize_image_tool_content(content).split("\n", 1)[0].strip()
     return f"generate_image: {prompt[:80]}" if prompt else "generate_image"
 
 
@@ -91,12 +95,19 @@ def install_generate_image_dispatch(tool_execution_module) -> None:
             if configured is not None:
                 from src.ai_interaction import do_generate_image
 
+                # Agent tools pass JSON text such as
+                # {"prompt":...,"model":"gpt-image-1","size":"1024x1024"}.
+                # Convert it here, on the real agent dispatch path, before the
+                # selected local endpoint receives the prompt. The configured
+                # endpoint then replaces the requested cloud model and clamps a
+                # local profile to 512px.
+                content = normalize_image_tool_content(getattr(block, "content", ""))
                 result = await do_generate_image(
-                    getattr(block, "content", ""),
+                    content,
                     session_id=session_id,
                     owner=owner,
                 )
-                return _tool_description(getattr(block, "content", "")), _format_direct_image_result(result)
+                return _tool_description(content), _format_direct_image_result(result)
 
         return await original_execute(
             block,
