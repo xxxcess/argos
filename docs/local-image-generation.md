@@ -80,7 +80,8 @@ in Gallery.
 ## Advanced SD 1.5-compatible profile
 
 `sd15-lcm` is an advanced low-resolution profile for an accessible SD 1.5
-compatible repository:
+compatible repository. It is not the recommended first choice on 8 GB; use SD
+Turbo first and keep this profile at 512×512.
 
 ```bash
 python -m src.local_image_server \
@@ -90,8 +91,8 @@ python -m src.local_image_server \
   --device auto
 ```
 
-Use 512×512 and low/medium quality first. The server serializes requests so
-concurrent generations do not load multiple pipelines into 8 GB memory.
+The server serializes requests so concurrent generations do not load multiple
+pipelines into 8 GB memory.
 
 ## Troubleshooting
 
@@ -101,4 +102,4 @@ concurrent generations do not load multiple pipelines into 8 GB memory.
 - **Model download/authentication failure**: choose an accessible Hugging Face
   repository, or configure the token in the environment used by the server.
 - **Image too large**: the integrated `local-*` defaults clamp normal tool calls
-  to 512×512. Raise `--max-size` only after confirming the hardware can handle it.
+  to 512×512. Raise `--max-size` only after confirming your hardware can handle it.
