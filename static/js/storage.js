@@ -1,6 +1,11 @@
 // static/js/storage.js
 // Centralized localStorage access with key constants and JSON parse safety
 
+// The local Diffusers image controls attach after the regular Settings module
+// loads. Keep this side-effect import here because storage.js is the first UI
+// module loaded by index.html on every page.
+import './localImageIntegration.js';
+
 // ── Key constants ──
 export const KEYS = {
   THEME: 'odysseus-theme',
