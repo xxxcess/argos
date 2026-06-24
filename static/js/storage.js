@@ -9,6 +9,7 @@ import './localImageFreshLoad.js';
 import './localImageEndpointRecovery.js';
 import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
+import './streamRecoveryComposerGuard.js';
 
 // ── Key constants ──
 export const KEYS = {
