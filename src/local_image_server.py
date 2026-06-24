@@ -1,6 +1,6 @@
 """Optional OpenAI-compatible local Diffusers image service.
 
-This module deliberately keeps Diffusers and PyTorch optional.  Argos can start
+This module deliberately keeps Diffusers and PyTorch optional. Argos can start
 without image-generation dependencies installed; users install them only in the
 Cookbook environment that launches this service.
 
@@ -52,7 +52,7 @@ PROFILES: dict[str, ImageProfile] = {
         guidance_scale=0.0,
         max_size=512,
     ),
-    # This profile intentionally permits a custom repo.  A LoRA is not bundled
+    # This profile intentionally permits a custom repo. A LoRA is not bundled
     # so users can choose an accessible SD 1.5 compatible repository.
     "sd15-lcm": ImageProfile(
         name="sd15-lcm",
@@ -157,6 +157,7 @@ class LocalImageService:
         async with self._load_lock:
             if self.pipeline is not None:
                 return
+            self.status = "loading"
             try:
                 await asyncio.to_thread(self._load_sync)
                 self.status = "ready"
@@ -242,13 +243,11 @@ def create_app(service: LocalImageService) -> FastAPI:
     app = FastAPI(title="Argos Local Diffusers Image Server", version="1.0")
 
     @app.on_event("startup")
-    async def _load_pipeline() -> None:
-        # Keep the process available to report an actionable /health error rather
-        # than crashing before Argos/Cookbook can show the user what to install.
-        try:
-            await service.load()
-        except Exception:
-            pass
+    async def _announce_startup() -> None:
+        # Do not block HTTP startup while the first model download is running.
+        # `/v1/models` can be discovered immediately; generation returns a
+        # well-formed 503 until lazy loading completes.
+        service.status = "starting"
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
