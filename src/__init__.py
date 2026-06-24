@@ -32,8 +32,20 @@ class _ImageIntegrationLoader(importlib.abc.Loader):
         self._wrapped_loader.exec_module(module)
         if self._hook_name == "image_defaults":
             from src.image_generation_defaults import install_image_generation_defaults
+            from src.image_tool_payload import normalize_image_tool_content
 
             install_image_generation_defaults(module)
+            original_generate = module.do_generate_image
+
+            async def generate_with_normalized_tool_content(content, session_id=None, owner=None):
+                return await original_generate(
+                    normalize_image_tool_content(content),
+                    session_id=session_id,
+                    owner=owner,
+                )
+
+            module.do_generate_image = generate_with_normalized_tool_content
+            module._local_image_tool_content_normalized = True
         elif self._hook_name == "agent_image_dispatch":
             from src.generate_image_dispatch import install_generate_image_dispatch
 
