@@ -1,9 +1,9 @@
 """Argos source package bootstrap hooks.
 
-Most of the project historically used ``src`` as a namespace package.  The
-small import hook below preserves that layout while installing the local image
-endpoint preference wrapper exactly when ``src.ai_interaction`` is imported.
-It avoids importing optional Diffusers/PyTorch at normal application startup.
+Most of the project historically used ``src`` as a namespace package. The small
+import hook below preserves that layout while installing the local image endpoint
+wrappers exactly when their existing dispatch modules load. It avoids importing
+optional Diffusers/PyTorch at normal application startup.
 """
 
 from __future__ import annotations
@@ -13,12 +13,16 @@ import importlib.machinery
 import sys
 
 
-_TARGET = "src.ai_interaction"
+_TARGETS = {
+    "src.ai_interaction": "image_defaults",
+    "src.tool_execution": "agent_image_dispatch",
+}
 
 
-class _AiInteractionLoader(importlib.abc.Loader):
-    def __init__(self, wrapped_loader):
+class _ImageIntegrationLoader(importlib.abc.Loader):
+    def __init__(self, wrapped_loader, hook_name: str):
         self._wrapped_loader = wrapped_loader
+        self._hook_name = hook_name
 
     def create_module(self, spec):  # pragma: no cover - delegated import protocol
         create = getattr(self._wrapped_loader, "create_module", None)
@@ -26,22 +30,28 @@ class _AiInteractionLoader(importlib.abc.Loader):
 
     def exec_module(self, module):
         self._wrapped_loader.exec_module(module)
-        from src.image_generation_defaults import install_image_generation_defaults
+        if self._hook_name == "image_defaults":
+            from src.image_generation_defaults import install_image_generation_defaults
 
-        install_image_generation_defaults(module)
+            install_image_generation_defaults(module)
+        elif self._hook_name == "agent_image_dispatch":
+            from src.generate_image_dispatch import install_generate_image_dispatch
+
+            install_generate_image_dispatch(module)
 
 
-class _AiInteractionFinder(importlib.abc.MetaPathFinder):
+class _ImageIntegrationFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):  # pragma: no cover - import system glue
-        if fullname != _TARGET:
+        hook_name = _TARGETS.get(fullname)
+        if not hook_name:
             return None
         # Call PathFinder directly rather than importlib.util.find_spec() so this
         # finder does not recurse into itself.
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec and spec.loader and not isinstance(spec.loader, _AiInteractionLoader):
-            spec.loader = _AiInteractionLoader(spec.loader)
+        if spec and spec.loader and not isinstance(spec.loader, _ImageIntegrationLoader):
+            spec.loader = _ImageIntegrationLoader(spec.loader, hook_name)
         return spec
 
 
-if not any(isinstance(finder, _AiInteractionFinder) for finder in sys.meta_path):
-    sys.meta_path.insert(0, _AiInteractionFinder())
+if not any(isinstance(finder, _ImageIntegrationFinder) for finder in sys.meta_path):
+    sys.meta_path.insert(0, _ImageIntegrationFinder())
