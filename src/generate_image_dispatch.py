@@ -51,6 +51,37 @@ def install_generate_image_dispatch(tool_execution_module) -> None:
     ):
         tool = getattr(block, "tool_type", "")
         if tool == "generate_image":
+            # These checks happen before MCP dispatch in the original function.
+            # Preserve them before taking the local direct path.
+            if disabled_tools and tool in disabled_tools:
+                return await original_execute(
+                    block,
+                    session_id=session_id,
+                    disabled_tools=disabled_tools,
+                    owner=owner,
+                    progress_cb=progress_cb,
+                    tool_policy=tool_policy,
+                )
+            if tool_policy and tool_policy.blocks(tool):
+                return await original_execute(
+                    block,
+                    session_id=session_id,
+                    disabled_tools=disabled_tools,
+                    owner=owner,
+                    progress_cb=progress_cb,
+                    tool_policy=tool_policy,
+                )
+            is_public_blocked = getattr(tool_execution_module, "is_public_blocked_tool", lambda _: False)
+            is_admin = getattr(tool_execution_module, "_owner_is_admin", lambda _: False)
+            if is_public_blocked(tool) and not is_admin(owner):
+                return await original_execute(
+                    block,
+                    session_id=session_id,
+                    disabled_tools=disabled_tools,
+                    owner=owner,
+                    progress_cb=progress_cb,
+                    tool_policy=tool_policy,
+                )
             try:
                 from src.image_generation_defaults import resolve_configured_image_endpoint
 
