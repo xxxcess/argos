@@ -6,6 +6,8 @@
 // as a per-user preference. It loads after the existing Settings module so it
 // remains compatible with older Settings markup.
 
+import { launchTrackedLocalImageTask } from './localImageCookbookTasks.js';
+
 const LOCAL_MODEL_ID = 'local-sd-turbo';
 const LOCAL_PORT = 7861;
 const LOCAL_ENDPOINT_NAME = 'Local Diffusers Image';
@@ -214,25 +216,18 @@ async function saveImageDefaults() {
   }
 }
 
-async function startCookbookTask(repoId, cmd) {
-  return fetchJson('/api/model/serve', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repo_id: repoId, cmd }),
-  });
-}
-
 async function installRuntime() {
   const button = byId('local-image-install');
   if (button) button.disabled = true;
   setStatus('Starting Cookbook dependency task…', false);
   try {
-    await startCookbookTask(
-      'pip-diffusers',
-      "python3 -m pip install --no-cache-dir 'diffusers[torch]' transformers accelerate safetensors"
-    );
-    setStatus('Dependency install started. Follow progress in Cookbook → Running, then start SD Turbo.', false);
-    if (window.cookbookModule?.open) window.cookbookModule.open({ tab: 'Running' });
+    await launchTrackedLocalImageTask({
+      name: 'Diffusers runtime',
+      repoId: 'pip-diffusers',
+      cmd: "python3 -m pip install --no-cache-dir 'diffusers[torch]' transformers accelerate safetensors",
+      fields: { backend: 'diffusers', _dep: 'diffusers' },
+    });
+    setStatus('Dependency install started. Follow progress in Cookbook → Active, then start SD Turbo.', false);
   } catch (err) {
     setStatus(`Could not start dependency install: ${err.message}`, true);
   } finally {
@@ -281,12 +276,13 @@ async function startLocalServer() {
   if (button) button.disabled = true;
   setStatus('Starting local SD Turbo in Cookbook…', false);
   try {
-    const task = await startCookbookTask(
-      'stabilityai/sd-turbo',
-      'PYTORCH_ENABLE_MPS_FALLBACK=1 python3 -m src.local_image_server --profile sd-turbo --served-model-id local-sd-turbo --device auto --host 127.0.0.1 --port 7861 --max-size 512'
-    );
-    if (window.cookbookModule?.open) window.cookbookModule.open({ tab: 'Running' });
-    const registered = await registerStartedServer(task.endpoint_id || '');
+    await launchTrackedLocalImageTask({
+      name: 'Local SD Turbo',
+      repoId: 'stabilityai/sd-turbo',
+      cmd: 'PYTORCH_ENABLE_MPS_FALLBACK=1 python3 -m src.local_image_server --profile sd-turbo --served-model-id local-sd-turbo --device auto --host 127.0.0.1 --port 7861 --max-size 512',
+      fields: { backend: 'diffusers', port: String(LOCAL_PORT), image_profile: 'sd-turbo' },
+    });
+    const registered = await registerStartedServer();
     if (!registered) {
       setStatus('Launch task started. The server will appear here once it reaches /v1/models; refresh this card after startup.', false);
     } else {
