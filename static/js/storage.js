@@ -6,6 +6,7 @@
 // module loaded by index.html on every page.
 import './localImageIntegration.js';
 import './localImageChatGuard.js';
+import './localImageCookbookPanel.js';
 
 // ── Key constants ──
 export const KEYS = {
