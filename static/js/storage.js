@@ -6,6 +6,7 @@
 // module loaded by index.html on every page.
 import './localImageIntegration.js';
 import './localImageFreshLoad.js';
+import './localImageEndpointRecovery.js';
 import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 
