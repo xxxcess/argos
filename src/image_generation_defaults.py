@@ -1,8 +1,8 @@
 """Per-user image-generation endpoint selection.
 
-The existing image tool accepts a model name emitted by an LLM.  That is useful
+The existing image tool accepts a model name emitted by an LLM. That is useful
 for ad-hoc requests, but a configured local image endpoint must win over a
-hallucinated cloud model such as ``gpt-image-1``.  This module provides a small,
+hallucinated cloud model such as ``gpt-image-1``. This module provides a small,
 context-local override used by ``src.ai_interaction`` without changing its
 Gallery persistence or provider response handling.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -30,6 +31,7 @@ _active_image_endpoint: contextvars.ContextVar[Optional[ConfiguredImageEndpoint]
 )
 
 _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
+_SIZE_RE = re.compile(r"^(\d{2,5})x(\d{2,5})$")
 
 
 def _replace_tool_model(content: str, model: str) -> str:
@@ -41,6 +43,29 @@ def _replace_tool_model(content: str, model: str) -> str:
     while len(lines) < 2:
         lines.append("")
     lines[1] = model
+    return "\n".join(lines)
+
+
+def _cap_local_size(content: str, max_size: int = 512) -> str:
+    """Keep small local profiles within their M2-safe image size budget.
+
+    Existing tool prompts commonly default to ``1024x1024``. The local server
+    intentionally caps its SD Turbo profile at 512px, so clamp absent, malformed,
+    non-multiple-of-eight, or oversized requests before the original image tool
+    sends them. Smaller valid sizes remain user-controlled.
+    """
+
+    lines = str(content or "").split("\n")
+    if not lines:
+        lines = [""]
+    while len(lines) < 3:
+        lines.append("")
+    match = _SIZE_RE.match(lines[2].strip())
+    if match:
+        width, height = int(match.group(1)), int(match.group(2))
+        if 64 <= width <= max_size and 64 <= height <= max_size and width % 8 == 0 and height % 8 == 0:
+            return "\n".join(lines)
+    lines[2] = f"{max_size}x{max_size}"
     return "\n".join(lines)
 
 
@@ -68,7 +93,7 @@ def resolve_configured_image_endpoint(owner: Optional[str]) -> Optional[Configur
     """Return the selected endpoint only when it is enabled and image-capable.
 
     A normal endpoint may be selected for a cloud image model (GPT Image/DALL-E)
-    because those providers often expose chat and image models together.  Local
+    because those providers often expose chat and image models together. Local
     arbitrary model IDs are only accepted from endpoints explicitly marked
     ``model_type='image'``.
     """
@@ -135,7 +160,7 @@ def resolve_configured_image_endpoint(owner: Optional[str]) -> Optional[Configur
 def install_image_generation_defaults(ai_interaction_module) -> None:
     """Install a one-time, request-local default-image-endpoint wrapper.
 
-    The normal resolver stays untouched outside image calls.  During a configured
+    The normal resolver stays untouched outside image calls. During a configured
     image call the wrapper swaps only the resolver result for the selected model,
     so the original ``do_generate_image`` code continues to handle provider
     payloads, timeouts, response formats, Gallery storage, and URL safety.
@@ -164,6 +189,8 @@ def install_image_generation_defaults(ai_interaction_module) -> None:
             # Default is an explicit user preference, not merely a fallback.
             if selected:
                 content = _replace_tool_model(content, selected.model)
+                if selected.model.lower().startswith("local-"):
+                    content = _cap_local_size(content)
             return await original_generate(content, session_id, owner=owner)
         finally:
             _active_image_endpoint.reset(token)
