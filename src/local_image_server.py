@@ -52,8 +52,8 @@ PROFILES: dict[str, ImageProfile] = {
         guidance_scale=0.0,
         max_size=512,
     ),
-    # This profile intentionally permits a custom repo. A LoRA is not bundled
-    # so users can choose an accessible SD 1.5 compatible repository.
+    # The profile intentionally permits a custom SD 1.5-compatible repository.
+    # A LoRA is not bundled, so this remains an advanced option.
     "sd15-lcm": ImageProfile(
         name="sd15-lcm",
         repo_id="runwayml/stable-diffusion-v1-5",
@@ -77,7 +77,7 @@ def _choose_device(requested: str) -> str:
 
     try:
         import torch
-    except ImportError as exc:  # pragma: no cover - covered through startup error
+    except ImportError as exc:  # pragma: no cover - startup error path
         raise RuntimeError(
             "PyTorch is not installed. Open Cookbook → Dependencies and install "
             "the Diffusers runtime (diffusers[torch], transformers, accelerate, safetensors)."
@@ -121,15 +121,37 @@ def _steps_for_quality(profile: ImageProfile, quality: str) -> int:
     quality = (quality or "medium").lower()
     if profile.name == "sd-turbo":
         # SD Turbo was trained for one-step sampling. Extra steps waste memory
-        # and generally do not improve this low-memory profile.
+        # and do not improve this low-memory profile.
         return 1
     return {"low": 2, "medium": profile.default_steps, "high": 8, "auto": profile.default_steps}.get(
         quality, profile.default_steps
     )
 
 
+def _assert_not_blank(image: Any) -> None:
+    """Reject the all-black frames observed in failed MPS/model loads.
+
+    This intentionally catches only near-zero pixels. A legitimate dark image
+    with any visible range remains valid; the aim is to prevent a completely
+    black 512×512 PNG from being saved to Gallery as a successful generation.
+    """
+
+    try:
+        preview = image.convert("RGB").resize((32, 32))
+        extrema = preview.getextrema()
+        if all(high <= 1 for _low, high in extrema):
+            raise RuntimeError(
+                "Local Diffusers produced a blank black image. Restart the local image server; "
+                "if it persists, reinstall the Diffusers runtime and verify the SD Turbo fp16 model files."
+            )
+    except AttributeError:
+        # A custom pipeline returned a non-PIL image; let the normal save path
+        # produce the more useful error in that uncommon case.
+        return
+
+
 class LocalImageService:
-    """Holds exactly one lazily-loaded pipeline and serializes inference."""
+    """Holds one lazily-loaded pipeline and serializes inference requests."""
 
     def __init__(
         self,
@@ -181,9 +203,25 @@ class LocalImageService:
         self.device = _choose_device(self.requested_device)
         dtype = torch.float16 if self.device in {"mps", "cuda"} else torch.float32
         factory = self.pipeline_factory or AutoPipelineForText2Image.from_pretrained
-        pipe = factory(self.profile.repo_id, torch_dtype=dtype)
-        # These toggles trade a little speed for substantially lower peak memory,
-        # which is essential on an 8 GB Apple Silicon machine.
+        load_kwargs: dict[str, Any] = {"torch_dtype": dtype, "use_safetensors": True}
+
+        # The published SD Turbo example uses its fp16 variant. Explicitly
+        # selecting it prevents a mixed/default-weight load from causing blank
+        # frames on lower-memory MPS machines. Custom repositories may not carry
+        # that variant, so retry once without it.
+        if dtype == torch.float16:
+            load_kwargs["variant"] = "fp16"
+        try:
+            pipe = factory(self.profile.repo_id, **load_kwargs)
+        except (OSError, ValueError) as exc:
+            if "variant" not in load_kwargs:
+                raise
+            logger.warning("Could not load fp16 variant for %s; retrying default weights: %s", self.profile.repo_id, exc)
+            load_kwargs.pop("variant", None)
+            pipe = factory(self.profile.repo_id, **load_kwargs)
+
+        # These toggles trade a little speed for far lower peak memory, which is
+        # essential on an 8 GB Apple Silicon system.
         for method in ("enable_attention_slicing", "enable_vae_slicing"):
             candidate = getattr(pipe, method, None)
             if callable(candidate):
@@ -209,22 +247,33 @@ class LocalImageService:
     def _generate_sync(self, prompt: str, width: int, height: int, quality: str) -> dict[str, Any]:
         if self.pipeline is None:
             raise RuntimeError("image pipeline is unavailable")
-        result = self.pipeline(
-            prompt=prompt,
-            num_inference_steps=_steps_for_quality(self.profile, quality),
-            guidance_scale=self.profile.guidance_scale,
-            width=width,
-            height=height,
-        )
-        images = getattr(result, "images", None) or []
-        if not images:
-            raise RuntimeError("Diffusers returned no image")
-        stream = io.BytesIO()
-        images[0].save(stream, format="PNG")
-        return {
-            "created": int(time.time()),
-            "data": [{"b64_json": base64.b64encode(stream.getvalue()).decode("ascii")}],
-        }
+        try:
+            result = self.pipeline(
+                prompt=prompt,
+                num_inference_steps=_steps_for_quality(self.profile, quality),
+                guidance_scale=self.profile.guidance_scale,
+                width=width,
+                height=height,
+            )
+            images = getattr(result, "images", None) or []
+            if not images:
+                raise RuntimeError("Diffusers returned no image")
+            _assert_not_blank(images[0])
+            stream = io.BytesIO()
+            images[0].save(stream, format="PNG")
+            return {
+                "created": int(time.time()),
+                "data": [{"b64_json": base64.b64encode(stream.getvalue()).decode("ascii")}],
+            }
+        finally:
+            # Reclaim temporary MPS allocations between serialized requests.
+            if self.device == "mps":
+                try:
+                    import torch
+
+                    torch.mps.empty_cache()
+                except Exception:
+                    pass
 
     def health(self) -> dict[str, Any]:
         return {
@@ -245,8 +294,8 @@ def create_app(service: LocalImageService) -> FastAPI:
     @app.on_event("startup")
     async def _announce_startup() -> None:
         # Do not block HTTP startup while the first model download is running.
-        # `/v1/models` can be discovered immediately; generation returns a
-        # well-formed 503 until lazy loading completes.
+        # `/v1/models` can be discovered immediately; the first generate call
+        # performs the lazy load and returns an actionable failure if it cannot.
         service.status = "starting"
 
     @app.get("/health")
