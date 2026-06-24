@@ -24,9 +24,11 @@ def test_configured_image_default_bypasses_mcp_dispatch(monkeypatch):
         "src.image_generation_defaults.resolve_configured_image_endpoint",
         lambda owner: ConfiguredImageEndpoint(
             endpoint_id="local-image",
+            endpoint_name="Local Diffusers Image",
             model="local-sd-turbo",
             base_url="http://127.0.0.1:7861/v1",
             headers={},
+            is_local=True,
         ),
     )
 
