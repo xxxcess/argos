@@ -17,6 +17,7 @@ const PROFILES = {
     repo: 'runwayml/stable-diffusion-v1-5',
   },
 };
+const HF_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
@@ -103,12 +104,16 @@ async function startServer() {
   const profileId = document.getElementById('cookbook-local-image-profile')?.value || 'sd-turbo';
   const customRepo = document.getElementById('cookbook-local-image-repo')?.value.trim() || '';
   const profile = PROFILES[profileId] || PROFILES['sd-turbo'];
+  if (customRepo && !HF_REPO_RE.test(customRepo)) {
+    status('Custom repository must use the Hugging Face owner/repository format.', true);
+    return;
+  }
   if (button) button.disabled = true;
   status(`Launching ${profileId} through Cookbook…`);
   try {
     const repo = customRepo || profile.repo;
     const model = customRepo ? `local-${profileId}` : profile.model;
-    const repoArg = customRepo ? ` --model-repo ${JSON.stringify(repo)}` : '';
+    const repoArg = customRepo ? ` --model-repo ${customRepo}` : '';
     const result = await jsonFetch('/api/model/serve', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
