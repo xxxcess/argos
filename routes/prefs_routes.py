@@ -88,4 +88,9 @@ def setup_prefs_routes():
         _save_for_user(user, prefs)
         return {"key": key, "value": prefs[key]}
 
+    # The app already includes this router during startup.  Include the video
+    # router here so the feature can own its lifecycle without widening app.py.
+    from routes.video_routes import setup_video_routes
+    router.include_router(setup_video_routes())
+
     return router
