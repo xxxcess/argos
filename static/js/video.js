@@ -1,3 +1,5 @@
+import './imageBridge.js';
+
 // Anchor-first video controls for Settings → AI Defaults.
 function make(tag, text) { const n = document.createElement(tag); if (text) n.textContent = text; return n; }
 async function request(url, options = {}) {
