@@ -43,15 +43,7 @@ def setup_video_routes() -> APIRouter:
         return {
             "defaults": get_video_defaults(user),
             "global_defaults": get_video_defaults(None) if _admin(request, user) else None,
-            "profile": {
-                "mode": "anchor_first_i2v",
-                "width": 512,
-                "height": 512,
-                "frames": 241,
-                "fps": 24,
-                "duration_seconds": 10,
-                "audio": False,
-            },
+            "profile": {"mode": "anchor_first_i2v", "width": 512, "height": 512, "frames": 241, "fps": 24, "duration_seconds": 10, "audio": False},
         }
 
     @router.put("/defaults")
@@ -76,6 +68,9 @@ def setup_video_routes() -> APIRouter:
         if not isinstance(body, dict):
             raise HTTPException(400, "Video generation request must be an object.")
         try:
+            # Also start lazily: this protects deployments where a nested router's
+            # lifecycle hooks are not propagated by the app assembly path.
+            await service.start()
             job = service.create_job(user, body)
         except VideoSettingsError as exc:
             raise HTTPException(400, str(exc))
