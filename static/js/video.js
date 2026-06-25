@@ -1,52 +1,299 @@
 import './imageBridge.js';
 
-// Anchor-first video controls for Settings → AI Defaults.
-function make(tag, text) { const n = document.createElement(tag); if (text) n.textContent = text; return n; }
-async function request(url, options = {}) {
-  const r = await fetch(url, { credentials: 'same-origin', ...options });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.detail || data.error || 'Request failed');
+// Guided anchor-first video setup. This mirrors the image-generation product
+// path: choose a configured Image Default, verify the planner, install local
+// capability through the UI, run a test, then enable generation.
+
+function el(tag, props = {}, children = []) {
+  const node = document.createElement(tag);
+  Object.entries(props).forEach(([key, value]) => {
+    if (key === 'text') node.textContent = value;
+    else if (key === 'html') node.innerHTML = value;
+    else if (key === 'className') node.className = value;
+    else if (key === 'style') node.style.cssText = value;
+    else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value);
+  });
+  children.forEach(child => node.appendChild(child));
+  return node;
+}
+
+async function api(url, options = {}) {
+  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || data.error || `Request failed (${response.status})`);
   return data;
 }
-function addCard() {
+
+function openCookbook() {
+  const button = document.getElementById('tool-cookbook-btn') || document.getElementById('rail-cookbook');
+  if (button) button.click();
+}
+
+function setupRow(label) {
+  const status = el('span', { text: 'Checking…', style: 'font-size:12px;opacity:.8;flex:1;' });
+  const row = el('div', { style: 'display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);' }, [
+    el('span', { text: '○', style: 'font-size:15px;line-height:1;color:var(--fg);opacity:.45;' }),
+    el('span', { text: label, style: 'font-size:12px;min-width:118px;' }),
+    status,
+  ]);
+  return { row, status };
+}
+
+function applyCheck(row, ready, message) {
+  const icon = row.row.firstElementChild;
+  icon.textContent = ready ? '✓' : '○';
+  icon.style.color = ready ? 'var(--accent,var(--red))' : 'var(--fg)';
+  icon.style.opacity = ready ? '1' : '.45';
+  row.status.textContent = message || (ready ? 'Ready' : 'Needs setup');
+}
+
+function createVideoCard() {
   if (document.getElementById('anchor-video-card')) return;
   const panel = document.querySelector('#settings-modal [data-settings-panel="ai"]');
   if (!panel) return;
-  const card = make('section');
-  card.id = 'anchor-video-card'; card.className = 'admin-card';
-  card.style.cssText = 'display:flex;flex-direction:column;gap:9px;margin-top:12px;';
-  const title = make('h2', 'Video Generation'); title.style.margin = '0';
-  const note = make('div', 'Anchor-first LTX-2 · 512×512 · ~10 seconds · silent MP4'); note.style.cssText = 'font-size:12px;opacity:.75;';
-  const runtime = make('div', 'Checking video runtime…'); runtime.style.cssText = 'font-size:12px;opacity:.75;';
-  const enabled = document.createElement('input'); enabled.type = 'checkbox';
-  const enableLabel = document.createElement('label'); enableLabel.style.cssText = 'display:flex;gap:7px;align-items:center;font-size:12px;'; enableLabel.append(enabled, document.createTextNode('Enable anchor-first video generation'));
-  const seed = document.createElement('input'); seed.type = 'number'; seed.placeholder = 'Random seed'; seed.min = '0'; seed.max = '2147483647'; seed.className = 'settings-input';
-  const prompt = document.createElement('textarea'); prompt.placeholder = 'Describe the video. Argos creates a Gallery anchor first, then animates it.'; prompt.style.cssText = 'min-height:70px;resize:vertical;padding:8px;border-radius:7px;font:inherit;';
-  const go = make('button', 'Create anchor and animate'); go.type = 'button'; go.className = 'admin-btn-add';
-  const cancel = make('button', 'Cancel'); cancel.type = 'button'; cancel.className = 'admin-btn-secondary'; cancel.style.display = 'none';
-  const status = make('div'); status.style.cssText = 'font-size:12px;min-height:18px;';
-  const output = make('div'); output.style.cssText = 'display:none;flex-direction:column;gap:7px;';
-  card.append(title, note, runtime, enableLabel, seed, prompt, go, cancel, status, output); panel.append(card);
-  let ready = false, jobId = '', sawAnchor = false;
-  async function save() { await request('/api/video/defaults', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({video_gen_enabled:enabled.checked,video_seed:seed.value===''?null:Number(seed.value)})}); }
-  enabled.onchange = () => save().then(()=>go.disabled=!ready||!enabled.checked).catch(e=>runtime.textContent=e.message);
-  seed.onchange = () => save().catch(e=>runtime.textContent=e.message);
-  function render(job) {
-    output.style.display='flex'; output.innerHTML='';
-    if (job.anchor_url) { output.append(make('strong','Animation anchor generated — now creating motion.')); const img=document.createElement('img'); img.src=job.anchor_url; img.style.cssText='max-width:220px;border-radius:8px;'; output.append(img); }
-    if (job.video_url) { const v=document.createElement('video'); v.controls=true; v.muted=true; v.playsInline=true; v.preload='metadata'; v.src=job.video_url; v.style.cssText='max-width:100%;border-radius:8px;background:#000;'; output.append(v); const link=document.createElement('a'); link.href='/gallery'; link.textContent='Open in Gallery'; output.append(link); }
-  }
-  async function poll() {
-    while (jobId) {
-      const job=await request('/api/video/generations/'+encodeURIComponent(jobId)); status.textContent=job.stage||job.status;
-      if (job.anchor_ready&&!sawAnchor) { sawAnchor=true; render(job); window.dispatchEvent(new Event('gallery-refresh')); }
-      if (job.status==='succeeded'||['failed','cancelled','interrupted'].includes(job.status)) { if(job.status==='succeeded'){render(job);window.dispatchEvent(new Event('gallery-refresh'));} else status.textContent=job.error||job.stage; jobId='';go.disabled=false;cancel.style.display='none';return; }
-      await new Promise(r=>setTimeout(r,1000));
+
+  const card = el('section', {
+    id: 'anchor-video-card',
+    className: 'admin-card',
+    style: 'display:flex;flex-direction:column;gap:10px;margin-top:12px;',
+  });
+  const runtimeText = el('div', { text: 'Checking guided setup…', style: 'font-size:12px;opacity:.78;' });
+  const plannerRow = setupRow('Prompt planner');
+  const imageRow = setupRow('Image anchor');
+  const engineRow = setupRow('Video engine');
+  const checklist = el('div', { style: 'border:1px solid var(--border);border-radius:8px;padding:0 9px;' }, [plannerRow.row, imageRow.row, engineRow.row]);
+
+  const cookbookButton = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Open Cookbook', style: 'font-size:12px;' });
+  cookbookButton.addEventListener('click', openCookbook);
+  const installButton = el('button', { type: 'button', className: 'admin-btn-add', text: 'Install video engine', style: 'font-size:12px;' });
+  const installLog = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Setup details', style: 'font-size:12px;display:none;' });
+  const testButton = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Run guided test', style: 'font-size:12px;' });
+  const actionRow = el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [cookbookButton, installButton, testButton, installLog]);
+
+  const enabled = el('input', { type: 'checkbox' });
+  const enableLabel = el('label', { style: 'display:flex;gap:7px;align-items:center;font-size:12px;' }, [enabled, document.createTextNode('Enable anchor-first video generation')]);
+  const seed = el('input', { type: 'number', min: '0', max: '2147483647', placeholder: 'Random seed', className: 'settings-input', style: 'max-width:180px;' });
+  const intent = el('textarea', {
+    placeholder: 'Describe the video. Argos will generate a stable Gallery anchor, notify you when it is ready, then animate it.',
+    style: 'min-height:78px;width:100%;box-sizing:border-box;resize:vertical;padding:8px;border:1px solid var(--border);border-radius:7px;background:var(--input-bg,var(--bg));color:var(--fg);font:inherit;',
+  });
+  const generate = el('button', { type: 'button', className: 'admin-btn-add', text: 'Create anchor and animate' });
+  const cancel = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Cancel', style: 'display:none;' });
+  const status = el('div', { style: 'font-size:12px;min-height:18px;' });
+  const output = el('div', { style: 'display:none;flex-direction:column;gap:8px;' });
+
+  card.append(
+    el('div', { style: 'display:flex;align-items:center;gap:8px;' }, [
+      el('h2', { text: 'Video Generation', style: 'margin:0;flex:1;font-size:15px;' }),
+      el('span', { text: 'Anchor-first · muted', style: 'font-size:11px;opacity:.65;' }),
+    ]),
+    el('div', { text: 'Uses your existing Image Default and Gallery workflow, then animates that anchor with a local video engine.', style: 'font-size:12px;opacity:.78;' }),
+    runtimeText,
+    checklist,
+    actionRow,
+    enableLabel,
+    el('label', { style: 'display:flex;flex-direction:column;gap:4px;font-size:12px;' }, [document.createTextNode('Optional fixed seed'), seed]),
+    intent,
+    el('div', { style: 'display:flex;gap:8px;align-items:center;' }, [generate, cancel]),
+    status,
+    output,
+  );
+  panel.appendChild(card);
+
+  let setup = null;
+  let jobId = '';
+  let sawAnchor = false;
+  let installingPoll = null;
+
+  const ready = () => Boolean(setup?.runtime?.available && setup?.image_default?.ready && setup?.planner?.ready);
+  const refreshButtons = () => {
+    const canGenerate = ready() && enabled.checked && !jobId;
+    generate.disabled = !canGenerate;
+    testButton.disabled = !ready();
+    installButton.style.display = setup?.runtime?.available ? 'none' : '';
+    installButton.disabled = Boolean(setup?.runtime?.installing);
+    installButton.textContent = setup?.runtime?.installing ? 'Installing video engine…' : 'Install video engine';
+    installLog.style.display = setup?.runtime?.last_error ? '' : 'none';
+  };
+
+  async function refreshSetup() {
+    try {
+      setup = await api('/api/video/setup');
+      applyCheck(plannerRow, setup.planner?.ready, setup.planner?.message);
+      applyCheck(imageRow, setup.image_default?.ready, setup.image_default?.message);
+      applyCheck(engineRow, setup.runtime?.available, setup.runtime?.available ? 'Installed and ready' : (setup.runtime?.reason || 'Install required'));
+      runtimeText.textContent = ready()
+        ? 'Setup complete. Argos derives separate detailed anchor and motion prompts automatically.'
+        : 'Finish the checklist to enable video generation. No terminal commands are required.';
+      refreshButtons();
+      return setup;
+    } catch (error) {
+      runtimeText.textContent = error.message || 'Could not check video setup.';
+      return null;
     }
   }
-  go.onclick=async()=>{ if(!prompt.value.trim()){status.textContent='Describe the video first.';return;} go.disabled=true;cancel.style.display='';sawAnchor=false;output.style.display='none';try{const j=await request('/api/video/generations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:prompt.value.trim(),video_seed:seed.value===''?null:Number(seed.value),session_id:window.sessionModule?.getCurrentSessionId?.()||null})});jobId=j.job_id;poll();}catch(e){status.textContent=e.message;go.disabled=false;cancel.style.display='none';}};
-  cancel.onclick=()=>request('/api/video/generations/'+encodeURIComponent(jobId)+'/cancel',{method:'POST'}).catch(e=>status.textContent=e.message);
-  Promise.all([request('/api/video/defaults'),request('/api/video/runtime')]).then(([d,r])=>{enabled.checked=d.defaults?.video_gen_enabled===true;if(d.defaults?.video_seed!==null&&d.defaults?.video_seed!==undefined)seed.value=d.defaults.video_seed;ready=r.available===true;runtime.textContent=ready?'Ready. Argos plans distinct anchor and motion prompts automatically.':(r.reason||'Video runtime unavailable.');go.disabled=!ready||!enabled.checked;}).catch(e=>{runtime.textContent=e.message;go.disabled=true;});
+
+  async function saveDefaults() {
+    await api('/api/video/defaults', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_gen_enabled: enabled.checked, video_seed: seed.value === '' ? null : Number(seed.value) }),
+    });
+  }
+
+  enabled.addEventListener('change', () => saveDefaults().then(refreshSetup).catch(error => { status.textContent = error.message; }));
+  seed.addEventListener('change', () => saveDefaults().catch(error => { status.textContent = error.message; }));
+
+  installButton.addEventListener('click', async () => {
+    try {
+      await api('/api/video/setup/install', { method: 'POST' });
+      status.textContent = 'Installing the local video engine. This can take a few minutes the first time.';
+      if (installingPoll) clearInterval(installingPoll);
+      installingPoll = setInterval(async () => {
+        await refreshSetup();
+        if (!setup?.runtime?.installing) {
+          clearInterval(installingPoll);
+          installingPoll = null;
+          status.textContent = setup?.runtime?.available ? 'Video engine installed and ready.' : (setup?.runtime?.last_error || 'Video engine installation did not complete.');
+        }
+      }, 1800);
+      await refreshSetup();
+    } catch (error) {
+      status.textContent = error.message;
+    }
+  });
+
+  installLog.addEventListener('click', async () => {
+    try {
+      const data = await api('/api/video/setup/install-log');
+      const text = data.log || 'No installer output is available yet.';
+      const details = el('pre', { text, style: 'max-height:240px;overflow:auto;margin:0;white-space:pre-wrap;font-size:11px;padding:8px;border:1px solid var(--border);border-radius:7px;' });
+      output.style.display = 'flex'; output.innerHTML = ''; output.append(el('strong', { text: 'Video engine setup details' }), details);
+    } catch (error) { status.textContent = error.message; }
+  });
+
+  function render(job) {
+    output.style.display = 'flex';
+    output.innerHTML = '';
+    if (job.anchor_url) {
+      const image = el('img', { src: job.anchor_url, alt: 'Generated animation anchor', style: 'max-width:240px;border-radius:8px;border:1px solid var(--border);' });
+      output.append(el('strong', { text: 'Animation anchor generated — now creating motion.' }), image);
+    }
+    if (job.video_url) {
+      const video = el('video', { controls: 'controls', muted: 'muted', playsinline: 'playsinline', preload: 'metadata', style: 'max-width:100%;border-radius:8px;background:#000;' });
+      video.src = job.video_url;
+      output.append(video, el('a', { href: '/gallery', text: 'Open final video in Gallery', style: 'font-size:12px;color:var(--accent,var(--red));' }));
+    }
+  }
+
+  async function pollJob() {
+    while (jobId) {
+      const job = await api(`/api/video/generations/${encodeURIComponent(jobId)}`);
+      status.textContent = job.stage || job.status;
+      if (job.anchor_ready && !sawAnchor) {
+        sawAnchor = true;
+        render(job);
+        window.dispatchEvent(new Event('gallery-refresh'));
+      }
+      if (job.status === 'succeeded') {
+        render(job);
+        window.dispatchEvent(new Event('gallery-refresh'));
+        jobId = '';
+        cancel.style.display = 'none';
+        await refreshSetup();
+        return job;
+      }
+      if (['failed', 'cancelled', 'interrupted'].includes(job.status)) {
+        status.textContent = job.error || job.stage || job.status;
+        jobId = '';
+        cancel.style.display = 'none';
+        await refreshSetup();
+        return job;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return null;
+  }
+
+  async function queue(body, label) {
+    if (!ready()) { status.textContent = 'Finish the setup checklist first.'; return; }
+    generate.disabled = true;
+    testButton.disabled = true;
+    cancel.style.display = '';
+    sawAnchor = false;
+    output.style.display = 'none';
+    status.textContent = label;
+    try {
+      const created = await api('/api/video/generations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      jobId = created.job_id;
+      await pollJob();
+    } catch (error) {
+      status.textContent = error.message;
+      jobId = '';
+      cancel.style.display = 'none';
+      refreshButtons();
+    }
+  }
+
+  generate.addEventListener('click', () => {
+    if (!intent.value.trim()) { status.textContent = 'Describe the video first.'; return; }
+    queue({ prompt: intent.value.trim(), video_seed: seed.value === '' ? null : Number(seed.value), session_id: window.sessionModule?.getCurrentSessionId?.() || null }, 'Creating the animation anchor…');
+  });
+  cancel.addEventListener('click', () => {
+    if (!jobId) return;
+    api(`/api/video/generations/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }).catch(error => { status.textContent = error.message; });
+  });
+  testButton.addEventListener('click', async () => {
+    if (!ready()) return;
+    generate.disabled = true; testButton.disabled = true; cancel.style.display = '';
+    sawAnchor = false; output.style.display = 'none'; status.textContent = 'Running the guided setup test…';
+    try {
+      const created = await api('/api/video/setup/test', { method: 'POST' });
+      jobId = created.job_id;
+      await pollJob();
+    } catch (error) {
+      status.textContent = error.message;
+      jobId = ''; cancel.style.display = 'none'; refreshButtons();
+    }
+  });
+
+  api('/api/video/defaults').then(data => {
+    enabled.checked = data.defaults?.video_gen_enabled === true;
+    if (data.defaults?.video_seed !== null && data.defaults?.video_seed !== undefined) seed.value = data.defaults.video_seed;
+    refreshSetup();
+  }).catch(error => { runtimeText.textContent = error.message; });
 }
-function boot(){addCard();new MutationObserver(addCard).observe(document.documentElement,{childList:true,subtree:true});}
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();
+
+function addMediaToolControl() {
+  if (document.getElementById('video-agent-tool-control')) return;
+  const candidates = [...document.querySelectorAll('h1,h2,h3,h4,h5,.settings-title,.section-title')];
+  const header = candidates.find(node => /built[-\s]?in agent tools/i.test(node.textContent || ''));
+  if (!header) return;
+  const container = header.closest('.admin-card, .settings-section, section, div');
+  if (!container || /generate video/i.test(container.textContent || '')) return;
+  const row = el('div', { id: 'video-agent-tool-control', style: 'display:flex;align-items:center;gap:9px;padding:9px 0;border-top:1px solid var(--border);margin-top:8px;' });
+  const toggle = el('input', { type: 'checkbox' });
+  const copy = el('div', { style: 'flex:1;' }, [
+    el('div', { text: 'Generate video', style: 'font-size:13px;font-weight:600;' }),
+    el('div', { text: 'Creates a Gallery image anchor through your Image Default, then animates it into a muted 10-second clip.', style: 'font-size:11px;opacity:.72;margin-top:2px;' }),
+  ]);
+  const label = el('label', { className: 'admin-switch', style: 'transform:scale(.9);' }, [toggle, el('span', { className: 'admin-slider' })]);
+  row.append(copy, label);
+  container.appendChild(row);
+  api('/api/prefs/video_agent_enabled').then(data => {
+    toggle.checked = data.value !== false;
+  }).catch(() => { toggle.checked = true; });
+  toggle.addEventListener('change', () => {
+    api('/api/prefs/video_agent_enabled', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: toggle.checked }) }).catch(() => { toggle.checked = !toggle.checked; });
+  });
+}
+
+function boot() {
+  createVideoCard();
+  addMediaToolControl();
+  new MutationObserver(() => { createVideoCard(); addMediaToolControl(); }).observe(document.documentElement, { childList: true, subtree: true });
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+else boot();
