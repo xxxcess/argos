@@ -1,6 +1,16 @@
 // static/js/storage.js
 // Centralized localStorage access with key constants and JSON parse safety
 
+// The local Diffusers image controls attach after the regular Settings module
+// loads. Keep these side-effect imports here because storage.js is the first UI
+// module loaded by index.html on every page.
+import './localImageIntegration.js';
+import './localImageFreshLoad.js';
+import './localImageEndpointRecovery.js';
+import './localImageChatGuard.js';
+import './localImageCookbookPanel.js';
+import './streamRecoveryComposerGuard.js';
+
 // ── Key constants ──
 export const KEYS = {
   THEME: 'odysseus-theme',
@@ -13,7 +23,7 @@ export const KEYS = {
   COMPARE_CHAT: 'compare-continue-chat',
   COMPARE_BLIND: 'compare-blind',
   COMPARE_RANDOM: 'compare-randomize',
-  MODELS_EXPANDED: 'odysseus-model-expanded',
+  MODELS_EXPANDED: 'odysseus-models-expanded',
   MODEL_ENDPOINTS: 'odysseus-model-endpoints',
   MODEL_SELECTED: 'odysseus-selected-model',
   SORT_ORDER: 'odysseus-sessions-sort',
