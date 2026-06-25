@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 _SIZE_RE = re.compile(r"^(?P<width>\d{2,5})x(?P<height>\d{2,5})$")
+_PRECISIONS = {"auto", "float32", "float16"}
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,29 @@ def _choose_device(requested: str) -> str:
     return "cpu"
 
 
+def _resolve_dtype(torch: Any, device: str, precision: str) -> tuple[Any, str, bool]:
+    """Select a stable dtype and whether a fp16 repository variant is safe.
+
+    SD Turbo + MPS fp16 can emit NaN image tensors on some Apple Silicon/PyTorch
+    combinations. Diffusers then casts those NaNs to zero and produces a black
+    PNG. For MPS, `auto` deliberately uses float32 and the default model weights.
+    CUDA retains the lightweight fp16 default. Users can still opt into float16
+    explicitly for experimentation, but the service health output records it.
+    """
+
+    selected = (precision or "auto").strip().lower()
+    if selected not in _PRECISIONS:
+        raise RuntimeError("precision must be auto, float32, or float16")
+    if selected == "float32":
+        return torch.float32, "float32", False
+    if selected == "float16":
+        return torch.float16, "float16", device == "cuda"
+    if device == "cuda":
+        return torch.float16, "float16", True
+    # MPS is intentionally float32 by default for output correctness.
+    return torch.float32, "float32", False
+
+
 def _parse_size(value: str, max_size: int) -> tuple[int, int]:
     match = _SIZE_RE.match((value or "").strip())
     if not match:
@@ -141,8 +165,8 @@ def _assert_not_blank(image: Any) -> None:
         extrema = preview.getextrema()
         if all(high <= 1 for _low, high in extrema):
             raise RuntimeError(
-                "Local Diffusers produced a blank black image. Restart the local image server; "
-                "if it persists, reinstall the Diffusers runtime and verify the SD Turbo fp16 model files."
+                "Local Diffusers produced a blank black image. The MPS runtime is unstable for this model/configuration; "
+                "restart with float32 precision and keep the request at 512x512."
             )
     except AttributeError:
         # A custom pipeline returned a non-PIL image; let the normal save path
@@ -158,12 +182,15 @@ class LocalImageService:
         profile: ImageProfile,
         served_model_id: str,
         device: str = "auto",
+        precision: str = "auto",
         max_size: Optional[int] = None,
         pipeline_factory: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.profile = profile
         self.served_model_id = served_model_id or profile.name
         self.requested_device = device
+        self.requested_precision = precision
+        self.precision = ""
         self.max_size = max_size or profile.max_size
         self.pipeline_factory = pipeline_factory
         self.pipeline: Any = None
@@ -201,15 +228,16 @@ class LocalImageService:
             ) from exc
 
         self.device = _choose_device(self.requested_device)
-        dtype = torch.float16 if self.device in {"mps", "cuda"} else torch.float32
+        dtype, self.precision, use_fp16_variant = _resolve_dtype(
+            torch, self.device, self.requested_precision
+        )
         factory = self.pipeline_factory or AutoPipelineForText2Image.from_pretrained
         load_kwargs: dict[str, Any] = {"torch_dtype": dtype, "use_safetensors": True}
 
-        # The published SD Turbo example uses its fp16 variant. Explicitly
-        # selecting it prevents a mixed/default-weight load from causing blank
-        # frames on lower-memory MPS machines. Custom repositories may not carry
-        # that variant, so retry once without it.
-        if dtype == torch.float16:
+        # Only CUDA gets the fp16 variant automatically. For Apple MPS the
+        # float32 default is intentional: it avoids NaN-to-black output seen in
+        # the Cookbook logs for SD Turbo.
+        if use_fp16_variant:
             load_kwargs["variant"] = "fp16"
         try:
             pipe = factory(self.profile.repo_id, **load_kwargs)
@@ -220,17 +248,27 @@ class LocalImageService:
             load_kwargs.pop("variant", None)
             pipe = factory(self.profile.repo_id, **load_kwargs)
 
-        # These toggles trade a little speed for far lower peak memory, which is
-        # essential on an 8 GB Apple Silicon system.
-        for method in ("enable_attention_slicing", "enable_vae_slicing"):
-            candidate = getattr(pipe, method, None)
-            if callable(candidate):
-                candidate()
+        # These toggles trade speed for lower peak memory, which is especially
+        # important on an 8 GB Apple Silicon system. Max slicing is used on MPS
+        # to make the conservative float32 default more likely to fit.
+        attention_slicing = getattr(pipe, "enable_attention_slicing", None)
+        if callable(attention_slicing):
+            attention_slicing("max" if self.device == "mps" else "auto")
+        vae_slicing = getattr(pipe, "enable_vae_slicing", None)
+        if callable(vae_slicing):
+            vae_slicing()
         pipe.to(self.device)
         configure = getattr(pipe, "set_progress_bar_config", None)
         if callable(configure):
             configure(disable=True)
         self.pipeline = pipe
+        logger.info(
+            "Loaded local image pipeline profile=%s device=%s precision=%s repo=%s",
+            self.profile.name,
+            self.device,
+            self.precision,
+            self.profile.repo_id,
+        )
 
     async def generate(self, request: ImageGenerationRequest) -> dict[str, Any]:
         if request.n != 1:
@@ -282,6 +320,7 @@ class LocalImageService:
             "profile": self.profile.name,
             "repo_id": self.profile.repo_id,
             "device": self.device or self.requested_device,
+            "precision": self.precision or self.requested_precision,
             "max_size": self.max_size,
             "warning": "CPU fallback is active; image generation will be slow." if self.device == "cpu" else "",
             "error": self.error,
@@ -327,6 +366,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-repo", default="", help="Override the Hugging Face repository for this profile")
     parser.add_argument("--served-model-id", default="", help="Model id exposed from /v1/models")
     parser.add_argument("--device", choices=("auto", "mps", "cuda", "cpu"), default="auto")
+    parser.add_argument("--precision", choices=sorted(_PRECISIONS), default="auto")
     parser.add_argument("--max-size", type=int, default=512, help="Maximum width/height (default: 512)")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: loopback only)")
     parser.add_argument("--port", type=int, default=7861)
@@ -355,6 +395,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         profile=profile,
         served_model_id=args.served_model_id or profile.name,
         device=args.device,
+        precision=args.precision,
         max_size=args.max_size,
     )
     import uvicorn
