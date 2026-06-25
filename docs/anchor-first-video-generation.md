@@ -1,7 +1,23 @@
 # Anchor-first video generation
 
 Argos creates a stable, muted video by first generating a Gallery image anchor,
-then animating that exact image through local `mlx-video` / LTX-2.
+then animating that exact image through local `mlx-video` and LTX-2.
+
+## Runtime and model
+
+`mlx-video` is the Apple-Silicon inference runtime. It is not itself the video
+model. This integration uses the pre-converted **`prince-canuma/LTX-2-distilled`**
+checkpoint, selected for the fixed local image-to-video profile.
+
+The Video Generation setup card manages both pieces as one operation:
+
+- installs the `mlx-video` runtime into Argos's active Python environment;
+- downloads and resumes the selected LTX-2 model into Argos-managed storage;
+- records the verified local snapshot path; and
+- passes that local path to every video job.
+
+This removes an implicit first-generation weight download and makes readiness
+visible before a user can start a test.
 
 ## Flow
 
@@ -33,14 +49,14 @@ then animating that exact image through local `mlx-video` / LTX-2.
 No terminal commands, environment variables, or hand-written scripts are needed.
 
 1. Open **Settings → AI Defaults → Video Generation**.
-2. In the **Image anchor** row, use the built-in endpoint/model selector. If you
-   need a local anchor generator, choose **Open Cookbook**, start the local
-   Diffusers image server, then select it as the Image Default.
+2. In the **Image anchor** row, use the built-in endpoint/model selector. For a
+   local anchor generator, choose **Open Cookbook**, start the local Diffusers
+   image server, then select it as the Image Default.
 3. Confirm the existing **Utility Model** or Default Chat Model is available for
    prompt planning.
-4. Select **Install video engine**. Argos installs the optional native runtime
-   into the same Python environment it is already running from and prepares a
-   managed compatibility entrypoint automatically.
+4. Select **Install video engine**. Argos installs the runtime and downloads the
+   selected LTX-2 checkpoint; the card reports the install or model-download
+   stage and exposes safe diagnostic details on failure.
 5. Select **Run guided test**. The test follows the complete image-anchor → video
    path and places its outputs in Gallery.
 6. Enable video generation. The same card supports direct generation; the
@@ -48,6 +64,14 @@ No terminal commands, environment variables, or hand-written scripts are needed.
 
 The setup card shows actionable state for every prerequisite and exposes installer
 details only when a recovery diagnosis is needed.
+
+## Cookbook boundary
+
+The image anchor follows the existing Cookbook-managed image-server pattern.
+`mlx-video` upstream is a local CLI/runtime rather than an OpenAI-compatible
+server, so Argos's durable job worker invokes it directly. Cookbook should own
+runtime/model lifecycle and diagnostics; a persistent warm LTX worker is a
+future optimization, not a prerequisite for correct video generation.
 
 ## Privacy and reproducibility
 
