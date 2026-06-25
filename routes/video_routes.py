@@ -1,6 +1,7 @@
 """Owner-scoped API for the guided anchor-first local video workflow."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -9,6 +10,8 @@ from services.anchor_video_generation import get_video_generation_service, runti
 from services.video_runtime_setup import install_log_tail, prepare_runtime, start_install, status as setup_runtime_status
 from src.anchor_video_settings import VideoSettingsError, get_video_defaults, save_video_defaults
 from src.auth_helpers import require_privilege
+
+logger = logging.getLogger(__name__)
 
 
 def _admin(request: Request, user: str) -> bool:
@@ -108,10 +111,11 @@ def setup_video_routes() -> APIRouter:
         user = require_privilege(request, "can_generate_videos")
         setup = _setup_payload(user)
         if not setup["runtime"].get("available"):
-            raise HTTPException(409, "Install the local video engine before running a test.")
+            raise HTTPException(409, "Install the LTX-2 video engine and model before running a test.")
         if not setup["image_default"].get("ready") or not setup["planner"].get("ready"):
             raise HTTPException(409, "Finish the Image Default and Utility Model setup before running a test.")
         prior_enabled = bool(get_video_defaults(user).get("video_gen_enabled"))
+        job = None
         try:
             # The test is a first-run diagnostic, so create one valid job even if
             # the user has not yet chosen to leave video generation enabled.
@@ -126,12 +130,18 @@ def setup_video_routes() -> APIRouter:
             raise HTTPException(400, str(exc))
         except RuntimeError as exc:
             raise HTTPException(503, str(exc))
+        except Exception as exc:
+            logger.exception("Guided video test could not start")
+            detail = f"Guided test could not start: {type(exc).__name__}: {str(exc)[:300]}"
+            raise HTTPException(500, detail) from exc
         finally:
             if not prior_enabled:
                 try:
                     save_video_defaults(user, {"video_gen_enabled": False})
                 except Exception:
-                    pass
+                    logger.exception("Could not restore video enabled setting after guided test")
+        if job is None:
+            raise HTTPException(500, "Guided test did not create a video job.")
         return {"job_id": job.id, "status": job.status, "stage": job.stage, "test": True}
 
     @router.get("/defaults")
