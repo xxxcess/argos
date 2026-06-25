@@ -16,6 +16,7 @@ import sys
 _TARGETS = {
     "src.ai_interaction": "image_defaults",
     "src.tool_execution": "agent_image_dispatch",
+    "src.agent_loop": "agent_image_terminal",
 }
 
 
@@ -50,6 +51,10 @@ class _ImageIntegrationLoader(importlib.abc.Loader):
             from src.generate_image_dispatch import install_generate_image_dispatch
 
             install_generate_image_dispatch(module)
+        elif self._hook_name == "agent_image_terminal":
+            from src.image_agent_completion import install_image_agent_terminal
+
+            install_image_agent_terminal(module)
 
 
 class _ImageIntegrationFinder(importlib.abc.MetaPathFinder):
