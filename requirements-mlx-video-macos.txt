@@ -1,0 +1,3 @@
+# Optional native Apple Silicon runtime for anchor-first video generation.
+# Install only in a native macOS Argos environment; do not include in Docker/Linux requirements.
+mlx-video>=0.4.0
