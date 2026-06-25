@@ -22,6 +22,43 @@ function isCloudImageModel(model) {
   return value.startsWith('gpt-image') || value.startsWith('dall-e') || value.startsWith('chatgpt-image');
 }
 
+function modelId(value) {
+  if (value && typeof value === 'object') {
+    return String(value.id || value.model || value.name || '').trim();
+  }
+  return String(value || '').trim();
+}
+
+function flattenModelIds(value) {
+  if (Array.isArray(value)) return value.flatMap(flattenModelIds);
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return [];
+    try {
+      const decoded = JSON.parse(text);
+      if (Array.isArray(decoded)) return decoded.flatMap(flattenModelIds);
+    } catch (_) {
+      // This is a normal single model id rather than JSON.
+    }
+    return [text];
+  }
+  const id = modelId(value);
+  return id ? [id] : [];
+}
+
+function endpointModelIds(endpoint) {
+  // The endpoint admin card's `models` field contains only models enabled for
+  // normal chat. Local image endpoints retain their served id in pinned_models
+  // and cached_models, even when it is intentionally hidden from the chat
+  // picker. AI Defaults must see all of those sources.
+  const models = [
+    ...flattenModelIds(endpoint?.models),
+    ...flattenModelIds(endpoint?.pinned_models),
+    ...flattenModelIds(endpoint?.cached_models),
+  ];
+  return [...new Set(models.map(modelId).filter(Boolean))];
+}
+
 function isLocalEndpoint(endpoint) {
   const category = String(endpoint?.category || '').toLowerCase();
   if (category === 'local') return true;
@@ -36,7 +73,7 @@ function isLocalEndpoint(endpoint) {
 function isImageEndpoint(endpoint) {
   if (!endpoint || !endpoint.is_enabled) return false;
   if (String(endpoint.model_type || '').toLowerCase() === 'image') return true;
-  return (endpoint.models || []).some(isCloudImageModel);
+  return endpointModelIds(endpoint).some(isCloudImageModel);
 }
 
 function imageEndpoints() {
@@ -151,6 +188,14 @@ function endpointForSelection() {
   return (state.endpoints || []).find(ep => String(ep.id) === String(id)) || null;
 }
 
+function configuredLocalModel(selectedEndpoint, previous) {
+  const configured = String(previous || state.settings.image_model || '').trim();
+  if (!configured.startsWith('local-')) return '';
+  // A selected local Image endpoint is authoritative even when the normal-chat
+  // model toggle has hidden its served model from `models`.
+  return selectedEndpoint && isLocalEndpoint(selectedEndpoint) ? configured : '';
+}
+
 function renderModelOptions(explicitModel) {
   const modelSelect = byId('set-imgModelSelect');
   if (!modelSelect) return;
@@ -158,10 +203,13 @@ function renderModelOptions(explicitModel) {
   const selectedEndpoint = endpointForSelection();
   const source = selectedEndpoint ? [selectedEndpoint] : imageEndpoints();
   const models = [];
-  source.forEach(ep => (ep.models || []).forEach(model => {
+  source.forEach(ep => endpointModelIds(ep).forEach(model => {
     const value = String(model || '').trim();
     if (value && !models.includes(value)) models.push(value);
   }));
+  const localFallback = configuredLocalModel(selectedEndpoint, previous);
+  if (localFallback && !models.includes(localFallback)) models.push(localFallback);
+
   modelSelect.innerHTML = '';
   if (!models.length) {
     const opt = document.createElement('option');
@@ -180,7 +228,7 @@ function renderModelOptions(explicitModel) {
   });
   if (previous && models.includes(previous)) modelSelect.value = previous;
   else modelSelect.value = models[0];
-  const endpoint = endpointForSelection();
+  const endpoint = selectedEndpoint;
   if (endpoint) {
     setStatus(`${endpoint.name}${endpoint.online ? ' is ready.' : ' is configured; waiting for its server.'}`, !endpoint.online);
   } else {
