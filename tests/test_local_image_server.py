@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from types import SimpleNamespace
 
 import pytest
 
-from src.local_image_server import ImageGenerationRequest, LocalImageService, PROFILES, _parse_size
+from src.local_image_server import (
+    ImageGenerationRequest,
+    LocalImageService,
+    PROFILES,
+    _parse_size,
+    _resolve_dtype,
+)
 
 
 class _FakeImage:
@@ -37,6 +44,7 @@ def _ready_service(max_size=512):
     service = LocalImageService(PROFILES["sd-turbo"], "sd-turbo", max_size=max_size)
     service.pipeline = _FakePipeline()
     service.device = "mps"
+    service.precision = "float32"
     service.status = "ready"
     return service
 
@@ -47,6 +55,22 @@ def test_parse_size_enforces_low_memory_bounds():
         _parse_size("768x512", 512)
     with pytest.raises(ValueError, match="multiples of 8"):
         _parse_size("510x512", 512)
+
+
+def test_mps_auto_precision_uses_float32_and_default_model_weights():
+    torch = SimpleNamespace(float16="fp16", float32="fp32")
+    dtype, precision, use_fp16_variant = _resolve_dtype(torch, "mps", "auto")
+    assert dtype == "fp32"
+    assert precision == "float32"
+    assert use_fp16_variant is False
+
+
+def test_cuda_auto_precision_keeps_fp16_variant():
+    torch = SimpleNamespace(float16="fp16", float32="fp32")
+    dtype, precision, use_fp16_variant = _resolve_dtype(torch, "cuda", "auto")
+    assert dtype == "fp16"
+    assert precision == "float16"
+    assert use_fp16_variant is True
 
 
 def test_local_generation_returns_openai_compatible_base64_png():
@@ -72,12 +96,13 @@ def test_local_generation_rejects_unsupported_batch_and_model():
         asyncio.run(service.generate(ImageGenerationRequest(prompt="cat", model="other")))
 
 
-def test_health_reports_selected_profile_and_device():
+def test_health_reports_selected_profile_device_and_precision():
     service = _ready_service()
     health = service.health()
     assert health["status"] == "ready"
     assert health["model"] == "sd-turbo"
     assert health["device"] == "mps"
+    assert health["precision"] == "float32"
     assert health["max_size"] == 512
 
 
