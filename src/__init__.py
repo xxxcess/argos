@@ -1,11 +1,9 @@
 """Argos source package bootstrap hooks.
 
 Most of the project historically used ``src`` as a namespace package. The small
-import hook below preserves that layout while installing the local image endpoint
-wrappers exactly when their existing dispatch modules load. It avoids importing
-optional Diffusers/PyTorch at normal application startup.
+import hook below preserves that layout while installing optional image-default
+and anchor-first-video adapters only when their existing dispatch modules load.
 """
-
 from __future__ import annotations
 
 import importlib.abc
@@ -14,13 +12,15 @@ import sys
 
 
 _TARGETS = {
+    "src.agent_tools": "video_agent_tags",
     "src.ai_interaction": "image_defaults",
     "src.tool_execution": "agent_image_dispatch",
+    "src.tool_schemas": "video_tool_schema",
     "src.agent_loop": "agent_image_terminal",
 }
 
 
-class _ImageIntegrationLoader(importlib.abc.Loader):
+class _IntegrationLoader(importlib.abc.Loader):
     def __init__(self, wrapped_loader, hook_name: str):
         self._wrapped_loader = wrapped_loader
         self._hook_name = hook_name
@@ -31,10 +31,12 @@ class _ImageIntegrationLoader(importlib.abc.Loader):
 
     def exec_module(self, module):
         self._wrapped_loader.exec_module(module)
-        if self._hook_name == "image_defaults":
+        if self._hook_name == "video_agent_tags":
+            from src.video_tool_dispatch import install_video_agent_tags
+            install_video_agent_tags(module)
+        elif self._hook_name == "image_defaults":
             from src.image_generation_defaults import install_image_generation_defaults
             from src.image_tool_payload import normalize_image_tool_content
-
             install_image_generation_defaults(module)
             original_generate = module.do_generate_image
 
@@ -49,26 +51,27 @@ class _ImageIntegrationLoader(importlib.abc.Loader):
             module._local_image_tool_content_normalized = True
         elif self._hook_name == "agent_image_dispatch":
             from src.generate_image_dispatch import install_generate_image_dispatch
-
+            from src.video_tool_dispatch import install_video_generation_dispatch
             install_generate_image_dispatch(module)
+            install_video_generation_dispatch(module)
+        elif self._hook_name == "video_tool_schema":
+            from src.video_tool_dispatch import install_video_tool_schema
+            install_video_tool_schema(module)
         elif self._hook_name == "agent_image_terminal":
             from src.image_agent_completion import install_image_agent_terminal
-
             install_image_agent_terminal(module)
 
 
-class _ImageIntegrationFinder(importlib.abc.MetaPathFinder):
+class _IntegrationFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):  # pragma: no cover - import system glue
         hook_name = _TARGETS.get(fullname)
         if not hook_name:
             return None
-        # Call PathFinder directly rather than importlib.util.find_spec() so this
-        # finder does not recurse into itself.
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec and spec.loader and not isinstance(spec.loader, _ImageIntegrationLoader):
-            spec.loader = _ImageIntegrationLoader(spec.loader, hook_name)
+        if spec and spec.loader and not isinstance(spec.loader, _IntegrationLoader):
+            spec.loader = _IntegrationLoader(spec.loader, hook_name)
         return spec
 
 
-if not any(isinstance(finder, _ImageIntegrationFinder) for finder in sys.meta_path):
-    sys.meta_path.insert(0, _ImageIntegrationFinder())
+if not any(isinstance(finder, _IntegrationFinder) for finder in sys.meta_path):
+    sys.meta_path.insert(0, _IntegrationFinder())
