@@ -1,8 +1,8 @@
 import './imageBridge.js';
 
 // Guided anchor-first video setup. This mirrors the image-generation product
-// path: choose a configured Image Default, verify the planner, install local
-// capability through the UI, run a test, then enable generation.
+// path: choose a configured Image Default, verify the planner, install the
+// native runtime and its LTX model, run a test, then enable generation.
 
 function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
@@ -48,6 +48,14 @@ function applyCheck(row, ready, message) {
   row.status.textContent = message || (ready ? 'Ready' : 'Needs setup');
 }
 
+function installMessage(runtime) {
+  const phase = runtime?.phase || '';
+  if (phase === 'installing_runtime') return 'Installing the MLX video runtime…';
+  if (phase === 'downloading_ltx_model') return 'Downloading the LTX-2 distilled model…';
+  if (phase === 'queued') return 'Preparing local video setup…';
+  return 'Installing the local runtime and LTX-2 model…';
+}
+
 function createVideoCard() {
   if (document.getElementById('anchor-video-card')) return;
   const panel = document.querySelector('#settings-modal [data-settings-panel="ai"]');
@@ -61,12 +69,12 @@ function createVideoCard() {
   const runtimeText = el('div', { text: 'Checking guided setup…', style: 'font-size:12px;opacity:.78;' });
   const plannerRow = setupRow('Prompt planner');
   const imageRow = setupRow('Image anchor');
-  const engineRow = setupRow('Video engine');
+  const engineRow = setupRow('LTX-2 engine');
   const checklist = el('div', { style: 'border:1px solid var(--border);border-radius:8px;padding:0 9px;' }, [plannerRow.row, imageRow.row, engineRow.row]);
 
   const cookbookButton = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Open Cookbook', style: 'font-size:12px;' });
   cookbookButton.addEventListener('click', openCookbook);
-  const installButton = el('button', { type: 'button', className: 'admin-btn-add', text: 'Install video engine', style: 'font-size:12px;' });
+  const installButton = el('button', { type: 'button', className: 'admin-btn-add', text: 'Install LTX-2 engine', style: 'font-size:12px;' });
   const installLog = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Setup details', style: 'font-size:12px;display:none;' });
   const testButton = el('button', { type: 'button', className: 'admin-btn-secondary', text: 'Run guided test', style: 'font-size:12px;' });
   const actionRow = el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [cookbookButton, installButton, testButton, installLog]);
@@ -88,7 +96,7 @@ function createVideoCard() {
       el('h2', { text: 'Video Generation', style: 'margin:0;flex:1;font-size:15px;' }),
       el('span', { text: 'Anchor-first · muted', style: 'font-size:11px;opacity:.65;' }),
     ]),
-    el('div', { text: 'Uses your existing Image Default and Gallery workflow, then animates that anchor with a local video engine.', style: 'font-size:12px;opacity:.78;' }),
+    el('div', { text: 'Uses your existing Image Default and Gallery workflow, then animates that anchor with a managed local LTX-2 engine.', style: 'font-size:12px;opacity:.78;' }),
     runtimeText,
     checklist,
     actionRow,
@@ -113,7 +121,7 @@ function createVideoCard() {
     testButton.disabled = !ready();
     installButton.style.display = setup?.runtime?.available ? 'none' : '';
     installButton.disabled = Boolean(setup?.runtime?.installing);
-    installButton.textContent = setup?.runtime?.installing ? 'Installing video engine…' : 'Install video engine';
+    installButton.textContent = setup?.runtime?.installing ? installMessage(setup.runtime) : 'Install LTX-2 engine';
     installLog.style.display = setup?.runtime?.last_error ? '' : 'none';
   };
 
@@ -122,7 +130,10 @@ function createVideoCard() {
       setup = await api('/api/video/setup');
       applyCheck(plannerRow, setup.planner?.ready, setup.planner?.message);
       applyCheck(imageRow, setup.image_default?.ready, setup.image_default?.message);
-      applyCheck(engineRow, setup.runtime?.available, setup.runtime?.available ? 'Installed and ready' : (setup.runtime?.reason || 'Install required'));
+      const runtimeMessage = setup.runtime?.available
+        ? `Installed: ${setup.runtime?.model_repo || 'LTX-2 distilled'}`
+        : (setup.runtime?.installing ? installMessage(setup.runtime) : (setup.runtime?.reason || 'Install required'));
+      applyCheck(engineRow, setup.runtime?.available, runtimeMessage);
       runtimeText.textContent = ready()
         ? 'Setup complete. Argos derives separate detailed anchor and motion prompts automatically.'
         : 'Finish the checklist to enable video generation. No terminal commands are required.';
@@ -148,15 +159,19 @@ function createVideoCard() {
   installButton.addEventListener('click', async () => {
     try {
       await api('/api/video/setup/install', { method: 'POST' });
-      status.textContent = 'Installing the local video engine. This can take a few minutes the first time.';
+      status.textContent = installMessage(setup?.runtime);
       if (installingPoll) clearInterval(installingPoll);
       installingPoll = setInterval(async () => {
         await refreshSetup();
-        if (!setup?.runtime?.installing) {
-          clearInterval(installingPoll);
-          installingPoll = null;
-          status.textContent = setup?.runtime?.available ? 'Video engine installed and ready.' : (setup?.runtime?.last_error || 'Video engine installation did not complete.');
+        if (setup?.runtime?.installing) {
+          status.textContent = installMessage(setup.runtime);
+          return;
         }
+        clearInterval(installingPoll);
+        installingPoll = null;
+        status.textContent = setup?.runtime?.available
+          ? 'LTX-2 engine and model are installed and ready.'
+          : (setup?.runtime?.last_error || 'LTX-2 installation did not complete.');
       }, 1800);
       await refreshSetup();
     } catch (error) {
@@ -169,7 +184,7 @@ function createVideoCard() {
       const data = await api('/api/video/setup/install-log');
       const text = data.log || 'No installer output is available yet.';
       const details = el('pre', { text, style: 'max-height:240px;overflow:auto;margin:0;white-space:pre-wrap;font-size:11px;padding:8px;border:1px solid var(--border);border-radius:7px;' });
-      output.style.display = 'flex'; output.innerHTML = ''; output.append(el('strong', { text: 'Video engine setup details' }), details);
+      output.style.display = 'flex'; output.innerHTML = ''; output.append(el('strong', { text: 'LTX-2 setup details' }), details);
     } catch (error) { status.textContent = error.message; }
   });
 
