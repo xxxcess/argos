@@ -28,10 +28,7 @@ def _image_default_status(owner: str | None) -> dict[str, Any]:
     except Exception:
         selected = None
     if selected is None:
-        return {
-            "ready": False,
-            "message": "Choose an enabled Image Default for the animation anchor.",
-        }
+        return {"ready": False, "message": "Choose an enabled Image Default for the animation anchor."}
     return {
         "ready": True,
         "endpoint_id": selected.endpoint_id,
@@ -48,35 +45,20 @@ def _planner_status(owner: str | None) -> dict[str, Any]:
     except Exception:
         url, model = "", ""
     if not url or not model:
-        return {
-            "ready": False,
-            "message": "Choose a Utility Model or Default Chat Model to plan anchor and motion prompts.",
-        }
+        return {"ready": False, "message": "Choose a Utility Model or Default Chat Model to plan anchor and motion prompts."}
     return {"ready": True, "model": str(model), "message": str(model)}
 
 
 def _setup_payload(owner: str | None) -> dict[str, Any]:
-    # Set MLX_VIDEO_BIN to the managed wrapper before asking the existing worker
-    # about availability. This is what makes the installation survive a restart
-    # without requiring a user-created environment variable.
     prepare_runtime()
     managed_runtime = setup_runtime_status()
     worker_runtime = runtime_status()
-    ready = bool(managed_runtime.get("available") and worker_runtime.get("available"))
     return {
-        "ready": ready,
+        "ready": bool(managed_runtime.get("available") and worker_runtime.get("available")),
         "runtime": {**managed_runtime, "worker": worker_runtime},
         "image_default": _image_default_status(owner),
         "planner": _planner_status(owner),
-        "profile": {
-            "mode": "anchor_first_i2v",
-            "width": 512,
-            "height": 512,
-            "frames": 241,
-            "fps": 24,
-            "duration_seconds": 10,
-            "audio": False,
-        },
+        "profile": {"mode": "anchor_first_i2v", "width": 512, "height": 512, "frames": 241, "fps": 24, "duration_seconds": 10, "audio": False},
     }
 
 
@@ -129,7 +111,12 @@ def setup_video_routes() -> APIRouter:
             raise HTTPException(409, "Install the local video engine before running a test.")
         if not setup["image_default"].get("ready") or not setup["planner"].get("ready"):
             raise HTTPException(409, "Finish the Image Default and Utility Model setup before running a test.")
+        prior_enabled = bool(get_video_defaults(user).get("video_gen_enabled"))
         try:
+            # The test is a first-run diagnostic, so create one valid job even if
+            # the user has not yet chosen to leave video generation enabled.
+            if not prior_enabled:
+                save_video_defaults(user, {"video_gen_enabled": True})
             await service.start()
             job = service.create_job(user, {
                 "prompt": "A calm portrait scene with a person standing beside a window as afternoon light shifts softly across the room.",
@@ -139,6 +126,12 @@ def setup_video_routes() -> APIRouter:
             raise HTTPException(400, str(exc))
         except RuntimeError as exc:
             raise HTTPException(503, str(exc))
+        finally:
+            if not prior_enabled:
+                try:
+                    save_video_defaults(user, {"video_gen_enabled": False})
+                except Exception:
+                    pass
         return {"job_id": job.id, "status": job.status, "stage": job.stage, "test": True}
 
     @router.get("/defaults")
@@ -147,15 +140,7 @@ def setup_video_routes() -> APIRouter:
         return {
             "defaults": get_video_defaults(user),
             "global_defaults": get_video_defaults(None) if _admin(request, user) else None,
-            "profile": {
-                "mode": "anchor_first_i2v",
-                "width": 512,
-                "height": 512,
-                "frames": 241,
-                "fps": 24,
-                "duration_seconds": 10,
-                "audio": False,
-            },
+            "profile": {"mode": "anchor_first_i2v", "width": 512, "height": 512, "frames": 241, "fps": 24, "duration_seconds": 10, "audio": False},
         }
 
     @router.put("/defaults")
