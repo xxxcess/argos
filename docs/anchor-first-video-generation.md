@@ -1,20 +1,20 @@
 # Anchor-first video generation
 
-Argos generates a stable, muted video by creating a Gallery image anchor first,
+Argos creates a stable, muted video by first generating a Gallery image anchor,
 then animating that exact image through local `mlx-video` / LTX-2.
 
 ## Flow
 
 1. The user writes a high-level video intent.
-2. Argos calls the configured **Utility Model** to derive a detailed still-image
-   art-direction prompt. The original intent is not sent to image generation.
+2. The configured **Utility Model** derives a detailed still-image art-direction
+   prompt. The original intent is not sent to image generation.
 3. Argos uses the current user's **Image Default**. This can be the local
-   Diffusers server started from Cookbook or any compatible image endpoint.
+   Diffusers server configured through Cookbook or any compatible image endpoint.
 4. The anchor is persisted to generated media and Gallery. The job reports
-   `anchor_ready`, so the UI refreshes Gallery and tells the user animation is
-   continuing.
-5. Argos calls the Utility Model again to derive a separate motion/camera prompt.
-   The original intent is not sent to `mlx-video`.
+   `anchor_ready`, so both the direct UI and agent chat show the keyframe while
+   animation continues.
+5. The Utility Model derives a separate motion/camera prompt. The original intent
+   is not sent to `mlx-video`.
 6. Local LTX image-to-video produces a silent MP4 and adds it to Gallery with
    links to the anchor and both derived prompts.
 
@@ -28,20 +28,26 @@ then animating that exact image through local `mlx-video` / LTX-2.
 - one local video job at a time
 - silent MP4 only
 
-## Setup
+## Guided setup
 
-The Image Default is configured through the existing AI Defaults / Cookbook
-flow. For a local image endpoint, start the Cookbook Diffusers image server and
-select it as the Image Default first.
+No terminal commands, environment variables, or hand-written scripts are needed.
 
-Install the video runtime only in a native macOS virtual environment:
+1. Open **Settings → AI Defaults → Video Generation**.
+2. In the **Image anchor** row, use the built-in endpoint/model selector. If you
+   need a local anchor generator, choose **Open Cookbook**, start the local
+   Diffusers image server, then select it as the Image Default.
+3. Confirm the existing **Utility Model** or Default Chat Model is available for
+   prompt planning.
+4. Select **Install video engine**. Argos installs the optional native runtime
+   into the same Python environment it is already running from and prepares a
+   managed compatibility entrypoint automatically.
+5. Select **Run guided test**. The test follows the complete image-anchor → video
+   path and places its outputs in Gallery.
+6. Enable video generation. The same card supports direct generation; the
+   **Generate video** switch in Built-in Agent Tools controls agent use.
 
-```bash
-python -m pip install -r requirements-mlx-video-macos.txt
-```
-
-The default executable is `mlx_video.ltx_2.generate`. Set `MLX_VIDEO_BIN` only
-when the installed executable uses a different name or location.
+The setup card shows actionable state for every prerequisite and exposes installer
+details only when a recovery diagnosis is needed.
 
 ## Privacy and reproducibility
 
