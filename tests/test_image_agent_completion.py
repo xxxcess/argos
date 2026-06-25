@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from src.image_agent_completion import install_image_agent_terminal
 
 
-def test_successful_image_tool_ends_stream_before_followup_model_round():
+def test_successful_image_tool_ends_before_followup_model_round():
     closed = []
 
     async def original_stream(*_args, **_kwargs):
@@ -18,8 +18,11 @@ def test_successful_image_tool_ends_stream_before_followup_model_round():
                 'data: {"type":"tool_output","tool":"generate_image",'
                 '"exit_code":0,"image_url":"/api/generated-image/dragon.png"}\n\n'
             )
-            # This event represents the provider failure from the otherwise
-            # unnecessary post-tool LLM continuation. It must never reach UI.
+            # In the real loop this comes after tool-event persistence and before
+            # the next model request. The wrapper consumes it without forwarding.
+            yield 'data: {"type":"agent_step","round":2}\n\n'
+            # This represents the provider failure from the otherwise unnecessary
+            # post-tool LLM continuation. It must never reach UI.
             yield 'event: error\ndata: {"error":"500"}\n\n'
         finally:
             closed.append(True)
@@ -36,6 +39,7 @@ def test_successful_image_tool_ends_stream_before_followup_model_round():
     assert any('Image generated.' in item for item in events)
     assert any('"image_generation_complete": true' in item for item in events)
     assert events[-1] == 'data: [DONE]\n\n'
+    assert not any('"agent_step"' in item for item in events)
     assert not any('event: error' in item for item in events)
     assert closed == [True]
 
