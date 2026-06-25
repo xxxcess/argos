@@ -6,10 +6,10 @@ to write a confirmation sentence. That extra request can fail at the selected
 chat provider (for example with an HTTP 500) after the image was correctly saved
 and rendered, misleading the user into thinking generation failed.
 
-This lightweight wrapper closes the source agent stream immediately after its
-successful ``generate_image`` tool event, emits a deterministic confirmation and
-terminal SSE events, and lets the ordinary chat-route persistence path save the
-assistant message.
+The base loop persists its tool event after emitting the tool bubble, then emits
+``agent_step`` immediately before beginning that unnecessary next LLM round. This
+wrapper waits for that boundary, so Gallery/history metadata remains intact while
+the follow-up request is prevented.
 """
 
 from __future__ import annotations
@@ -20,19 +20,24 @@ import time
 from typing import Any
 
 
-def _successful_image_tool_event(chunk: str) -> bool:
-    """Return true only for a completed image event with a concrete image URL."""
-
+def _sse_data(chunk: str) -> dict | None:
     if not isinstance(chunk, str) or not chunk.startswith("data: "):
-        return False
+        return None
     payload = chunk[6:].strip()
     if not payload or payload == "[DONE]":
-        return False
+        return None
     try:
         data = json.loads(payload)
     except (TypeError, ValueError):
-        return False
-    if not isinstance(data, dict):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _successful_image_tool_event(chunk: str) -> bool:
+    """Return true only for a completed image event with a concrete image URL."""
+
+    data = _sse_data(chunk)
+    if not data:
         return False
     if data.get("type") != "tool_output" or data.get("tool") != "generate_image":
         return False
@@ -41,6 +46,13 @@ def _successful_image_tool_event(chunk: str) -> bool:
     if data.get("error"):
         return False
     return bool(data.get("image_url"))
+
+
+def _is_next_agent_step(chunk: str) -> bool:
+    """Return true for the between-round event emitted after tool persistence."""
+
+    data = _sse_data(chunk)
+    return bool(data and data.get("type") == "agent_step")
 
 
 def install_image_agent_terminal(agent_loop_module: Any) -> None:
@@ -56,30 +68,37 @@ def install_image_agent_terminal(agent_loop_module: Any) -> None:
         started = time.monotonic()
         source = original_stream(*args, **kwargs)
         terminal = False
+        image_completed = False
         try:
             async for chunk in source:
-                yield chunk
-                if not _successful_image_tool_event(chunk):
+                if _successful_image_tool_event(chunk):
+                    image_completed = True
+                    # Forward the bubble first. The base loop resumes afterward
+                    # to persist its tool event and append the tool result.
+                    yield chunk
                     continue
 
-                # The source generator is paused immediately after yielding the
-                # tool event. Closing it here prevents its next LLM continuation
-                # request, which is unnecessary and may fail independently.
-                closer = getattr(source, "aclose", None)
-                if callable(closer):
-                    await closer()
-                terminal = True
-                confirmation = "\n\nImage generated."
-                yield "data: " + json.dumps({"delta": confirmation}) + "\n\n"
-                yield "data: " + json.dumps({
-                    "type": "metrics",
-                    "data": {
-                        "response_time": round(time.monotonic() - started, 2),
-                        "image_generation_complete": True,
-                    },
-                }) + "\n\n"
-                yield "data: [DONE]\n\n"
-                return
+                if image_completed and _is_next_agent_step(chunk):
+                    # `agent_step` is emitted after the base loop has recorded
+                    # the image tool event, but before it requests another model
+                    # round. Do not forward the spinner for a round we will skip.
+                    closer = getattr(source, "aclose", None)
+                    if callable(closer):
+                        await closer()
+                    terminal = True
+                    confirmation = "\n\nImage generated."
+                    yield "data: " + json.dumps({"delta": confirmation}) + "\n\n"
+                    yield "data: " + json.dumps({
+                        "type": "metrics",
+                        "data": {
+                            "response_time": round(time.monotonic() - started, 2),
+                            "image_generation_complete": True,
+                        },
+                    }) + "\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                yield chunk
         finally:
             # Closing an already-closed async generator is harmless. On a
             # consumer disconnect this also propagates cancellation promptly.
