@@ -1277,6 +1277,9 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                 "skills": ["manage_skills"],
                 "images": ["generate_image"],
                 "image": ["generate_image"],
+                "video": ["generate_video"],
+                "videos": ["generate_video"],
+                "generate_video": ["generate_video"],
                 "tasks": ["manage_tasks"],
                 "notes": ["manage_notes"],
                 "calendar": ["manage_calendar"],
@@ -1285,12 +1288,19 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             }
 
             if action == "list_tools":
-                current = get_setting("disabled_tools", []) or []
+                current = list(get_setting("disabled_tools", []) or [])
+                try:
+                    from src.video_agent_tool import is_video_agent_enabled
+
+                    if not is_video_agent_enabled(owner) and "generate_video" not in current:
+                        current.append("generate_video")
+                except Exception:
+                    pass
                 return {
                     "response": (
                         f"Currently disabled: {', '.join(current) if current else '(none)'}.\n"
                         "Common toggles: shell (bash), search (web_search), browser, documents, "
-                        "memory, skills, images, tasks, notes, calendar, email."
+                        "memory, skills, images, video, tasks, notes, calendar, email."
                     ),
                     "disabled": list(current),
                     "exit_code": 0,
@@ -1304,6 +1314,18 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             settings = load_settings()
             current = list(settings.get("disabled_tools") or [])
             before = set(current)
+            video_changed = False
+            if "generate_video" in targets:
+                try:
+                    from src.video_agent_tool import is_video_agent_enabled, set_video_agent_enabled
+
+                    before_video = is_video_agent_enabled(owner)
+                    set_video_agent_enabled(owner, action != "disable_tool")
+                    video_changed = before_video != (action != "disable_tool")
+                except Exception:
+                    pass
+                targets = [t for t in targets if t != "generate_video"]
+                current = [t for t in current if t != "generate_video"]
             if action == "disable_tool":
                 for t in targets:
                     if t not in current:
@@ -1316,13 +1338,23 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
 
             verb = "Disabled" if action == "disable_tool" else "Enabled"
             changed = sorted(after.symmetric_difference(before))
+            if video_changed:
+                changed.append("generate_video")
+            display_disabled = list(current)
+            try:
+                from src.video_agent_tool import is_video_agent_enabled
+
+                if not is_video_agent_enabled(owner) and "generate_video" not in display_disabled:
+                    display_disabled.append("generate_video")
+            except Exception:
+                pass
             return {
                 "response": (
-                    f"{verb} {tool_name} ({', '.join(targets)}). "
-                    f"Now disabled: {', '.join(current) if current else '(none)'}."
+                    f"{verb} {tool_name} ({', '.join(targets) if targets else 'generate_video'}). "
+                    f"Now disabled: {', '.join(display_disabled) if display_disabled else '(none)'}."
                 ),
                 "changed": changed,
-                "disabled": list(current),
+                "disabled": display_disabled,
                 "exit_code": 0,
             }
 

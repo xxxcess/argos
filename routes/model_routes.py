@@ -2379,14 +2379,18 @@ def setup_model_routes(model_discovery):
     # ── Tool management ──
 
     @router.get("/tools")
-    def list_tools():
+    def list_tools(request: Request):
         """List all available tools with their enabled/disabled status."""
         from src.agent_tools import TOOL_TAGS
+        from src.video_agent_tool import is_video_agent_enabled
+
+        user = effective_user(request)
         settings = _load_settings()
-        disabled = set(settings.get("disabled_tools", []))
+        disabled = set(settings.get("disabled_tools", [])) - {"generate_video"}
         tools = []
         for tag in sorted(TOOL_TAGS):
-            tools.append({"id": tag, "enabled": tag not in disabled})
+            enabled = is_video_agent_enabled(user) if tag == "generate_video" else tag not in disabled
+            tools.append({"id": tag, "enabled": enabled})
         return {"tools": tools}
 
     class ToolsUpdate(BaseModel):
@@ -2396,9 +2400,14 @@ def setup_model_routes(model_discovery):
     def update_tools(body: ToolsUpdate, request: Request):
         """Update which tools are disabled."""
         require_admin(request)
+        from src.video_agent_tool import set_video_agent_enabled
+
+        user = effective_user(request)
+        requested_disabled = {str(item) for item in (body.disabled or []) if item}
+        set_video_agent_enabled(user, "generate_video" not in requested_disabled)
         settings = _load_settings()
-        settings["disabled_tools"] = body.disabled
+        settings["disabled_tools"] = [tool for tool in body.disabled if tool != "generate_video"]
         _save_settings(settings)
-        return {"ok": True, "disabled": body.disabled}
+        return {"ok": True, "disabled": settings["disabled_tools"]}
 
     return router

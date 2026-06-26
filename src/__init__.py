@@ -1,9 +1,9 @@
 """Argos source package bootstrap hooks.
 
-The project historically used ``src`` as a namespace package. These narrowly
-scoped import hooks install optional image and local-video integrations only
-when their established dispatch modules load, keeping ML/depth imports out of
-normal application startup.
+Most of the project historically used ``src`` as a namespace package. The small
+import hook below preserves that layout while installing the local image endpoint
+wrappers exactly when their existing dispatch modules load. It avoids importing
+optional Diffusers/PyTorch at normal application startup.
 """
 from __future__ import annotations
 
@@ -13,10 +13,8 @@ import sys
 
 _TARGETS = {
     "src.ai_interaction": "image_defaults",
-    "src.tool_execution": "agent_media_dispatch",
+    "src.tool_execution": "agent_image_dispatch",
     "src.agent_loop": "agent_image_terminal",
-    "src.agent_tools": "video_tags",
-    "src.tool_schemas": "video_schema",
 }
 
 
@@ -42,20 +40,12 @@ class _IntegrationLoader(importlib.abc.Loader):
 
             module.do_generate_image = generate_with_normalized_tool_content
             module._local_image_tool_content_normalized = True
-        elif self._hook_name == "agent_media_dispatch":
+        elif self._hook_name == "agent_image_dispatch":
             from src.generate_image_dispatch import install_generate_image_dispatch
-            from src.video_tool_dispatch import install_video_generation_dispatch
             install_generate_image_dispatch(module)
-            install_video_generation_dispatch(module)
         elif self._hook_name == "agent_image_terminal":
             from src.image_agent_completion import install_image_agent_terminal
             install_image_agent_terminal(module)
-        elif self._hook_name == "video_tags":
-            from src.video_tool_dispatch import install_video_agent_tags
-            install_video_agent_tags(module)
-        elif self._hook_name == "video_schema":
-            from src.video_tool_dispatch import install_video_tool_schema
-            install_video_tool_schema(module)
 
 
 class _IntegrationFinder(importlib.abc.MetaPathFinder):

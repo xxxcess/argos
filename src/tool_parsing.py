@@ -161,6 +161,8 @@ _TOOL_NAME_MAP = {
     "ui_control": "ui_control",
     "ui": "ui_control",
     "control": "ui_control",
+    "generate_video": "generate_video",
+    "video": "generate_video",
     "api_call": "api_call",
     "api": "api_call",
     "integration": "api_call",

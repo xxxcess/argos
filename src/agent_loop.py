@@ -61,7 +61,7 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
 # Always injected — the LLM decides whether to use them.
 _AGENT_PREAMBLE = """\
 You are an AI assistant with tool access. You can run shell commands, execute Python, search the web, \
-read/write files, create and edit documents, generate images, manage memories, and more. \
+read/write files, create and edit documents, generate images and videos, manage memories, and more. \
 To use a tool, write a fenced code block with the tool name as the language tag. \
 The block executes automatically and you see the output."""
 
@@ -271,6 +271,10 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "media": """\
+## Media rules
+- For video creation requests, use `generate_video` exactly once. It creates the image anchor internally; do not call `generate_image` first or alongside it.
+- For still images only, use `generate_image`.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -285,6 +289,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "media": {"generate_image", "generate_video"},
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -408,6 +413,12 @@ Suggest changes with explanations (for review/feedback requests).""",
 <quality>
 ```
 Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g. 1024x1024), line 4 = quality.""",
+
+    "generate_video": """\
+```generate_video
+{"prompt": "<video intent>", "seed": 123}
+```
+Create a silent 10-second local depth-parallax video. The tool queues one durable video job, creates the Gallery image anchor internally through the selected Image Default, then renders local depth-aware camera motion. Do not call generate_image for the anchor. `seed` is optional.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -898,6 +909,9 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("documents")
     if "notes_calendar_tasks" not in domains and has(r"\bwrite\b"):
         domains.add("documents")
+    if has(r"\b(?:create|generate|make|render|produce)\b.{0,40}\b(?:video|clip|animation|movie)\b",
+           r"\b(?:create|generate|make|render|produce)\b.{0,40}\b(?:image|picture|photo|illustration)\b"):
+        domains.add("media")
     if has(r"\b(search|web|google|look up|latest|news|current|weather|forecast|stock price|price of|website|url|https?://|www\.)\b"):
         domains.add("web")
     if has(
@@ -1487,6 +1501,13 @@ def _build_base_prompt(
     disabled = set(disabled_tools or [])
     if not get_setting("image_gen_enabled", False):
         disabled.add("generate_image")
+    try:
+        from src.video_agent_tool import is_video_agent_enabled
+
+        if not is_video_agent_enabled(owner):
+            disabled.add("generate_video")
+    except Exception:
+        pass
 
     if relevant_tools is not None:
         # RAG mode: trust the relevant_tools set as already-composed.
@@ -1506,7 +1527,7 @@ def _build_base_prompt(
         if not needs_admin:
             # At least strip the management section
             mgmt_tools = set(TOOL_SECTIONS.keys()) - set(ALWAYS_AVAILABLE) - {
-                "generate_image", "suggest_document",
+                "generate_image", "generate_video", "suggest_document",
                 "chat_with_model", "ask_teacher", "list_models",
             }
             agent_prompt = _assemble_prompt(
@@ -1970,6 +1991,13 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    try:
+        from src.video_agent_tool import is_video_agent_enabled
+
+        if not is_video_agent_enabled(owner):
+            disabled_tools.add("generate_video")
+    except Exception:
+        pass
     if tool_policy:
         disabled_tools.update(tool_policy.all_disabled_names())
         if tool_policy.disable_mcp:
@@ -2448,6 +2476,7 @@ async def stream_agent_loop(
     requested_model = model
     actual_model = model
     total_tool_calls = 0  # for budget enforcement
+    terminal_media_done = False
 
     # Loop-breaker state. Small models (e.g. deepseek-v4-flash) can get
     # stuck firing the same tool call over and over with no text — burns
@@ -2832,6 +2861,22 @@ async def stream_agent_loop(
                            "or summarize what I did find?")
                     yield f'data: {json.dumps({"delta": _fb})}\n\n'
                     full_response += _fb
+
+        if any(b.tool_type == "generate_video" for b in tool_blocks):
+            before = len(tool_blocks)
+            deduped_blocks = []
+            seen_video = False
+            for b in tool_blocks:
+                if b.tool_type == "generate_image":
+                    continue
+                if b.tool_type == "generate_video":
+                    if seen_video:
+                        continue
+                    seen_video = True
+                deduped_blocks.append(b)
+            tool_blocks = deduped_blocks
+            if len(tool_blocks) != before:
+                logger.info("[agent] normalized generate_video batch; video job owns anchor creation")
 
         # ── Fallback: auto-create document if model dumped large code in chat ──
         # If no create_document tool was used, check for big code blocks in text
@@ -3315,6 +3360,13 @@ async def stream_agent_loop(
             for k in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
                 if k in result:
                     tool_output_data[k] = result[k]
+            # Forward structured media-job data from generate_video.
+            for k in (
+                "kind", "job_id", "status", "stage", "terminal_media_job",
+                "video_job_id", "video_status", "video_stage",
+            ):
+                if k in result:
+                    tool_output_data[k] = result[k]
             # Forward screenshots from browser tools (base64 images)
             if result.get("images"):
                 img = result["images"][0]
@@ -3370,6 +3422,18 @@ async def stream_agent_loop(
                 _anchor = f"\n\n[{_label}](#note-{_nid})\n"
                 yield 'data: ' + json.dumps({"delta": _anchor}) + '\n\n'
 
+            if (
+                result.get("terminal_media_job")
+                and result.get("exit_code") in (None, 0)
+                and not result.get("error")
+            ):
+                _ack = str(result.get("assistant_ack") or "").strip()
+                if _ack and _ack not in full_response:
+                    _ack_delta = ("\n\n" if full_response.strip() else "") + _ack
+                    full_response += _ack_delta
+                    yield 'data: ' + json.dumps({"delta": _ack_delta}) + '\n\n'
+                terminal_media_done = True
+
             # Save for history persistence
             tool_event = {
                 "round": round_num,
@@ -3382,6 +3446,13 @@ async def stream_agent_loop(
                 for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
                     if result.get(ik):
                         tool_event[ik] = result[ik]
+            if result.get("kind") == "video_generation" or result.get("video_job_id"):
+                for vk in (
+                    "kind", "job_id", "status", "stage", "terminal_media_job",
+                    "video_job_id", "video_status", "video_stage",
+                ):
+                    if result.get(vk) is not None:
+                        tool_event[vk] = result[vk]
             if result.get("doc_id"):
                 tool_event["doc_id"] = result["doc_id"]
                 tool_event["doc_title"] = result.get("title", "")
@@ -3401,6 +3472,8 @@ async def stream_agent_loop(
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
+            if terminal_media_done:
+                break
 
         # If budget was hit, stop the loop
         if budget_hit:
@@ -3411,6 +3484,9 @@ async def stream_agent_loop(
         # arrives as the next message and the agent resumes from there. The
         # question text is already in the streamed response, so it persists.
         if _awaiting_user:
+            break
+
+        if terminal_media_done:
             break
 
         # Feed results back to LLM for next round

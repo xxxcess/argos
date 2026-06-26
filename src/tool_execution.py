@@ -610,7 +610,12 @@ async def _execute_tool_block_impl(
     # Reject tools that the user has disabled for this request
     if disabled_tools and tool in disabled_tools:
         desc = f"{tool}: BLOCKED"
-        result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
+        if tool == "generate_video":
+            from src.video_agent_tool import VIDEO_AGENT_DISABLED_MESSAGE
+
+            result = {"error": VIDEO_AGENT_DISABLED_MESSAGE, "exit_code": 1}
+        else:
+            result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
 
@@ -640,6 +645,15 @@ async def _execute_tool_block_impl(
         }
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
+
+    if tool == "generate_video":
+        from src.video_agent_tool import dispatch_agent_video_generation
+
+        return await dispatch_agent_video_generation(
+            content,
+            session_id=session_id,
+            owner=owner,
+        )
 
     # ask_user: the agent poses a multiple-choice question to the user to get a
     # decision/clarification. This is a pure UI-control marker — no subprocess,

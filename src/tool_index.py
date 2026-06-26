@@ -83,6 +83,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "update_document": "Replace the entire active document content. ONLY for full rewrites (>50% changed). Do not use for small edits — use edit_document instead.",
     "suggest_document": "Suggest changes to the active document with explanations. For code review, proofreading, feedback requests.",
     "generate_image": "Generate an AI image from a text prompt. Specify model, size, and quality. Art, illustrations, photos.",
+    "generate_video": "Generate a local 10-second silent depth-parallax video from a prompt. Creates a Gallery image anchor internally through the selected Image Default, then renders local depth-aware camera motion. Use for create/generate/make/render video, clip, animation, or movie requests. Do not call generate_image separately for the anchor.",
     "chat_with_model": "Send a message to a different AI model. Compare responses, get specialized help, delegate tasks.",
     "ask_teacher": "Ask a more capable model for help with a difficult problem. Escalate complex tasks.",
     "pipeline": "Run a multi-step AI pipeline with multiple models. Chain tasks together in sequence.",
@@ -358,6 +359,13 @@ class ToolIndex:
             {"manage_bg_jobs"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
+        frozenset({"create video", "generate video", "make video", "render video",
+                   "produce video", "create a video", "generate a video",
+                   "make a video", "render a video", "create clip",
+                   "generate clip", "make clip", "create animation",
+                   "generate animation", "make animation", "create movie",
+                   "generate movie"}):
+            {"generate_video"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
         # keywords to surface the right tools (NOT app_api — /api/sessions is

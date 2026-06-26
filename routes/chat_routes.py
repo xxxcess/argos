@@ -831,9 +831,16 @@ def setup_chat_routes(
         if _global_disabled and isinstance(_global_disabled, list):
             explicit_web_allowed = allow_web_search is not None and str(allow_web_search).lower() == "true"
             if explicit_web_allowed:
-                disabled_tools.update(t for t in _global_disabled if t not in {"web_search", "web_fetch"})
+                disabled_tools.update(t for t in _global_disabled if t not in {"web_search", "web_fetch", "generate_video"})
             else:
-                disabled_tools.update(_global_disabled)
+                disabled_tools.update(t for t in _global_disabled if t != "generate_video")
+        try:
+            from src.video_agent_tool import is_video_agent_enabled
+
+            if not is_video_agent_enabled(_user):
+                disabled_tools.add("generate_video")
+        except Exception:
+            pass
 
         # Light auto-escalation: the user is in chat mode and just expressed a
         # notes/calendar/email intent. Grant the relevant managers but withhold

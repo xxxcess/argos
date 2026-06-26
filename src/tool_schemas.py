@@ -14,6 +14,7 @@ from typing import Optional
 
 from src.agent_tools import ToolBlock, TOOL_TAGS
 from src.tool_parsing import _TOOL_NAME_MAP
+from src.video_agent_tool import normalize_generate_video_request
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +456,31 @@ FUNCTION_TOOL_SCHEMAS = [
                 "required": ["action"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_video",
+            "description": (
+                "Create a local silent 10-second depth-aware parallax video. Argos first "
+                "creates a Gallery image anchor through the user's Image Default, then "
+                "renders subtle local camera motion. Do not call generate_image first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "High-level video intent used to plan the image anchor and camera motion.",
+                    },
+                    "seed": {
+                        "type": "integer",
+                        "description": "Optional reproducibility seed.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
     },
     {
         "type": "function",
@@ -1400,6 +1426,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
                     content += f" {ak}={colors[ak]}"
         else:
             content = action
+    elif tool_type == "generate_video":
+        content = json.dumps(normalize_generate_video_request(args))
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
                         "manage_tokens", "manage_documents", "manage_settings"):

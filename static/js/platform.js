@@ -13,5 +13,4 @@ export function isAltGrEvent(e, isMac = IS_MAC) {
 // imported here because platform.js is already shared by the settings bundle.
 if (typeof document !== 'undefined') {
   import('./video.js').catch(error => console.warn('[video] local settings unavailable', error));
-  import('./videoAgentProgress.js').catch(error => console.warn('[video] agent progress unavailable', error));
 }

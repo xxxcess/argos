@@ -33,7 +33,7 @@ def test_plan_mode_blocks_mutating_tools():
     for name in (
         "write_file", "send_email", "reply_to_email", "manage_memory",
         "manage_settings", "create_document", "edit_document", "download_model",
-        "generate_image", "trigger_research",
+        "generate_image", "generate_video", "trigger_research",
     ):
         assert name in disabled, f"{name} must be blocked in plan mode"
 

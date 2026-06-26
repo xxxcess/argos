@@ -215,26 +215,8 @@ function createCard() {
   api('/api/video/defaults').then(data => { enabled.checked = data.defaults?.video_gen_enabled === true; if (data.defaults?.video_seed !== null && data.defaults?.video_seed !== undefined) seed.value = data.defaults.video_seed; refresh(); }).catch(error => { statusLine.textContent = error.message; });
 }
 
-function addAgentToolToggle() {
-  if (document.getElementById('generate-video-tool-toggle')) return;
-  const headers = [...document.querySelectorAll('h1,h2,h3,h4,h5,.settings-title,.section-title')];
-  const header = headers.find(item => /built[-\s]?in agent tools/i.test(item.textContent || ''));
-  if (!header) return;
-  const container = header.closest('.admin-card, .settings-section, section, div');
-  if (!container) return;
-  const toggle = node('input', { type: 'checkbox' });
-  const shell = node('div', { id: 'generate-video-tool-toggle', style: 'display:flex;align-items:center;gap:9px;padding:9px 0;border-top:1px solid var(--border);margin-top:8px;' }, [
-    node('div', { style: 'flex:1;' }, [node('div', { text: 'Generate video', style: 'font-size:13px;font-weight:600;' }), node('div', { text: 'Creates the same local image-anchor → depth-parallax Gallery video flow.', style: 'font-size:11px;opacity:.72;margin-top:2px;' })]),
-    toggle,
-  ]);
-  container.appendChild(shell);
-  api('/api/prefs/video_agent_enabled').then(data => { toggle.checked = data.value !== false; }).catch(() => { toggle.checked = true; });
-  toggle.addEventListener('change', () => api('/api/prefs/video_agent_enabled', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: toggle.checked }) }).catch(() => { toggle.checked = !toggle.checked; }));
-}
-
 function boot() {
-  createCard(); addAgentToolToggle();
-  new MutationObserver(() => { createCard(); addAgentToolToggle(); }).observe(document.documentElement, { childList: true, subtree: true });
+  createCard();
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true }); else boot();

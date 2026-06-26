@@ -362,7 +362,7 @@ class AnchorVideoGenerationService:
             prepared = prepare_runtime()
             if not prepared.get("available"):
                 raise RuntimeError(prepared.get("reason") or "The local depth-video engine is unavailable.")
-            anchor_path = await asyncio.to_thread(_anchor_file, job.id, anchor_id, job.owner, work)
+            anchor_path = await asyncio.to_thread(_anchor_file, anchor_id, job.owner, work)
             draft = work / "video.mp4"
             await asyncio.to_thread(
                 render_depth_parallax_video,
@@ -382,7 +382,7 @@ class AnchorVideoGenerationService:
                 return
             self._update(job.id, stage="saving_gallery")
             digest = hashlib.sha256(draft.read_bytes()).hexdigest()[:24]
-            filename = f"depth-parallax-{digest}.mp4"
+            filename = f"{digest}.mp4"
             target = Path(GENERATED_IMAGES_DIR) / filename
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(draft, target)

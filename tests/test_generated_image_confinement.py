@@ -22,6 +22,18 @@ def test_generated_image_path_allows_safe_existing_file(tmp_path, monkeypatch):
     assert generated_images.resolve_generated_image_path(filename) == image_path
 
 
+def test_generated_image_path_allows_legacy_depth_parallax_video_filename(tmp_path, monkeypatch):
+    generated_images = _generated_images_module()
+    image_dir = tmp_path / "generated_images"
+    image_dir.mkdir()
+    filename = "depth-parallax-" + ("a" * 24) + ".mp4"
+    video_path = image_dir / filename
+    video_path.write_bytes(b"mp4")
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", image_dir)
+
+    assert generated_images.resolve_generated_image_path(filename) == video_path
+
+
 @pytest.mark.parametrize("filename", ["../../secret.png", "zzzzzzzz.png", "aaaaaaa.png", None, 12345])
 def test_generated_image_path_rejects_invalid_filenames(tmp_path, monkeypatch, filename):
     generated_images = _generated_images_module()
@@ -31,6 +43,19 @@ def test_generated_image_path_rejects_invalid_filenames(tmp_path, monkeypatch, f
 
     with pytest.raises(HTTPException) as exc:
         generated_images.resolve_generated_image_path(filename)
+
+    assert exc.value.status_code == 400
+
+
+def test_generated_image_path_rejects_non_video_legacy_depth_parallax_filename(tmp_path, monkeypatch):
+    generated_images = _generated_images_module()
+    image_dir = tmp_path / "generated_images"
+    image_dir.mkdir()
+    (image_dir / ("depth-parallax-" + ("a" * 24) + ".png")).write_bytes(b"png")
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", image_dir)
+
+    with pytest.raises(HTTPException) as exc:
+        generated_images.resolve_generated_image_path("depth-parallax-" + ("a" * 24) + ".png")
 
     assert exc.value.status_code == 400
 
