@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from services.anchor_video_generation import get_video_generation_service, runtime_status
+from services.local_image_runtime import repair_log_tail, start_repair as start_image_runtime_repair, status as image_runtime_status
 from services.video_runtime_setup import install_log_tail, start_install
 from src.anchor_video_settings import VideoSettingsError, get_video_defaults, save_video_defaults
 from src.auth_helpers import get_current_user
@@ -22,7 +23,22 @@ def _image_default(owner: str | None) -> dict[str, Any]:
         endpoint = None
     if endpoint is None:
         return {"ready": False, "message": "Select and enable an Image Default for the stable animation anchor."}
-    return {"ready": True, "endpoint": endpoint.endpoint_name, "model": endpoint.model, "message": f"{endpoint.endpoint_name} · {endpoint.model}"}
+    result: dict[str, Any] = {
+        "ready": True,
+        "endpoint": endpoint.endpoint_name,
+        "model": endpoint.model,
+        "message": f"{endpoint.endpoint_name} · {endpoint.model}",
+    }
+    # The Cookbook Diffusers server shares the app's Python environment. Probe
+    # the import boundary in a child process before accepting a local endpoint
+    # as ready, so a lazy load failure does not surface later as an opaque 503.
+    if endpoint.is_local:
+        runtime = image_runtime_status()
+        result["runtime"] = runtime
+        if not runtime.get("available"):
+            result["ready"] = False
+            result["message"] = "Local Diffusers dependency mismatch: " + str(runtime.get("reason") or "repair required")[:340]
+    return result
 
 
 def _planner(owner: str | None) -> dict[str, Any]:
@@ -74,7 +90,7 @@ def setup_video_routes() -> APIRouter:
         return _setup(get_current_user(request))
 
     @router.post("/setup/install", status_code=202)
-    async def install_engine(request: Request) -> dict[str, Any]:
+    async def install_engine(_request: Request) -> dict[str, Any]:
         result = start_install()
         if not result.get("accepted"):
             raise HTTPException(400, result.get("error") or "The local depth engine cannot be installed on this host.")
@@ -84,6 +100,17 @@ def setup_video_routes() -> APIRouter:
     async def get_install_log(_request: Request) -> dict[str, str]:
         return {"log": install_log_tail()}
 
+    @router.post("/setup/repair-image-runtime", status_code=202)
+    async def repair_image_runtime(_request: Request) -> dict[str, Any]:
+        result = start_image_runtime_repair()
+        if not result.get("accepted"):
+            raise HTTPException(400, result.get("error") or "The local image runtime cannot be repaired on this host.")
+        return {"ok": True, **result}
+
+    @router.get("/setup/repair-image-runtime/log")
+    async def get_image_repair_log(_request: Request) -> dict[str, str]:
+        return {"log": repair_log_tail()}
+
     @router.post("/setup/test", status_code=202)
     async def run_guided_test(request: Request) -> dict[str, Any]:
         owner = get_current_user(request)
@@ -91,7 +118,7 @@ def setup_video_routes() -> APIRouter:
         if not state["runtime"].get("available"):
             raise HTTPException(409, "Install and verify the local depth engine before running a test.")
         if not state["image_default"]["ready"] or not state["planner"]["ready"]:
-            raise HTTPException(409, "Finish the Image Default and Utility Model checklist before running a test.")
+            raise HTTPException(409, state["image_default"].get("message") or "Finish the Image Default and Utility Model checklist before running a test.")
         try:
             await service.start()
             job = service.create_job(owner, {
@@ -125,6 +152,9 @@ def setup_video_routes() -> APIRouter:
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(400, "Video generation request must be an object.")
+        state = _setup(get_current_user(request))
+        if not state["image_default"]["ready"]:
+            raise HTTPException(409, state["image_default"].get("message") or "The Image Default is not ready.")
         try:
             await service.start()
             job = service.create_job(get_current_user(request), body)
