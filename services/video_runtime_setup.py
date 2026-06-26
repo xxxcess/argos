@@ -1,9 +1,10 @@
 """Managed local setup for the low-memory depth/parallax video engine.
 
-This is deliberately not a large generative video model.  The guided installer
-owns the small depth-estimation model, the FFmpeg binary, and optional Python
-libraries so an Apple-Silicon user never needs terminal commands, environment
-variables, or a manually downloaded checkpoint.
+The local image server and this renderer run inside the same Argos process.
+Video setup must therefore *not* broadly upgrade shared PyTorch, Diffusers, or
+Transformers packages: doing so can break an already-running Cookbook image
+pipeline. The app owns torch/transformers as core dependencies; this setup only
+provisions the FFmpeg helper and the small depth checkpoint.
 """
 from __future__ import annotations
 
@@ -25,13 +26,10 @@ _MODEL_CACHE = Path(DATA_DIR) / "models" / "depth-anything-v2"
 _STATE_PATH = _RUNTIME_ROOT / "depth_parallax.json"
 _LOG_PATH = Path(DATA_DIR) / "logs" / "depth_parallax_install.log"
 _MODEL_REPO = "depth-anything/Depth-Anything-V2-Small-hf"
-_PACKAGES = [
-    "torch>=2.2",
-    "transformers>=4.45,<5",
-    "numpy>=1.24",
-    "Pillow>=10",
-    "imageio-ffmpeg>=0.5",
-]
+# Do not add torch, transformers, diffusers, or peft here. They are shared by
+# Argos and the Cookbook Image Default; compatibility repair is handled by
+# services.local_image_runtime as a separate explicit operation.
+_VIDEO_PACKAGES = ["imageio-ffmpeg>=0.5"]
 _LOCK = threading.RLock()
 _INSTALLING = False
 _LAST_ERROR = ""
@@ -40,8 +38,6 @@ _PHASE = "not_installed"
 
 
 def _host_reason() -> str | None:
-    # The renderer works elsewhere in CPU mode, but the product profile and
-    # guided support target native Apple Silicon where the MPS fallback is useful.
     if platform.system() != "Darwin":
         return "Local depth-parallax video is currently supported on native macOS."
     if platform.machine().lower() not in {"arm64", "aarch64"}:
@@ -102,7 +98,11 @@ def prepare_runtime() -> dict[str, Any]:
     if reason:
         return {"available": False, "reason": reason, "model_repo": _MODEL_REPO}
     if not _packages_ready():
-        return {"available": False, "reason": "The local depth engine is not installed yet.", "model_repo": _MODEL_REPO}
+        return {
+            "available": False,
+            "reason": "Argos is missing a core depth dependency (torch, transformers, numpy, or Pillow). Update the app runtime before installing local video.",
+            "model_repo": _MODEL_REPO,
+        }
     model_path = _model_path()
     if model_path is None:
         return {"available": False, "reason": "The small depth model has not been downloaded yet.", "model_repo": _MODEL_REPO}
@@ -138,7 +138,7 @@ def status() -> dict[str, Any]:
         "last_error": error or None,
         "last_install_finished_at": finished or None,
         "managed": True,
-        "runtime_packages": ["transformers", "torch", "imageio-ffmpeg"],
+        "runtime_packages": ["imageio-ffmpeg"],
         "model_ready": _model_path() is not None,
         "action": "install" if not prepared.get("available") and not installing else None,
     }
@@ -149,11 +149,14 @@ def _install_worker() -> None:
     _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     error = ""
     try:
+        if not all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers", "numpy", "PIL")):
+            error = "Argos is missing core image/depth dependencies. Update the app runtime before installing local video."
+            return
         with _LOCK:
-            _PHASE = "installing_depth_runtime"
+            _PHASE = "installing_video_helper"
         with _LOG_PATH.open("wb") as log:
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", *_PACKAGES],
+                [sys.executable, "-m", "pip", "install", "--upgrade", "--no-cache-dir", *_VIDEO_PACKAGES],
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -161,7 +164,7 @@ def _install_worker() -> None:
                 timeout=30 * 60,
             )
         if result.returncode != 0:
-            error = "The local depth-engine installation did not complete. Open setup details for the installer output."
+            error = "The local FFmpeg helper installation did not complete. Open setup details for the installer output."
             return
         with _LOCK:
             _PHASE = "downloading_depth_model"
