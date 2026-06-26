@@ -39,7 +39,7 @@ function setRow(item, ready, text) {
 }
 
 function installationText(runtime) {
-  if (runtime?.phase === 'installing_depth_runtime') return 'Installing local depth runtime…';
+  if (runtime?.phase === 'installing_video_helper') return 'Installing local FFmpeg helper…';
   if (runtime?.phase === 'downloading_depth_model') return 'Downloading small depth model…';
   if (runtime?.phase === 'verifying_ffmpeg') return 'Verifying FFmpeg interpolation…';
   return 'Preparing local depth engine…';
@@ -62,10 +62,11 @@ function createCard() {
   const statusLine = node('div', { text: 'Checking guided setup…', style: 'font-size:12px;min-height:18px;' });
   const checklist = node('div', { style: 'border:1px solid var(--border);border-radius:8px;padding:0 9px;' }, [planner.el, anchor.el, engine.el]);
   const install = node('button', { type: 'button', className: 'admin-btn-add', text: 'Install local depth engine', style: 'font-size:12px;' });
+  const repairImage = node('button', { type: 'button', className: 'admin-btn-add', text: 'Repair local Image Default', style: 'font-size:12px;display:none;' });
   const test = node('button', { type: 'button', className: 'admin-btn-secondary', text: 'Run guided test', style: 'font-size:12px;' });
   const details = node('button', { type: 'button', className: 'admin-btn-secondary', text: 'Setup details', style: 'font-size:12px;display:none;' });
   const imageDefaults = node('button', { type: 'button', className: 'admin-btn-secondary', text: 'Manage Image Default', style: 'font-size:12px;' });
-  const actions = node('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;' }, [imageDefaults, install, test, details]);
+  const actions = node('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;' }, [imageDefaults, repairImage, install, test, details]);
   const enabled = node('input', { type: 'checkbox' });
   const enableLine = node('label', { style: 'display:flex;gap:7px;align-items:center;font-size:12px;' }, [enabled, document.createTextNode('Enable local depth-parallax video generation')]);
   const seed = node('input', { type: 'number', min: '0', max: '2147483647', placeholder: 'Random seed', className: 'settings-input', style: 'max-width:190px;' });
@@ -80,13 +81,20 @@ function createCard() {
   let jobId = '';
   let observedAnchor = false;
   let installing = null;
+  let repairingImage = null;
 
   const isReady = () => Boolean(setup?.runtime?.available && setup?.image_default?.ready && setup?.planner?.ready);
+  const imageRuntime = () => setup?.image_default?.runtime || null;
   const buttons = () => {
     install.style.display = setup?.runtime?.available ? 'none' : '';
     install.disabled = Boolean(setup?.runtime?.installing);
     install.textContent = setup?.runtime?.installing ? installationText(setup.runtime) : 'Install local depth engine';
-    details.style.display = setup?.runtime?.last_error ? '' : 'none';
+    const image = imageRuntime();
+    repairImage.style.display = image && !image.available ? '' : 'none';
+    repairImage.disabled = Boolean(image?.repairing);
+    repairImage.textContent = image?.repairing ? 'Repairing local Image Default…' : 'Repair local Image Default';
+    details.style.display = setup?.runtime?.last_error || image?.last_error ? '' : 'none';
+    details.textContent = image?.last_error ? 'Image repair details' : 'Setup details';
     test.disabled = !isReady() || Boolean(jobId);
     generate.disabled = !isReady() || !enabled.checked || Boolean(jobId);
   };
@@ -98,7 +106,10 @@ function createCard() {
       setRow(anchor, setup.image_default?.ready, setup.image_default?.message);
       const engineMessage = setup.runtime?.available ? 'Depth model + FFmpeg interpolation ready' : (setup.runtime?.installing ? installationText(setup.runtime) : (setup.runtime?.reason || 'Install required'));
       setRow(engine, setup.runtime?.available, engineMessage);
-      statusLine.textContent = isReady() ? 'Setup complete. Every clip is a stable image anchor followed by local depth-aware camera motion.' : 'Finish the checklist to use local video generation. No terminal commands are required.';
+      const image = imageRuntime();
+      if (image?.repairing) statusLine.textContent = 'Repairing the local Diffusers and Transformers compatibility set…';
+      else if (image?.restart_required && image.available && !setup.image_default.ready) statusLine.textContent = 'Image runtime repaired. Open Cookbook and restart Local Diffusers, then rerun the guided test.';
+      else statusLine.textContent = isReady() ? 'Setup complete. Every clip is a stable image anchor followed by local depth-aware camera motion.' : 'Finish the checklist to use local video generation. No terminal commands are required.';
       buttons();
       return setup;
     } catch (error) {
@@ -141,7 +152,7 @@ function createCard() {
   }
 
   async function queue(url, body, message) {
-    if (!isReady()) { statusLine.textContent = 'Finish the setup checklist first.'; return; }
+    if (!isReady()) { statusLine.textContent = setup?.image_default?.message || 'Finish the setup checklist first.'; return; }
     observedAnchor = false; output.style.display = 'none'; cancel.style.display = ''; statusLine.textContent = message; buttons();
     try {
       const created = await api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -171,8 +182,29 @@ function createCard() {
       await refresh();
     } catch (error) { statusLine.textContent = error.message; }
   });
+  repairImage.addEventListener('click', async () => {
+    try {
+      await api('/api/video/setup/repair-image-runtime', { method: 'POST' });
+      statusLine.textContent = 'Repairing the local image runtime…';
+      clearInterval(repairingImage);
+      repairingImage = setInterval(async () => {
+        await refresh();
+        const image = imageRuntime();
+        if (!image?.repairing) {
+          clearInterval(repairingImage); repairingImage = null;
+          statusLine.textContent = image?.available ? 'Image runtime repaired. Open Cookbook and restart Local Diffusers, then rerun the test.' : (image?.last_error || image?.reason || 'Image runtime repair did not complete.');
+        }
+      }, 1600);
+      await refresh();
+    } catch (error) { statusLine.textContent = error.message; }
+  });
   details.addEventListener('click', async () => {
-    try { const result = await api('/api/video/setup/install-log'); output.style.display = 'flex'; output.innerHTML = ''; output.append(node('pre', { text: result.log || 'No setup output is available yet.', style: 'margin:0;max-height:240px;overflow:auto;white-space:pre-wrap;padding:8px;border:1px solid var(--border);border-radius:7px;font-size:11px;' })); } catch (error) { statusLine.textContent = error.message; }
+    try {
+      const image = imageRuntime();
+      const result = await api(image?.last_error ? '/api/video/setup/repair-image-runtime/log' : '/api/video/setup/install-log');
+      output.style.display = 'flex'; output.innerHTML = '';
+      output.append(node('pre', { text: result.log || 'No setup output is available yet.', style: 'margin:0;max-height:240px;overflow:auto;white-space:pre-wrap;padding:8px;border:1px solid var(--border);border-radius:7px;font-size:11px;' }));
+    } catch (error) { statusLine.textContent = error.message; }
   });
   test.addEventListener('click', () => queue('/api/video/setup/test', {}, 'Running the local guided test…'));
   generate.addEventListener('click', () => {
