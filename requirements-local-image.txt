@@ -1,0 +1,9 @@
+# Managed local Diffusers image runtime for Cookbook / one-click repair.
+# Keep Transformers on the v4 API surface that current Diffusers releases use.
+# Do not include torch here: the host's Apple-Silicon PyTorch wheel is installed
+# separately and must not be silently replaced by a generic pip resolver.
+diffusers>=0.30,<1
+transformers>=4.57,<5
+accelerate>=1,<2
+safetensors>=0.4
+peft>=0.10,<1
