@@ -52,10 +52,16 @@ switch use the same durable owner-scoped jobs.
 The Image Default checklist probes the local Diffusers import boundary before
 any anchor job starts. If Cookbook’s local image service has an incompatible
 Diffusers/Transformers combination, choose **Repair local Image Default** in
-the Video Generation card. Argos restores a v4-compatible Transformers set
-without replacing the host’s Apple-Silicon PyTorch wheel. When it completes,
-open Cookbook and restart the Local Diffusers server, then rerun the guided
-test. No terminal commands are needed.
+the Video Generation card. Argos force-reinstalls its exact compatible local
+image package set without dependency resolution, so it does not replace the
+host’s Apple-Silicon PyTorch wheel. The repair also checks whether an installed
+optional `torchvision` package is itself broken; only in that case it removes
+that optional package and lets Transformers use its PIL fallback.
+
+When it completes, open Cookbook and restart the Local Diffusers server, then
+rerun the guided test. **Image repair details** includes the complete child
+process import trace if the fixed package set still cannot load. No terminal
+commands are needed.
 
 ## Fixed output profile
 
