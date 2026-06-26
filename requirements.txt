@@ -60,10 +60,9 @@ kokoro>=0.9.4
 soundfile
 torch
 numpy
-transformers
-tokenizers==0.22.2
-setuptools<82
-
-# Kokoro / transformers compatibility
+# Diffusers currently imports PreTrainedModel from the Transformers v4 public
+# API. Keep the shared host runtime on v4 until the image service explicitly
+# supports the v5 API line.
+transformers>=4.57,<5
 tokenizers==0.22.2
 setuptools<82
