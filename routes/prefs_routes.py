@@ -2,7 +2,9 @@
 import json
 import os
 from typing import Optional
+
 from fastapi import APIRouter, Request
+
 from src.auth_helpers import get_current_user
 from src.constants import USER_PREFS_FILE
 
@@ -34,23 +36,16 @@ def _load_for_user(user: Optional[str] = None) -> dict:
     all_prefs = _load()
     if "_users" in all_prefs:
         if user is None:
-            # Auth disabled — return first user's prefs for backward compat
             users = all_prefs["_users"]
             return dict(next(iter(users.values()), {}))
         return dict(all_prefs["_users"].get(user, {}))
-    # Legacy flat format — return as-is
     return dict(all_prefs)
 
 
 def _save_for_user(user: Optional[str], prefs: dict):
-    """Save preferences for a specific user."""
+    """Save preferences for a specific user without losing other users' prefs."""
     all_prefs = _load()
     if user is None:
-        # Auth disabled. If the store is already multi-user (e.g. auth was
-        # turned off on a deployment that previously ran multi-user), writing
-        # `prefs` flat would overwrite the whole `_users` map and destroy every
-        # other user's preferences. Instead write back into the same (first)
-        # slot _load_for_user(None) reads from, preserving the others.
         if "_users" in all_prefs:
             users = all_prefs["_users"]
             first_key = next(iter(users), None)
@@ -67,20 +62,20 @@ def _save_for_user(user: Optional[str], prefs: dict):
 
 
 def setup_prefs_routes():
-    router = APIRouter(prefix="/api/prefs", tags=["preferences"])
+    # Keep each URL explicit so this router can safely include the adjacent
+    # /api/video router without nesting it under /api/prefs.
+    router = APIRouter(tags=["preferences"])
 
-    @router.get("")
+    @router.get("/api/prefs")
     async def get_all_prefs(request: Request):
-        user = get_current_user(request)
-        return _load_for_user(user)
+        return _load_for_user(get_current_user(request))
 
-    @router.get("/{key}")
+    @router.get("/api/prefs/{key}")
     async def get_pref(request: Request, key: str):
-        user = get_current_user(request)
-        prefs = _load_for_user(user)
+        prefs = _load_for_user(get_current_user(request))
         return {"key": key, "value": prefs.get(key)}
 
-    @router.put("/{key}")
+    @router.put("/api/prefs/{key}")
     async def set_pref(request: Request, key: str, body: dict):
         user = get_current_user(request)
         prefs = _load_for_user(user)
@@ -88,4 +83,6 @@ def setup_prefs_routes():
         _save_for_user(user, prefs)
         return {"key": key, "value": prefs[key]}
 
+    from routes.video_routes import setup_video_routes
+    router.include_router(setup_video_routes())
     return router
