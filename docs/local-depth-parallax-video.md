@@ -8,21 +8,21 @@ generative image-to-video model and does not invent new subject actions.
 ## What happens
 
 1. A user writes a high-level video intent in the Video Generation card or asks
-   the enabled **Generate video** agent tool.
+the enabled **Generate video** agent tool.
 2. The selected Utility Model derives a detailed art-direction prompt. The raw
-   intent is retained for audit but never passed unchanged to downstream image
-   generation.
+intent is retained for audit but never passed unchanged to downstream image
+generation.
 3. Argos uses the same configured **Image Default** as the image-generation
-   pipeline. A local Cookbook Diffusers endpoint is supported because it is an
-   ordinary selected Image Default.
+pipeline. A local Cookbook Diffusers endpoint is supported because it is an
+ordinary selected Image Default.
 4. The generated anchor is saved to Gallery and shown immediately while video
-   rendering continues.
+rendering continues.
 5. The Utility Model derives a separate, bounded camera-motion prompt.
 6. Depth Anything V2 Small estimates one relative-depth map for the anchor.
 7. Argos renders subtle deterministic 2.5D parallax frames and uses FFmpeg
-   motion interpolation to output a muted 512×512 H.264 MP4 at 24 FPS.
+motion interpolation to output a muted 512×512 H.264 MP4 at 24 FPS.
 8. The video is saved to Gallery with anchor, prompt, seed, and renderer
-   provenance.
+provenance.
 
 ## Why this profile
 
@@ -38,13 +38,24 @@ manual model downloads are required.
 
 1. Open **Settings → AI Defaults → Video Generation**.
 2. Make sure the existing Image Default and Utility Model rows are ready.
-3. Select **Install local depth engine**. Argos installs the required Python
-   libraries into its own interpreter, downloads `depth-anything/Depth-Anything-V2-Small-hf`
-   into managed storage, and provisions FFmpeg through `imageio-ffmpeg`.
+3. Select **Install local depth engine**. This downloads the small
+`depth-anything/Depth-Anything-V2-Small-hf` checkpoint and provisions FFmpeg
+through `imageio-ffmpeg`. It deliberately does **not** upgrade shared Torch,
+Transformers, or Diffusers packages.
 4. Select **Run guided test**. This runs the same image-anchor → depth-parallax
-   path and writes the result to Gallery.
+path and writes the result to Gallery.
 5. Enable generation. The direct UI and Built-in Agent Tools **Generate video**
-   switch use the same durable owner-scoped jobs.
+switch use the same durable owner-scoped jobs.
+
+### Local Image Default repair
+
+The Image Default checklist probes the local Diffusers import boundary before
+any anchor job starts. If Cookbook’s local image service has an incompatible
+Diffusers/Transformers combination, choose **Repair local Image Default** in
+the Video Generation card. Argos restores a v4-compatible Transformers set
+without replacing the host’s Apple-Silicon PyTorch wheel. When it completes,
+open Cookbook and restart the Local Diffusers server, then rerun the guided
+test. No terminal commands are needed.
 
 ## Fixed output profile
 
