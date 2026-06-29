@@ -1,271 +1,110 @@
 <p align="center">
-  <img src="docs/odysseus-wordmark.png" alt="Odysseus" width="238">
-</p>
-
-<p align="center">
-  A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
-</p>
-
-<p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#text-to-speech-tts">TTS</a> ·
-  <a href="docs/setup.md">Setup Guide</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="ROADMAP.md">Roadmap</a>
-</p>
-
-<p align="center">
-  <a href="https://repology.org/project/odysseus-ai/versions"><img src="https://repology.org/badge/vertical-allrepos/odysseus-ai.svg" alt="Packaging status"></a>
-</p>
-
-<p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
+  <strong>ARGOS VENTURE</strong><br>
+  <em>A voyage-led AI workspace for captains, shipmates, quests, and the living log of an expedition.</em>
 </p>
 
 ---
 
+# Argos Venture
+
+**Argos Venture** is an experimental product branch of Argos. It turns the workspace into a ship setting out toward an unknown destination: the voyage may take an undetermined amount of time, but every decision, discovery, question, and result becomes part of a shared quest log.
+
+This branch reinterprets the original development workspace as a **chat-adventure workspace**:
+
+- **Admins are Captains.** They command the ship, choose its course, run the full agent toolset, and recruit shipmates.
+- **Argo is the ship’s AI.** Argo is the configured default chat model acting in an agent context: it reports status, tool activity, outcomes, and the questions that need a captain’s judgment.
+- **Chat sessions are Quests.** A quest is the chronological record of events and decisions for one expedition thread.
+- **Regular users are Shipmates.** Captains recruit them into individual quests. Shipmates can converse inside those quests and read only the documents and gallery assets bound to quests they have joined.
+
+> **Branch status:** `argos-venture` is the design and implementation line for this product model. The inherited `nightly` feature set remains the starting point; this branch deliberately narrows regular-user access and changes the language, navigation, and data model around quests.
+
+## The Voyage Model
+
+### Captains
+
+Captains are administrators. They retain the complete workspace command surface: quests, documents, gallery assets, email, comparisons, Cookbook, signatures, API tokens, user tools, crew members, tasks, drafts, memories, deep research, account administration, and the rest of the operational toolset.
+
+A Captain opening or creating a quest works in agent mode by default. Argo should make its actions legible in the voyage log: what it is doing, what a tool returned, what has changed, what is blocked, and what Captain input is needed next.
+
+### Shipmates
+
+Shipmates are regular users recruited to specific quests. They have no global workspace inventory and no access to Captain-only operational systems.
+
+After login, a shipmate sees only:
+
+- Search
+- Chats / Quests
+- Tools → Library → Documents and Gallery
+- Recent Chats and Activity on the dashboard
+- Settings limited to Account and Appearance
+
+The dashboard has no active quest and no prompt composer. A shipmate can still converse through the full chat view after opening a quest they are a member of.
+
+### Quests and the voyage log
+
+Every session becomes a **Quest**. A quest begins with two participants:
+
+1. its Captain; and
+2. Argo, the ship’s AI assistant.
+
+A Captain may recruit regular users as shipmates. The default chat surface is the chronological voyage log—not a generic chat transcript—and records the Captain’s decisions, Argo’s status messages, tool activity, results, and shipmate contributions.
+
+## Access and Data-Boundary Contract
+
+Argos Venture must enforce access in the backend, not only by hiding UI.
+
+- A quest has one Captain and zero or more shipmates.
+- A document or gallery asset created in a quest is bound to that quest.
+- Captains retain full access to their operational workspace.
+- A shipmate can read a quest-bound document or gallery asset only when they are a member of that quest.
+- Shipmates may send messages only in quests they belong to.
+- Direct object URLs, list endpoints, downloads, previews, and search results must all apply the same membership check.
+- Existing owner-based isolation remains relevant for Captain-private data; quest membership adds a second access boundary for shared expedition artifacts.
+
+`owner IS NULL` legacy/shared records must never accidentally become visible to shipmates. Migrations must classify them explicitly.
+
+## Development Flow
+
+`argos-venture` starts from `nightly` and is an intentional product fork, not a literal Git fork.
+
+```text
+nightly
+  └── argos-venture
+        ├── feat/venture-quest-membership
+        ├── feat/venture-shipmate-shell
+        ├── feat/venture-captain-agent-log
+        └── feat/venture-branding
+```
+
+Use focused feature branches from `argos-venture` and merge them back through reviewed pull requests. Periodically merge `nightly` into `argos-venture`; never force-push the voyage branch.
+
 ## Quick Start
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/pewdiepie-archdaemon/odysseus/tree/main) if you want the more curated branch.
-
 ```bash
-git clone https://github.com/pewdiepie-archdaemon/odysseus.git
-cd odysseus
+git clone https://github.com/xxxcess/argos.git
+cd argos
+git switch argos-venture
 cp .env.example .env
 docker compose up -d --build
 ```
 
-Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+Open `http://localhost:7000` when the containers are healthy. Keep authentication enabled for all network-accessible deployments.
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
+The inherited setup, deployment, and troubleshooting notes remain in [`docs/setup.md`](docs/setup.md). Those documents and the UI are being renamed from the upstream identity as the Argos Venture implementation proceeds.
 
-## Features
+## Implementation Milestones
 
-- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
-- **Cookbook** — hardware-aware model recommendations, downloads, and serving.
-- **Deep Research** — multi-step web research with source reading and report generation.
-- **Compare** — blind side-by-side model testing and synthesis.
-- **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
-- **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
-- **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
-- **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
-
-## Text-to-Speech (TTS)
-
-Odysseus supports three TTS providers:
-
-- `browser` — uses the browser Web Speech API. This is the easiest mode to test first.
-- `endpoint:<id>` — uses an OpenAI-compatible `/audio/speech` endpoint configured in Odysseus.
-- `local` — uses Kokoro for local speech synthesis.
-
-### Browser TTS quick test
-
-Edit `data/settings.json`:
-
-```json
-{
-  "tts_enabled": true,
-  "tts_provider": "browser",
-  "tts_voice": "",
-  "tts_speed": "1"
-}
-```
-
-Restart Odysseus and test from the browser UI.
-
-### Local Kokoro TTS on macOS Apple Silicon
-
-For Mac Mini M1/M2/M3/M4, run Odysseus natively with `./start-macos.sh`. Do not use Docker for local Kokoro if you want Apple Silicon acceleration.
-
-Install the system dependency:
-
-```bash
-brew install espeak-ng
-```
-
-Install the Python dependencies inside the Odysseus repo:
-
-```bash
-./venv/bin/python -m pip install --force-reinstall "setuptools<82"
-./venv/bin/python -m pip install --no-cache-dir \
-  kokoro \
-  soundfile \
-  torch \
-  numpy \
-  transformers \
-  "tokenizers==0.22.2"
-```
-
-`tokenizers==0.22.2` is required because `tokenizers==0.23.1` can break the installed `transformers` requirement.
-
-Add these pins to `requirements.txt`:
-
-```txt
-# Local Kokoro TTS
-kokoro
-soundfile
-torch
-numpy
-transformers
-tokenizers==0.22.2
-setuptools<82
-```
-
-If `start-macos.sh` reinstalls `chromadb`, make sure it re-pins the compatible TTS dependencies afterward:
-
-```bash
-"$VENV_PY" -m pip install --force-reinstall "setuptools<82" "tokenizers==0.22.2"
-```
-
-This prevents dependency resolution from pulling `tokenizers==0.23.1` back in.
-
-Enable local Kokoro in `data/settings.json`:
-
-```json
-{
-  "tts_enabled": true,
-  "tts_provider": "local",
-  "tts_model": "kokoro-82m",
-  "tts_voice": "af_heart",
-  "tts_speed": "1"
-}
-```
-
-Test Kokoro directly:
-
-```bash
-./venv/bin/python - <<'PY'
-from kokoro import KPipeline
-import soundfile as sf
-
-pipeline = KPipeline(lang_code="a")
-
-for _, _, audio in pipeline(
-    "Kokoro is working locally on this Mac.",
-    voice="af_heart",
-    speed=1
-):
-    sf.write("/tmp/kokoro-test.wav", audio, 24000)
-    break
-
-print("wrote /tmp/kokoro-test.wav")
-PY
-
-afplay /tmp/kokoro-test.wav
-```
-
-Test the Odysseus TTS service directly:
-
-```bash
-./venv/bin/python - <<'PY'
-from services.tts import get_tts_service
-
-tts = get_tts_service()
-print(tts.get_stats())
-
-audio = tts.synthesize("Hello from local Kokoro inside Odysseus.")
-print("audio bytes:", len(audio) if audio else None)
-
-if audio:
-    open("/tmp/odysseus-kokoro.wav", "wb").write(audio)
-    print("wrote /tmp/odysseus-kokoro.wav")
-PY
-
-afplay /tmp/odysseus-kokoro.wav
-```
-
-Start Odysseus:
-
-```bash
-./start-macos.sh
-```
-
-Log in, open the browser DevTools Console, and verify TTS availability:
-
-```js
-await fetch('/api/tts/stats').then(r => r.json())
-```
-
-Expected result:
-
-```json
-{
-  "available": true,
-  "ready": true,
-  "provider": "local",
-  "voice": "af_heart"
-}
-```
-
-Enable automatic playback in the browser:
-
-```js
-localStorage.setItem('odysseus-tts-autoplay', 'true');
-location.reload();
-```
-
-Disable automatic playback:
-
-```js
-localStorage.removeItem('odysseus-tts-autoplay');
-location.reload();
-```
-
-### Troubleshooting
-
-If Odysseus reports Kokoro as unavailable:
-
-```json
-{
-  "available": false,
-  "provider": "local",
-  "model": "Kokoro (not loaded)"
-}
-```
-
-Check the installed `tokenizers` version:
-
-```bash
-./venv/bin/python - <<'PY'
-import tokenizers
-print(tokenizers.__version__)
-PY
-```
-
-It should be:
-
-```txt
-0.22.2
-```
-
-If it shows `0.23.1`, reinstall the compatible version and restart Odysseus:
-
-```bash
-./venv/bin/python -m pip install --force-reinstall "setuptools<82" "tokenizers==0.22.2"
-```
-
-## Demo
-
-A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/index.html).
-
-## Contributing
-
-Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
+1. Introduce quest membership, Captain ownership, and server-side authorization for quest artifacts.
+2. Rename sessions to quests and model the chronological voyage log.
+3. Make Captain prompts agent-first and expose Argo status/tool-result events clearly.
+4. Build the reduced shipmate shell, dashboard, settings, and quest chat experience.
+5. Replace inherited Odysseus naming, labels, assets, metadata, and user-facing copy with Argos Venture branding.
+6. Add authorization, migration, and end-to-end tests for captains, shipmates, shared quests, and direct-route access.
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=pewdiepie-archdaemon%2Fodysseus&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=pewdiepie-archdaemon/odysseus&type=date&legend=top-left" />
- </picture>
-</a>
+Argos Venture is a self-hosted workspace with powerful local tools. Keep authentication enabled, do not expose raw model or service ports publicly, and treat Captain credentials and quest-bound data as sensitive. The server must enforce every role and membership boundary even when a caller bypasses the frontend.
 
 ## License
 
-AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
+AGPL-3.0-or-later — see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
