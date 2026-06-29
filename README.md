@@ -36,7 +36,8 @@ After login, a shipmate sees only:
 - Chats / Quests
 - Tools → Library → Documents and Gallery
 - Recent Chats and Activity on the dashboard
-- Settings limited to Account and Appearance
+- Settings limited to **Account**
+- A dedicated **Theme** control in the sidebar, outside Settings
 
 The dashboard has no active quest and no prompt composer. A shipmate can still converse through the full chat view after opening a quest they are a member of.
 
@@ -97,7 +98,7 @@ The inherited setup, deployment, and troubleshooting notes remain in [`docs/setu
 1. Introduce quest membership, Captain ownership, and server-side authorization for quest artifacts.
 2. Rename sessions to quests and model the chronological voyage log.
 3. Make Captain prompts agent-first and expose Argo status/tool-result events clearly.
-4. Build the reduced shipmate shell, dashboard, settings, and quest chat experience.
+4. Build the reduced shipmate shell, dashboard, account-only settings, sidebar theme control, and quest chat experience.
 5. Replace inherited Odysseus naming, labels, assets, metadata, and user-facing copy with Argos Venture branding.
 6. Add authorization, migration, and end-to-end tests for captains, shipmates, shared quests, and direct-route access.
 
