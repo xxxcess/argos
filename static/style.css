@@ -109,6 +109,470 @@ body {
   overflow: hidden;
 }
 
+/* ── Persistent Workspace Shell ── */
+body.workspace-shell-enabled {
+  padding-top: 44px;
+}
+
+body.workspace-shell-enabled #hamburger-btn {
+  top: 56px;
+}
+
+.workspace-shell {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 44px;
+  z-index: 260;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+}
+
+.workspace-tabbar {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.workspace-tab-list {
+  min-width: 0;
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.workspace-tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-tab {
+  flex: 0 1 190px;
+  min-width: 90px;
+  max-width: 220px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg) 76%, var(--panel));
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  min-height: 30px;
+}
+
+.workspace-tab[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, var(--panel));
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 48%, var(--border));
+}
+
+.workspace-tab:focus-visible,
+.workspace-shell-btn:focus-visible,
+.workspace-avatar-btn:focus-visible,
+.workspace-new-tab:focus-visible,
+.workspace-tab-menu-btn:focus-visible,
+.workspace-tab-close:focus-visible,
+.workspace-notification-panel button:focus-visible,
+.workspace-account-menu button:focus-visible {
+  outline: 2px solid var(--accent, var(--red));
+  outline-offset: 2px;
+}
+
+.workspace-tab-icon,
+.workspace-new-tab svg,
+.workspace-shell-btn svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.workspace-tab-icon svg,
+.workspace-new-tab svg,
+.workspace-shell-btn svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.workspace-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tab-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  margin-left: auto;
+  background: transparent;
+  flex: 0 0 auto;
+}
+
+.workspace-tab[data-state="active/running"] .workspace-tab-state,
+.workspace-tab[data-state="dirty/unsaved"] .workspace-tab-state {
+  background: var(--warn);
+}
+
+.workspace-tab[data-state="waiting-for-user"] .workspace-tab-state {
+  background: var(--accent, var(--red));
+}
+
+.workspace-tab[data-state="error"] .workspace-tab-state {
+  background: var(--color-error);
+}
+
+.workspace-tab-close-wrap {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0;
+}
+
+.workspace-tab-close,
+.workspace-tab-menu-btn,
+.workspace-new-tab,
+.workspace-shell-btn,
+.workspace-avatar-btn {
+  border: 0;
+  color: var(--fg);
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-tab-close {
+  width: 19px;
+  height: 19px;
+  border-radius: 5px;
+  opacity: 0.55;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.workspace-tab-close:hover,
+.workspace-tab-menu-btn:hover,
+.workspace-new-tab:hover,
+.workspace-shell-btn:hover,
+.workspace-avatar-btn:hover {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  opacity: 1;
+}
+
+.workspace-tab-menu-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 5px;
+  opacity: 0.58;
+  flex: 0 0 auto;
+}
+
+.workspace-tab-menu-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.workspace-tab-rename-input {
+  width: 100%;
+  min-width: 42px;
+  border: 0;
+  border-bottom: 1px solid var(--accent, var(--red));
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  padding: 0;
+}
+
+.workspace-new-tab {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.workspace-shell-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.workspace-shell-btn,
+.workspace-avatar-btn {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+}
+
+.workspace-avatar-btn {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.workspace-notification-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent, var(--red));
+  color: var(--bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.workspace-account-wrap {
+  position: relative;
+}
+
+.workspace-account-menu {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+}
+
+.workspace-account-menu.hidden,
+.workspace-notification-panel.hidden {
+  display: none;
+}
+
+.workspace-account-menu button {
+  width: 100%;
+  min-height: 34px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workspace-account-menu button:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.workspace-notification-panel {
+  position: fixed;
+  top: 50px;
+  right: 10px;
+  width: min(420px, calc(100vw - 20px));
+  max-height: min(620px, calc(100dvh - 62px));
+  z-index: 270;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+  overflow: hidden;
+}
+
+.workspace-notification-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.workspace-notification-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.workspace-notification-close {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.workspace-notification-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.workspace-notification-tabs button {
+  flex: 1 1 0;
+  min-height: 30px;
+  border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.workspace-notification-tabs button.active {
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, var(--panel));
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 46%, var(--border));
+}
+
+.workspace-notification-list {
+  overflow: auto;
+  padding: 8px;
+}
+
+.workspace-notification-empty {
+  padding: 18px 12px;
+  opacity: 0.62;
+  font-size: 12px;
+}
+
+.workspace-notification-item {
+  border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+  border-radius: 7px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.workspace-notification-item[data-severity="error"] {
+  border-color: color-mix(in srgb, var(--color-error) 46%, var(--border));
+}
+
+.workspace-notification-item[data-severity="warning"] {
+  border-color: color-mix(in srgb, var(--warn) 46%, var(--border));
+}
+
+.workspace-notification-item[data-severity="success"] {
+  border-color: color-mix(in srgb, var(--green) 40%, var(--border));
+}
+
+.workspace-notification-item-top {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.workspace-notification-item-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.workspace-notification-time {
+  flex: 0 0 auto;
+  opacity: 0.52;
+  font-size: 10px;
+}
+
+.workspace-notification-message {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.82;
+  overflow-wrap: anywhere;
+}
+
+.workspace-notification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.workspace-notification-actions button {
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.workspace-notification-actions button:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+body.workspace-session-active #sidebar,
+body.workspace-session-active #icon-rail,
+body.workspace-session-active #hamburger-btn,
+body.workspace-session-active #mobile-menu-btn {
+  display: none !important;
+}
+
+body.workspace-session-active .chat-container {
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  body.workspace-shell-enabled {
+    padding-top: 48px;
+  }
+  .workspace-shell {
+    height: 48px;
+    padding: 7px;
+  }
+  .workspace-tab {
+    flex-basis: 150px;
+    min-width: 110px;
+  }
+  .workspace-notification-panel {
+    inset: 48px 0 0 0;
+    width: 100vw;
+    max-height: calc(100dvh - 48px);
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+}
+
 /* Self-hosted Fira Code font */
 @font-face { font-family: 'Fira Code'; font-weight: 300; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Light.woff2') format('woff2'); }
 @font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
@@ -359,7 +823,7 @@ body.bg-pattern-sparkles {
     }
     .export-dropdown-wrap {
       position: relative;
-      display: inline-flex;
+      display: none;
       flex-shrink: 0;
       margin-left: -4px;
       margin-right: -20px;
@@ -393,6 +857,12 @@ body.bg-pattern-sparkles {
       transition: background 0.1s;
     }
     .export-dropdown-item:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    .export-dropdown-item-danger {
+      color: var(--color-error, var(--red)) !important;
+    }
+    .export-dropdown-item-danger:hover {
+      background: color-mix(in srgb, var(--color-error, var(--red)) 14%, transparent);
+    }
     .export-dropdown-item .dropdown-icon {
       width: 14px; height: 14px;
       display: flex; align-items: center; justify-content: center;
@@ -477,33 +947,6 @@ body.bg-pattern-sparkles {
       overflow: hidden;
       opacity: 0;
     }
-    /* ===== Sidebar User Bar ===== */
-    .sidebar-user-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 12px 12px;
-      flex-shrink: 0;
-      gap: 4px;
-      min-height: 48px;
-    }
-
-    .user-bar-left {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex: 1;
-      min-width: 0;
-      cursor: pointer;
-      padding: 6px 8px;
-      border-radius: 8px;
-      transition: background 0.15s;
-    }
-
-    .user-bar-left:hover {
-      background: color-mix(in srgb, var(--fg) 6%, transparent);
-    }
-
     .user-bar-avatar {
       width: 24px;
       height: 24px;
@@ -518,46 +961,6 @@ body.bg-pattern-sparkles {
       opacity: 0.7;
       flex-shrink: 0;
       text-transform: uppercase;
-    }
-
-    .user-bar-name {
-      font-size: 9.75px;
-      font-weight: 500;
-      color: var(--fg);
-      opacity: 0.8;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .user-bar-actions {
-      display: flex;
-      gap: 1px;
-      flex-shrink: 0;
-    }
-
-    .user-bar-btn {
-      background: none;
-      border: none;
-      color: var(--fg);
-      opacity: 0.35;
-      cursor: pointer;
-      padding: 6px;
-      border-radius: 6px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: opacity 0.12s, background 0.12s;
-    }
-
-    .user-bar-btn:hover {
-      opacity: 1;
-      background: color-mix(in srgb, var(--fg) 8%, transparent);
-    }
-
-
-    .sidebar.hidden .sidebar-user-bar {
-      display: none;
     }
 
     /* Sticky sidebar header — logo, never scrolls */
@@ -611,8 +1014,7 @@ body.bg-pattern-sparkles {
     .sidebar-sep {
       display: none;
     }
-    #sidebar-search-btn,
-    #sidebar-new-chat-btn {
+    #sidebar-search-btn {
       margin: 0;
       padding: 8px 8px;
     }
@@ -1256,12 +1658,6 @@ body.bg-pattern-sparkles {
         left: -1px !important;
         top: -2px !important;
       }
-    }
-    #sidebar-new-chat-btn svg {
-      transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
-    }
-    #sidebar-new-chat-btn:hover svg {
-      transform: rotate(90deg);
     }
 
     /* Sort/select buttons in header — compact */
@@ -2279,7 +2675,7 @@ body.bg-pattern-sparkles {
     .loading { color:var(--red); font-style:italic; }
     #chat-form { display:none; }
 
-    /* Session Control dashboard */
+    /* Home dashboard */
     body.mission-dashboard-visible .chat-container {
       gap: 12px;
     }
@@ -2339,28 +2735,8 @@ body.bg-pattern-sparkles {
     }
     .mission-control[hidden],
     .mission-operations-drawer[hidden],
-    .mission-command-palette[hidden],
-    .mission-return-btn[hidden] {
+    .mission-command-palette[hidden] {
       display: none !important;
-    }
-    .mission-return-btn {
-      position: static;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      height: 20px;
-      min-height: 20px;
-      padding: 0 7px 0 5px;
-      font-size: 10px;
-      line-height: 1;
-      flex: 0 0 auto;
-      margin-right: 6px;
-      transform: none;
-      opacity: 0.9;
-    }
-    .mission-return-btn svg {
-      width: 12px;
-      height: 12px;
     }
     .mission-command-bar,
     .mission-section,
@@ -5074,15 +5450,13 @@ body.bg-pattern-sparkles {
       .list-item .grow {
         font-size: 14px !important;
       }
-      /* Search, New Chat & Assistant */
+      /* Search & Assistant */
       #sidebar-search-btn,
-      #sidebar-new-chat-btn,
       .sidebar-assistant-entry {
         padding: 12px 10px !important;
         min-height: 48px !important;
       }
       #sidebar-search-btn .grow,
-      #sidebar-new-chat-btn .grow,
       .sidebar-assistant-entry .grow {
         font-size: 14px !important;
         left: 0 !important;
@@ -38308,12 +38682,9 @@ body.theme-frosted #theme-popup .modal-content {
   -webkit-backdrop-filter: blur(24px) saturate(170%) !important;
   border-color: color-mix(in srgb, var(--fg) 22%, transparent) !important;
 }
-/* The sidebar header + user bar paint their own opaque --sidebar-bg/--panel.
-   Under the frosted theme the sidebar is translucent glass, so those solid
-   bands stood out as a dark (near-black) strip over the title/avatar area.
-   Make them transparent so they blend into the frosted sidebar. */
-body.theme-frosted .sidebar-header,
-body.theme-frosted .sidebar-user-bar {
+/* The sidebar header paints its own opaque --sidebar-bg/--panel. Under the
+   frosted theme the sidebar is translucent glass, so that solid band stood out. */
+body.theme-frosted .sidebar-header {
   background: transparent !important;
 }
 /* Same problem on tool modals: the sticky .modal-header paints a solid

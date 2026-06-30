@@ -689,6 +689,10 @@ from src.event_bus import set_task_scheduler
 set_task_scheduler(task_scheduler)
 from routes.task_routes import setup_task_routes
 app.include_router(setup_task_routes(task_scheduler))
+from routes.notification_routes import setup_notification_routes
+app.include_router(setup_notification_routes())
+from routes.interaction_routes import setup_interaction_routes
+app.include_router(setup_interaction_routes())
 
 from routes.assistant_routes import setup_assistant_routes
 app.include_router(setup_assistant_routes(task_scheduler))
@@ -839,6 +843,10 @@ async def serve_gallery(request: Request):
 
 @app.get("/tasks")
 async def serve_tasks(request: Request):
+    return await serve_index(request)
+
+@app.get("/notifications")
+async def serve_notifications(request: Request):
     return await serve_index(request)
 
 @app.get("/library")
@@ -1093,6 +1101,18 @@ async def _startup_event():
             "In-process task scheduler disabled (ODYSSEUS_INPROCESS_TASKS=0); "
             "drive task firing externally (e.g. cron)."
         )
+    async def _notification_outbox_loop():
+        from src.task_notifications import dispatch_pending_outbox_once
+        while True:
+            try:
+                await asyncio.sleep(10)
+                await asyncio.to_thread(dispatch_pending_outbox_once, 100)
+            except Exception as e:
+                logger.debug(f"Notification outbox dispatch skipped: {e}")
+                await asyncio.sleep(30)
+
+    _startup_tasks.append(asyncio.create_task(_notification_outbox_loop()))
+
     # Periodic null-owner sweep — re-runs the legacy-owner assignment hourly
     # so any data created while auth was disabled / localhost-bypassed gets
     # claimed by the admin instead of staying world-visible (M19).

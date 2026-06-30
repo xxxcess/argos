@@ -128,6 +128,20 @@ function _showNewChatUi({ focus = true } = {}) {
   }
 }
 
+export function showHome({ focus = true } = {}) {
+  _sessionNavToken++;
+  _pendingChat = null;
+  currentSessionId = null;
+  _writeNewChatDraft({});
+  Storage.remove('lastSessionId');
+  _showNewChatUi({ focus });
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:new-chat-ready', {
+      detail: { source: 'home-tab' }
+    }));
+  } catch (_) {}
+}
+
 function _getIncognitoIds() {
   try { return JSON.parse(sessionStorage.getItem(_INCOGNITO_SESSIONS_KEY) || '[]'); } catch { return []; }
 }
@@ -1655,6 +1669,11 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
         history.replaceState(null, '', '#' + id);
       }
     }
+    try {
+      document.dispatchEvent(new CustomEvent('odysseus:session-selected', {
+        detail: { sessionId: id, previousSessionId: prevSessionId, meta: _meta || null }
+      }));
+    } catch (_) {}
     // Restore character preset for persistent chats
     try {
       const presetsModule = window.presetsModule || (await import('./presets.js')).default;
@@ -1941,7 +1960,7 @@ export function createDirectChat(url, modelId, endpointId, options = {}) {
 }
 
 /** Actually create the session in the DB. Called on first message send. */
-export async function materializePendingSession() {
+export async function materializePendingSession(options = {}) {
   const pending = _pendingChat;
   if (!pending) return false;
   _pendingChat = null;
@@ -2009,6 +2028,8 @@ export async function materializePendingSession() {
         sessionId: payload.id,
         name: payload.name || name || '',
         model: payload.model || pending.modelId || '',
+        source: options.source || pending.source || '',
+        openInFullView: !!options.openInFullView,
       }
     }));
   } catch (_) {}
@@ -2228,6 +2249,7 @@ function _startResearchPolling() {
 
 export function markResearching(sessionId) {
   _researchingSessions.add(sessionId);
+  try { document.dispatchEvent(new CustomEvent('odysseus:session-runtime-state', { detail: { sessionId, state: 'active/running' } })); } catch (_) {}
   _updateResearchDots();
   _updateRailNotifs();
   _startResearchPolling();
@@ -2235,18 +2257,21 @@ export function markResearching(sessionId) {
 
 export function clearResearching(sessionId) {
   _researchingSessions.delete(sessionId);
+  try { document.dispatchEvent(new CustomEvent('odysseus:session-runtime-state', { detail: { sessionId, state: 'idle' } })); } catch (_) {}
   _updateResearchDots();
   _updateRailNotifs();
 }
 
 export function markStreaming(sessionId) {
   _streamingSessions.add(sessionId);
+  try { document.dispatchEvent(new CustomEvent('odysseus:session-runtime-state', { detail: { sessionId, state: 'active/running' } })); } catch (_) {}
   _updateResearchDots();
   _updateRailNotifs();
 }
 
 export function clearStreaming(sessionId) {
   _streamingSessions.delete(sessionId);
+  try { document.dispatchEvent(new CustomEvent('odysseus:session-runtime-state', { detail: { sessionId, state: 'idle' } })); } catch (_) {}
   _updateResearchDots();
   _updateRailNotifs();
 }
@@ -2254,6 +2279,7 @@ export function clearStreaming(sessionId) {
 export function markStreamComplete(sessionId) {
   _researchingSessions.delete(sessionId);
   _streamingSessions.delete(sessionId);
+  try { document.dispatchEvent(new CustomEvent('odysseus:session-runtime-state', { detail: { sessionId, state: 'idle' } })); } catch (_) {}
   // Don't pulse if user is already viewing this session — they can see the response
   if (currentSessionId === sessionId) {
     _updateResearchDots();
@@ -3270,6 +3296,7 @@ const sessionModule = {
   initDependencies,
   renderSessionList,
   loadSessions,
+  showHome,
   selectSession,
   createDirectChat,
   materializePendingSession,

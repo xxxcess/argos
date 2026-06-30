@@ -46,6 +46,7 @@ import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 import sessionControlModule from './js/sessionControl.js';
+import workspaceShell from './js/workspaceShell.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -53,6 +54,11 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.tasksModule = tasksModule;
+window.settingsModule = settingsModule;
+window.chatModule = chatModule;
+window.documentModule = documentModule;
+workspaceShell.initWorkspaceShell();
 
 // Redirect to login on 401 from any fetch
 const _origFetch = window.fetch;
@@ -245,19 +251,30 @@ function initializeEventListeners() {
 
   const exportMenu = el('export-dropdown-menu');
   if (exportDlBtn && exportMenu) {
+    const openExportMenuAt = (anchor = exportDlBtn) => {
+      // Move menu to body so it's not affected by ancestor transforms
+      if (exportMenu.parentElement !== document.body) document.body.appendChild(exportMenu);
+      const rect = anchor?.getBoundingClientRect?.() || exportDlBtn.getBoundingClientRect();
+      exportMenu.style.top = (rect.bottom + 4) + 'px';
+      exportMenu.style.left = 'auto';
+      exportMenu.style.right = (window.innerWidth - rect.right) + 'px';
+      exportMenu.classList.add('open');
+    };
+
     exportDlBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (exportMenu.classList.contains('open')) {
         exportMenu.classList.remove('open');
       } else {
-        // Move menu to body so it's not affected by ancestor transforms
-        if (exportMenu.parentElement !== document.body) document.body.appendChild(exportMenu);
-        const rect = exportDlBtn.getBoundingClientRect();
-        exportMenu.style.top = (rect.bottom + 4) + 'px';
-        exportMenu.style.left = 'auto';
-        exportMenu.style.right = (window.innerWidth - rect.right) + 'px';
-        exportMenu.classList.add('open');
+        openExportMenuAt(exportDlBtn);
       }
+    });
+    document.addEventListener('odysseus:open-chat-controls', (e) => {
+      const sid = e.detail?.sessionId;
+      if (sid && sessionModule.getCurrentSessionId && String(sessionModule.getCurrentSessionId()) !== String(sid)) return;
+      e.stopPropagation?.();
+      window.closeAllPopups(exportMenu);
+      openExportMenuAt(e.detail?.anchor || exportDlBtn);
     });
     document.addEventListener('click', () => exportMenu.classList.remove('open'));
     document.addEventListener('keydown', (e) => {
@@ -276,15 +293,6 @@ function initializeEventListeners() {
         if (_wasHidden && !nowHidden) window.closeAllPopups();
         _wasHidden = nowHidden;
       }).observe(_sidebarEl, { attributes: true, attributeFilter: ['class'] });
-    }
-    // Clicking session name also opens dropdown
-    const currentMeta = el('current-meta');
-    if (currentMeta) {
-      currentMeta.style.cursor = 'pointer';
-      currentMeta.addEventListener('click', (e) => {
-        e.stopPropagation();
-        exportDlBtn.click();
-      });
     }
   }
 
@@ -412,6 +420,12 @@ function initializeEventListeners() {
       if (!sid && !hasPending) return;
       const meta = sid ? sessionModule.getSessions().find(s => s.id === sid) : null;
       const currentName = meta?.name || '';
+      const tabRenameEvent = new CustomEvent('odysseus:request-session-tab-rename', {
+        cancelable: true,
+        detail: { sessionId: sid, currentName },
+      });
+      document.dispatchEvent(tabRenameEvent);
+      if (tabRenameEvent.defaultPrevented) return;
       const metaEl = el('current-meta');
       if (!metaEl) return;
 
@@ -452,6 +466,35 @@ function initializeEventListeners() {
         if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
         if (ev.key === 'Escape') { input.removeEventListener('blur', commit); metaEl.textContent = origText; }
       });
+    });
+  }
+
+  const exportDeleteBtn = el('export-delete-btn');
+  if (exportDeleteBtn) {
+    exportDeleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      const currentId = sessionModule.getCurrentSessionId();
+      if (!currentId) return;
+      const current = sessionModule.getSessions().find(s => String(s.id) === String(currentId));
+      if (current?.is_important) {
+        uiModule.showToast('Unfavorite before deleting');
+        return;
+      }
+      const name = current?.name || 'this chat session';
+      if (!await uiModule.styledConfirm(`Delete "${name}"?`, { confirmText: 'Delete', danger: true })) return;
+      try {
+        if (window.chatModule?.abortCurrentRequest) window.chatModule.abortCurrentRequest();
+        const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(currentId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('delete failed');
+        sessionModule.setCurrentSessionId?.(null);
+        await sessionModule.loadSessions();
+        document.dispatchEvent(new CustomEvent('odysseus:session-deleted', { detail: { sessionId: currentId } }));
+        sessionControlModule?.showDashboardAfterSessionDelete?.();
+        uiModule.showToast('Session deleted');
+      } catch (err) {
+        uiModule.showError('Failed to delete session');
+      }
     });
   }
 
@@ -1114,43 +1157,11 @@ function initializeEventListeners() {
     });
   }
 
-  // Sidebar user bar — settings, admin, profile
-  const userBarSettings = el('user-bar-settings');
-  const userBarProfile = el('user-bar-profile');
-  const userBarAdmin = el('user-bar-admin');
-
-  if (userBarSettings) {
-    userBarSettings.addEventListener('click', () => settingsModule.open());
-  }
-  if (userBarProfile) {
-    // Clicking the user (avatar + name) jumps straight to the Account tab
-    // instead of landing on whatever was last selected.
-    userBarProfile.addEventListener('click', () => settingsModule.open('account'));
-  }
-  if (userBarAdmin) {
-    userBarAdmin.addEventListener('click', () => adminModule.open());
-  }
-
-  // Fetch auth status — populate user bar and show admin button if admin
+  // Fetch auth status and apply per-user privilege restrictions.
   fetch(`${API_BASE}/api/auth/status`, { credentials: 'same-origin' })
     .then(r => r.json())
     .then(d => {
       window._isAdmin = !!d.is_admin;
-      if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
-      const userBarName = el('user-bar-name');
-      const userBarAvatar = el('user-bar-avatar');
-      if (userBarName && d.username) {
-        let displayName = d.username;
-        // Mask email addresses
-        if (displayName.includes('@')) {
-          const [local, domain] = displayName.split('@');
-          const ext = domain.includes('.') ? domain.slice(domain.lastIndexOf('.')) : '';
-          displayName = local.charAt(0) + '•••@••••' + ext;
-        }
-        userBarName.textContent = displayName;
-        if (userBarAvatar) userBarAvatar.textContent = d.username.charAt(0).toUpperCase();
-      }
-      // Apply per-user privilege restrictions
       if (d.privileges) {
         window._userPrivileges = d.privileges;
         const p = d.privileges;
@@ -2385,7 +2396,6 @@ function initializeEventListeners() {
   // Selector map: key → CSS selector(s) for targets
   const UI_VIS_MAP = {
     'sidebar-brand':       '.sidebar-brand-title',
-    'sidebar-new-chat':    '#sidebar-new-chat-btn',
     'sidebar-search':      '#sidebar-search-btn',
     'sessions-section':    '#sessions-section',
     'email-section':       '#email-section',
@@ -2403,8 +2413,6 @@ function initializeEventListeners() {
     'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
     'tool-theme':          '#tool-theme-btn',
-    'user-bar':            '#user-bar-profile',
-    'sidebar-settings-btn':'#user-bar-settings',
     'chat-meta':           '.chat-meta-overlay',
     'welcome-text':        '.welcome-name, .welcome-sub, #welcome-tip',
     'incognito-btn':       '.incognito-btn',
@@ -3086,14 +3094,6 @@ function initializeEventListeners() {
     });
   }
 
-  const sidebarNewChatBtn = el('sidebar-new-chat-btn');
-  if (sidebarNewChatBtn) {
-    sidebarNewChatBtn.addEventListener('click', () => {
-      const brandBtn = el('sidebar-brand-btn');
-      if (brandBtn) brandBtn.click();
-    });
-  }
-
   // Delete session button on icon rail
   const railDelete = el('rail-delete-session');
   if (railDelete) {
@@ -3666,7 +3666,7 @@ function startOdysseusApp() {
       // Stop controls have priority over all send/new-chat/mic routing.
       // Recording stop should preserve and transcribe captured audio; once
       // recording is no longer active, the same button can interrupt any
-      // active response stream in full chat or Session Control.
+      // active response stream in full chat or Home.
       const hasReadyText = messageInput && messageInput.value.trim().length > 0;
       if (voiceRecorderModule.getIsRecording()) {
         voiceRecorderModule.stopRecording({

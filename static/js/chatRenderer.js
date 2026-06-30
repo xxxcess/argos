@@ -2031,8 +2031,21 @@ export function renderAskUserCard(payload, options) {
   list.className = 'ask-user-options';
   card.appendChild(list);
 
-  const send = (text) => {
+  const resolveInteraction = async (text) => {
+    if (!aq.interaction_id) return;
+    try {
+      await fetch(`/api/interactions/${encodeURIComponent(aq.interaction_id)}/resolve`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_summary: String(text || '').slice(0, 500) }),
+      });
+    } catch (_) {}
+  };
+
+  const send = async (text) => {
     if (!text) return;
+    await resolveInteraction(text);
     card.remove();
     const input = uiModule.el('message');
     if (input) input.value = text;

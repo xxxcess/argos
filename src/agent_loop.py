@@ -3275,6 +3275,17 @@ async def stream_agent_loop(
                 # text (once) so it persists and is replayed. The card shows the
                 # options only, so this is the single visible copy of the question.
                 _auq = result["ask_user"]
+                try:
+                    from src.interaction_requests import create_session_interaction_request
+                    _interaction_id = create_session_interaction_request(
+                        owner=owner,
+                        session_id=session_id,
+                        payload=_auq,
+                    )
+                    if _interaction_id:
+                        _auq = {**_auq, "interaction_id": _interaction_id, "kind": _auq.get("kind") or "choice"}
+                except Exception:
+                    logger.debug("Failed to persist ask_user interaction", exc_info=True)
                 _auq_q = (_auq.get("question") or "").strip()
                 if _auq_q and _auq_q not in full_response:
                     _auq_delta = ("\n\n" if full_response.strip() else "") + _auq_q

@@ -1,5 +1,5 @@
 // static/js/sessionControl.js
-// Session Control dashboard layered over the existing chat/session pipeline.
+// Home dashboard layered over the existing chat/session pipeline.
 
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
@@ -259,7 +259,6 @@ function setDashboardVisible(visible) {
   else restoreComposerToChat();
   document.body.classList.toggle('mission-dashboard-visible', state.dashboardVisible);
   if (els.root) els.root.hidden = !state.dashboardVisible;
-  if (els.returnBtn) els.returnBtn.hidden = state.dashboardVisible;
   const history = document.getElementById('chat-history');
   const welcome = document.getElementById('welcome-screen');
   if (history) history.hidden = state.dashboardVisible;
@@ -318,11 +317,10 @@ function buildShell() {
   const root = document.createElement('section');
   root.id = 'mission-control';
   root.className = 'mission-control';
-  root.setAttribute('aria-label', 'Session Control dashboard');
+  root.setAttribute('aria-label', 'Home dashboard');
   root.innerHTML = `
     <header class="mission-dashboard-header">
       <div class="mission-dashboard-title"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>Odysseus</div>
-      <div class="mission-dashboard-subtitle">Session Control</div>
     </header>
     <div class="mission-command-bar" aria-label="Session command bar">
       <div class="mission-command-meta">
@@ -391,38 +389,12 @@ function buildShell() {
   els.search = root.querySelector('#mission-chat-search');
   els.filter = root.querySelector('#mission-chat-filter');
   els.sort = root.querySelector('#mission-chat-sort');
-  ensureReturnButton(topBar);
   if (els.search) {
     els.search.value = '';
     els.search.defaultValue = '';
   }
   moveComposerIntoCommandBar();
   return true;
-}
-
-function ensureReturnButton(topBar) {
-  const meta = topBar?.querySelector('.chat-meta-overlay');
-  if (!topBar || !meta) return;
-  if (document.getElementById('mission-return-btn')) {
-    els.returnBtn = document.getElementById('mission-return-btn');
-    if (els.returnBtn.parentElement !== meta) meta.insertBefore(els.returnBtn, meta.firstChild);
-    return;
-  }
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.id = 'mission-return-btn';
-  btn.className = 'memory-toolbar-btn mission-return-btn';
-  btn.setAttribute('aria-label', 'Back to Session Control');
-  btn.title = 'Back to Session Control';
-  btn.hidden = true;
-  btn.innerHTML = `${icon('chevronLeft')} Session Control`;
-  btn.addEventListener('click', () => {
-    setDashboardVisible(true);
-    updateAll();
-    document.getElementById('message')?.focus();
-  });
-  meta.insertBefore(btn, meta.firstChild);
-  els.returnBtn = btn;
 }
 
 function updateComposerMode() {
