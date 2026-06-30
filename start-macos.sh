@@ -1,24 +1,12 @@
 #!/bin/bash
-# Odysseus — one-command quick start for macOS (Apple Silicon).
-#
-#   ./start-macos.sh
-#
-# Installs everything Odysseus needs via Homebrew, sets up a local Python
-# environment, and launches the app — so a generic Mac user can run it without
-# knowing anything about venvs, pip, or uvicorn. Safe to re-run; it skips work
-# that's already done.
-#
-# Why native (not Docker): Cookbook serves models on whatever machine Odysseus
-# runs on, and Docker on macOS is a Linux VM with no access to the Metal GPU.
-# Running natively lets Cookbook detect and use your Mac's GPU.
+# Argos — profile-aware quick start for macOS.
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-# Load .env so APP_PORT and APP_BIND are available without re-typing them on
-# the command line every run — consistent with how app.py reads them via
-# python-dotenv. Variables already set in the shell take priority over .env.
+# Machine-local settings are loaded first; the branch-owned profile supplies
+# product identity and safe defaults after that.
 if [ -f .env ]; then
     while IFS='=' read -r key value; do
         [[ "$key" =~ ^[[:space:]]*# ]] && continue
@@ -30,46 +18,80 @@ if [ -f .env ]; then
     done < .env
 fi
 
-# Shell overrides (ODYSSEUS_PORT / ODYSSEUS_HOST) take top priority, then .env
-# values (APP_PORT / APP_BIND), then built-in defaults.
-PORT="${ODYSSEUS_PORT:-${APP_PORT:-7860}}"   # 7860, not 7000 — macOS AirPlay Receiver holds 7000.
-HOST="${ODYSSEUS_HOST:-${APP_BIND:-127.0.0.1}}" # Set APP_BIND=0.0.0.0 in .env for LAN/Tailscale access.
+RUNTIME_PROFILE_FILE="${ARGOS_RUNTIME_PROFILE_FILE:-$REPO_DIR/config/runtime-profile.env}"
+if [ ! -f "$RUNTIME_PROFILE_FILE" ]; then
+    echo "✗ Missing runtime profile: $RUNTIME_PROFILE_FILE"
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "$RUNTIME_PROFILE_FILE"
+for required_var in ARGOS_RUNTIME_ID ARGOS_PRODUCT_NAME ARGOS_STORAGE_SLUG ARGOS_DEFAULT_PORT ARGOS_DEFAULT_CHROMADB_PORT; do
+    if [ -z "${!required_var:-}" ]; then
+        echo "✗ Runtime profile is missing $required_var: $RUNTIME_PROFILE_FILE"
+        exit 1
+    fi
+done
+
+# The profile, not the Git branch, determines persistent state. Ignore a legacy
+# ODYSSEUS_DATA_DIR input so it cannot silently point this product at another
+# runtime's users, database, keys, uploads, gallery, or vector store.
+ARGOS_DATA_ROOT="${ARGOS_DATA_ROOT:-$HOME/Library/Application Support/Argos/runtimes}"
+if [ -z "${ARGOS_DATA_DIR:-}" ] && [ -n "${ODYSSEUS_DATA_DIR:-}" ]; then
+    echo "⚠ Ignoring legacy ODYSSEUS_DATA_DIR; use ARGOS_DATA_DIR only for verified matching data."
+fi
+ARGOS_DATA_DIR="${ARGOS_DATA_DIR:-$ARGOS_DATA_ROOT/$ARGOS_STORAGE_SLUG}"
+export ARGOS_DATA_DIR
+export ODYSSEUS_DATA_DIR="$ARGOS_DATA_DIR"
+mkdir -p "$ARGOS_DATA_DIR"
+
+RUNTIME_MANIFEST="$ARGOS_DATA_DIR/runtime-manifest.json"
+if [ -f "$RUNTIME_MANIFEST" ]; then
+    manifest_runtime="$(sed -nE 's/^[[:space:]]*"runtime_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$RUNTIME_MANIFEST" | head -n 1 || true)"
+    manifest_slug="$(sed -nE 's/^[[:space:]]*"storage_slug"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$RUNTIME_MANIFEST" | head -n 1 || true)"
+    if [ -z "$manifest_runtime" ] || [ -z "$manifest_slug" ] || { [ "$manifest_runtime" != "$ARGOS_RUNTIME_ID" ] || [ "$manifest_slug" != "$ARGOS_STORAGE_SLUG" ]; }; then
+        if [ "${ARGOS_ALLOW_RUNTIME_MISMATCH:-}" != "1" ]; then
+            echo "✗ Runtime/data mismatch at $ARGOS_DATA_DIR"
+            echo "  Profile: $ARGOS_RUNTIME_ID ($ARGOS_STORAGE_SLUG)"
+            echo "  Use a separate data root or an explicit migration."
+            exit 1
+        fi
+    fi
+elif [ -n "$(find "$ARGOS_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] && [ "${ARGOS_ADOPT_RUNTIME_DATA:-}" != "1" ]; then
+    echo "✗ Refusing to adopt unmanifested data at $ARGOS_DATA_DIR"
+    echo "  Verify ownership, then set ARGOS_ADOPT_RUNTIME_DATA=1 once."
+    exit 1
+else
+    cat > "$RUNTIME_MANIFEST" <<EOF
+{
+  "runtime_id": "$ARGOS_RUNTIME_ID",
+  "storage_slug": "$ARGOS_STORAGE_SLUG",
+  "product_name": "$ARGOS_PRODUCT_NAME"
+}
+EOF
+fi
+
+PORT="${ARGOS_PORT:-${ODYSSEUS_PORT:-${APP_PORT:-$ARGOS_DEFAULT_PORT}}}"
+HOST="${ARGOS_HOST:-${ODYSSEUS_HOST:-${APP_BIND:-127.0.0.1}}}"
 PROBE_HOST="$HOST"
 if [ "$PROBE_HOST" = "0.0.0.0" ] || [ "$PROBE_HOST" = "::" ]; then
     PROBE_HOST="127.0.0.1"
 fi
-
-# Friendly message on any failure — re-running is safe (every step is idempotent).
 trap 'echo; echo "✗ Setup failed above. It is safe to re-run ./start-macos.sh."; exit 1' ERR
 
-echo "▶ Odysseus quick start for macOS"
-
-# Fail fast if the port is already taken (e.g. a previous run still running).
+echo "▶ $ARGOS_PRODUCT_NAME quick start for macOS"
+echo "  Runtime: $ARGOS_RUNTIME_ID"
+echo "  Data:    $ARGOS_DATA_DIR"
 if (exec 3<>"/dev/tcp/$PROBE_HOST/$PORT") 2>/dev/null; then
-    echo "✗ Port $PORT is already in use on $PROBE_HOST. Stop what's using it, or pick another port:"
-    echo "    ODYSSEUS_PORT=7900 ./start-macos.sh"
+    echo "✗ Port $PORT is already in use on $PROBE_HOST. Pick another with:"
+    echo "    ARGOS_PORT=7900 ./start-macos.sh"
     exit 1
 fi
 
-# 1. Homebrew — the macOS package manager. We can't safely auto-install it
-#    (it wants its own interactive confirmation), so point the user at it.
 if ! command -v brew >/dev/null 2>&1; then
-    echo
-    echo "Homebrew is required but not installed. Install it (one command), then re-run this script:"
-    echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-    echo
-    echo "More info: https://brew.sh"
+    echo "Homebrew is required. Install it, then re-run ./start-macos.sh."
     exit 1
 fi
 
-# 2. Find a Python 3.11+ to build the environment with.
-#    On Apple Silicon we require an *arm64* interpreter (Homebrew's, under
-#    /opt/homebrew). A universal2 or x86 Python — e.g. the python.org installer
-#    at /usr/local — produces a venv whose compiled extensions get loaded as the
-#    wrong architecture when launched from the .app bundle (Cookbook then dies
-#    with "incompatible architecture"). So on arm64 we only look under
-#    /opt/homebrew and install Homebrew's python@3.11 if it's missing. On Intel
-#    (or non-mac) we just use whatever Python 3.11+ is on PATH.
 PY=""
 if [ "$(uname -m)" = "arm64" ]; then
     cands="/opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11"
@@ -83,20 +105,6 @@ for cand in $cands; do
     fi
 done
 
-# System dependencies (each installed only if missing, so re-runs stay fast and
-# don't re-hit Homebrew over the network):
-#    - tmux      : Cookbook runs model downloads/serves in the background
-#    - llama.cpp : a prebuilt, Metal-enabled llama-server so Cookbook can serve
-#                  GGUF models on the GPU with no compile step
-#    - python@3.11 : installed only if no suitable (arm64) Python was found above
-#
-# tmux and llama.cpp are needed only by Cookbook (local model serving), not to
-# boot the core app. So if Homebrew can't install one right now we warn and keep
-# going instead of aborting the whole launch. Python is required to build the
-# venv, so that one stays fatal (handled by the PY check just below).
-
-# Install a Homebrew formula only if its command isn't already present. A failed
-# install warns but does not abort — Cookbook can be set up later.
 brew_ensure() {
     if command -v "$1" >/dev/null 2>&1; then
         echo "  ✓ $2 already installed"
@@ -104,8 +112,7 @@ brew_ensure() {
     fi
     echo "  installing $2…"
     if ! brew install "$2"; then
-        echo "  ⚠ Couldn't install $2 right now — Cookbook (local model serving) may be limited."
-        echo "    You can install it later with:  brew install $2"
+        echo "  ⚠ Couldn't install $2; related optional features may be limited."
     fi
 }
 
@@ -120,37 +127,27 @@ fi
 brew_ensure tmux tmux
 brew_ensure llama-server llama.cpp
 brew_ensure apfel apfel
-
 if [ -z "$PY" ] || [ ! -x "$PY" ]; then
-    echo "✗ Couldn't find a Python 3.11+ to build the environment with."
-    echo "  Check: ls /opt/homebrew/bin/python3*  (or install one: brew install python@3.11)"
+    echo "✗ Couldn't find a compatible Python 3.11+ interpreter."
     exit 1
 fi
 
-# 3. Python environment + dependencies (kept inside the repo, in venv/).
-#    Named `venv` to match the manual steps and build-macos-app.sh, so the
-#    clickable .app reuses this same environment.
 VENV_PY="./venv/bin/python3"
 if [ ! -x "$VENV_PY" ] || ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
-    [ -d venv ] && { echo "▶ Existing venv is incomplete (no working pip) — rebuilding…"; rm -rf venv; }
+    [ -d venv ] && { echo "▶ Existing venv is incomplete — rebuilding…"; rm -rf venv; }
     echo "▶ Creating Python environment…"
     "$PY" -m venv venv
 fi
 REQ_HASH="$(md5 -q requirements.txt 2>/dev/null || md5sum requirements.txt | cut -d' ' -f1)"
 REQ_HASH_FILE="venv/.requirements_hash"
 if [ ! -f "$REQ_HASH_FILE" ] || [ "$REQ_HASH" != "$(cat "$REQ_HASH_FILE" 2>/dev/null)" ]; then
-  echo "▶ Installing Python packages (first run downloads a few — can take a few minutes)…"
-  "$VENV_PY" -m pip install --quiet --upgrade pip
-  # Not --quiet: this is the slow step, so show progress (and any real errors).
-  "$VENV_PY" -m pip install -r requirements.txt
-  echo "$REQ_HASH" > "$REQ_HASH_FILE"
+    echo "▶ Installing Python packages…"
+    "$VENV_PY" -m pip install --quiet --upgrade pip
+    "$VENV_PY" -m pip install -r requirements.txt
+    echo "$REQ_HASH" > "$REQ_HASH_FILE"
 else
-  echo "▶ Python packages up to date — skipping install"
+    echo "▶ Python packages up to date — skipping install"
 fi
-
-# chromadb-client (HTTP-only) conflicts with the full chromadb package. If
-# it got installed (e.g., from an older requirements-optional.txt), remove
-# it to prevent ChromaDB from silently failing in HTTP-only mode.
 if "$VENV_PY" -m pip show chromadb-client >/dev/null 2>&1; then
     echo "▶ Cleaning up conflicting chromadb-client package…"
     "$VENV_PY" -m pip uninstall -y chromadb-client
@@ -158,63 +155,41 @@ if "$VENV_PY" -m pip show chromadb-client >/dev/null 2>&1; then
     "$VENV_PY" -m pip install --force-reinstall "setuptools<82" "tokenizers==0.22.2"
 fi
 
-# 4. First-run setup: creates data dirs and prints an initial admin password
-#    the first time (idempotent — does nothing if already set up). Suppress its
-#    manual run hint — we launch the server ourselves just below.
-echo "▶ Preparing Odysseus…"
-ODYSSEUS_SKIP_RUN_HINT=1 ./venv/bin/python setup.py
+echo "▶ Preparing $ARGOS_PRODUCT_NAME…"
+ODYSSEUS_SKIP_RUN_HINT=1 "$VENV_PY" setup.py
 
-# Local provider bootstrap.
-#     On Apple Silicon macOS, Apfel is treated as a sibling local model server
-#     to Ollama: if Homebrew has it installed, we start its OpenAI-compatible
-#     server on the port next to Ollama, since the default port is 11434 and that's busy (because of ollama).
 MACHINE_ARCH="$(uname -m)"
 APFEL_PID=""
-if [ "$MACHINE_ARCH" = "arm64" ]; then
-    if command -v apfel >/dev/null 2>&1; then
-        APFEL_LOG="${TMPDIR:-/tmp}/odysseus-apfel.log"
-        echo "▶ Starting Apfel server in the background on port 11435…"
-        echo "  logging to $APFEL_LOG"
-        nohup apfel --serve --port 11435 >"$APFEL_LOG" 2>&1 &
-        APFEL_PID=$!
-    else
-        echo "▶ Apfel is not installed (brew formula missing); skipping Apfel server bootstrap."
-    fi
-else
-    echo "▶ Non-ARM macOS detected; skipping Apfel server bootstrap."
+APFEL_PORT="${APFEL_PORT:-${ARGOS_DEFAULT_APFEL_PORT:-11435}}"
+if [ "$MACHINE_ARCH" = "arm64" ] && command -v apfel >/dev/null 2>&1; then
+    APFEL_LOG="${TMPDIR:-/tmp}/${ARGOS_STORAGE_SLUG}-apfel.log"
+    echo "▶ Starting Apfel server in the background on port $APFEL_PORT…"
+    nohup apfel --serve --port "$APFEL_PORT" >"$APFEL_LOG" 2>&1 &
+    APFEL_PID=$!
 fi
 
-# ChromaDB backs the tool index and vector RAG. chromadb ships in the venv, so
-# start a local server before launching. Skip when one is already reachable, or
-# when CHROMADB_HOST points at a remote host.
 CHROMA_PID=""
-CHROMA_HOST="${CHROMADB_HOST:-localhost}"   # what the app connects to
-CHROMA_PORT="${CHROMADB_PORT:-8100}"
-# Bind + probe on IPv4 loopback: the app's "localhost" resolves to 127.0.0.1,
-# but binding chroma to the literal "localhost" can land on IPv6 ::1, which the
-# app can't then reach. Pin both to 127.0.0.1.
+CHROMA_HOST="${CHROMADB_HOST:-localhost}"
+CHROMA_PORT="${CHROMADB_PORT:-${ARGOS_DEFAULT_CHROMADB_PORT:-8100}}"
+export CHROMADB_HOST="$CHROMA_HOST"
+export CHROMADB_PORT="$CHROMA_PORT"
 CHROMA_BIN="$(dirname "$VENV_PY")/chroma"
 case "$CHROMA_HOST" in
     localhost|127.0.0.1) CHROMA_BIND="127.0.0.1" ;;
-    0.0.0.0)             CHROMA_BIND="0.0.0.0" ;;
-    *)                   CHROMA_BIND="" ;;   # remote host - don't start locally
+    0.0.0.0) CHROMA_BIND="0.0.0.0" ;;
+    *) CHROMA_BIND="" ;;
 esac
 if (exec 3<>"/dev/tcp/127.0.0.1/$CHROMA_PORT") 2>/dev/null; then
     echo "▶ ChromaDB already running on 127.0.0.1:$CHROMA_PORT - using it."
 elif [ -z "$CHROMA_BIND" ]; then
     echo "▶ CHROMADB_HOST=$CHROMA_HOST is remote - not starting a local ChromaDB."
 elif [ -x "$CHROMA_BIN" ]; then
-    CHROMA_LOG="${TMPDIR:-/tmp}/odysseus-chromadb.log"
+    CHROMA_LOG="${TMPDIR:-/tmp}/${ARGOS_STORAGE_SLUG}-chromadb.log"
     echo "▶ Starting ChromaDB in the background on $CHROMA_BIND:$CHROMA_PORT…"
-    echo "  logging to $CHROMA_LOG"
-    nohup "$CHROMA_BIN" run --host "$CHROMA_BIND" --port "$CHROMA_PORT" --path "$PWD/data/chroma" >"$CHROMA_LOG" 2>&1 &
+    nohup "$CHROMA_BIN" run --host "$CHROMA_BIND" --port "$CHROMA_PORT" --path "$ARGOS_DATA_DIR/chroma" >"$CHROMA_LOG" 2>&1 &
     CHROMA_PID=$!
-else
-    echo "▶ ChromaDB CLI not found in venv; skipping (tool index will be degraded)."
 fi
 
-# 5. Launch. Bind to loopback by default; opt into LAN/Tailscale with
-#    ODYSSEUS_HOST=0.0.0.0.
 URL_HOST="$HOST"
 if [ "$URL_HOST" = "0.0.0.0" ] || [ "$URL_HOST" = "::" ]; then
     URL_HOST="127.0.0.1"
@@ -223,26 +198,16 @@ URL="http://$URL_HOST:$PORT"
 TAILSCALE_URL=""
 if [ "$HOST" = "0.0.0.0" ] && command -v tailscale >/dev/null 2>&1; then
     TS_IP="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
-    if [ -n "$TS_IP" ]; then
-        TAILSCALE_URL="http://$TS_IP:$PORT"
-    fi
+    [ -n "$TS_IP" ] && TAILSCALE_URL="http://$TS_IP:$PORT"
 fi
 
-# Open the browser automatically once the server is accepting connections — so
-# the URL isn't lost in the startup logs that keep scrolling. Runs in the
-# background and is cleaned up when the server stops. Skip with
-# ODYSSEUS_NO_OPEN=1 (e.g. over SSH / headless).
+NO_OPEN="${ARGOS_NO_OPEN:-${ODYSSEUS_NO_OPEN:-}}"
 POLLER_PID=""
-if [ -z "$ODYSSEUS_NO_OPEN" ] && command -v open >/dev/null 2>&1; then
+if [ -z "$NO_OPEN" ] && command -v open >/dev/null 2>&1; then
     (
         for _ in $(seq 1 90); do
             if (exec 3<>"/dev/tcp/$PROBE_HOST/$PORT") 2>/dev/null; then
-                printf '\n'
-                printf '  ┌────────────────────────────────────────────┐\n'
-                printf '  │  ✓ Odysseus is ready — opening your browser  │\n'
-                printf '  │     %-40s │\n' "$URL"
-                printf '  │     (Press Ctrl+C in this window to stop)    │\n'
-                printf '  └────────────────────────────────────────────┘\n\n'
+                echo "▶ $ARGOS_PRODUCT_NAME is ready — opening $URL"
                 open "$URL"
                 break
             fi
@@ -252,16 +217,9 @@ if [ -z "$ODYSSEUS_NO_OPEN" ] && command -v open >/dev/null 2>&1; then
     POLLER_PID=$!
 fi
 
-# Setup is done — drop the setup-failure handler, and clean up the background
-# opener when the server exits or the user presses Ctrl+C.
 trap - ERR
 trap '[ -n "$POLLER_PID" ] && kill "$POLLER_PID" 2>/dev/null; [ -n "$APFEL_PID" ] && kill "$APFEL_PID" 2>/dev/null; [ -n "$CHROMA_PID" ] && kill "$CHROMA_PID" 2>/dev/null' EXIT INT TERM
 
-echo
-echo "▶ Starting Odysseus — it will open in your browser at $URL"
-if [ -n "$TAILSCALE_URL" ]; then
-    echo "  Tailscale/LAN URL: $TAILSCALE_URL"
-fi
-echo "  (this takes a few seconds; press Ctrl+C here to stop)"
-echo
+echo "▶ Starting $ARGOS_PRODUCT_NAME at $URL"
+[ -n "$TAILSCALE_URL" ] && echo "  Tailscale/LAN URL: $TAILSCALE_URL"
 "$VENV_PY" -m uvicorn app:app --host "$HOST" --port "$PORT"
