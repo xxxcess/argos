@@ -79,32 +79,93 @@ nightly
 
 Use focused feature branches from `argos-venture` and merge them back through reviewed pull requests. Periodically merge `nightly` into `argos-venture`; never force-push the voyage branch.
 
-## Quick Start
+## Runtime Profiles and Isolated Persistence
+
+Argos Venture and the inherited Odysseus/nightly product line must never share runtime data. Switching Git branches changes code; it must not accidentally reuse another product line’s users, database, encryption key, uploads, gallery, generated images, vector stores, settings, sessions, or caches.
+
+The macOS launcher should read a committed profile at:
+
+```text
+config/runtime-profile.env
+```
+
+The profile is versioned with the branch, so feature branches inherit the profile of the product line they extend. It is the launcher’s source of truth for product identity and safe default persistence names; it must not infer those values from `git branch` at runtime.
+
+`nightly` and its feature branches use an Odysseus profile:
+
+```bash
+ARGOS_RUNTIME_ID=odysseus
+ARGOS_PRODUCT_NAME=Odysseus
+ARGOS_STORAGE_SLUG=odysseus
+ARGOS_DEFAULT_PORT=7860
+ARGOS_DEFAULT_CHROMADB_PORT=8100
+```
+
+`argos-venture` and its feature branches use an Argos Venture profile:
+
+```bash
+ARGOS_RUNTIME_ID=argos-venture
+ARGOS_PRODUCT_NAME="Argos Venture"
+ARGOS_STORAGE_SLUG=argos-venture
+ARGOS_DEFAULT_PORT=7861
+ARGOS_DEFAULT_CHROMADB_PORT=8101
+```
+
+When `start-macos.sh` launches the application, it must load this profile and derive a profile-specific data root by default:
+
+```text
+~/Library/Application Support/Argos/runtimes/<ARGOS_STORAGE_SLUG>/
+```
+
+For Argos Venture, this becomes:
+
+```text
+~/Library/Application Support/Argos/runtimes/argos-venture/
+├── app.db
+├── auth.json
+├── .app_key
+├── settings.json
+├── uploads/
+├── gallery/
+├── generated_images/
+├── chroma/
+├── rag/
+└── runtime-manifest.json
+```
+
+The launcher must export `ARGOS_DATA_DIR` and retain `ODYSSEUS_DATA_DIR` as a temporary compatibility alias pointing to that same profile-specific path. The default SQLite database, Chroma persistence path, runtime ports, logs, and all files derived from the application data directory must use the active profile.
+
+A startup guard must write and validate `runtime-manifest.json`, including the runtime ID and storage slug. Startup must stop on a profile/data-root mismatch unless an explicit maintenance override is supplied. The launcher must never copy, migrate, or merge data merely because a user changed Git branches.
+
+Local overrides are acceptable only when they remain profile-safe. Prefer changing a shared parent root such as `ARGOS_DATA_ROOT`; do not point `ARGOS_DATA_DIR` or `DATABASE_URL` at another product line’s persistence without an explicit migration process and a matching manifest.
+
+## Quick Start on macOS
 
 ```bash
 git clone https://github.com/xxxcess/argos.git
 cd argos
 git switch argos-venture
-cp .env.example .env
-docker compose up -d --build
+./start-macos.sh
 ```
 
-Open `http://localhost:7000` when the containers are healthy. Keep authentication enabled for all network-accessible deployments.
+The runtime profile selected by this branch determines the default local port and persistence location. `start-macos.sh` may still read a local `.env` for machine-specific values, but `.env` must not silently collapse isolated runtime profiles into a shared data directory.
 
-The inherited setup, deployment, and troubleshooting notes remain in [`docs/setup.md`](docs/setup.md). Those documents and the UI are being renamed from the upstream identity as the Argos Venture implementation proceeds.
+Keep authentication enabled for all network-accessible deployments. The inherited setup, deployment, and troubleshooting notes remain in [`docs/setup.md`](docs/setup.md). Those documents and the UI are being renamed from the upstream identity as the Argos Venture implementation proceeds.
 
 ## Implementation Milestones
 
-1. Introduce quest membership, Captain ownership, and server-side authorization for quest artifacts.
-2. Rename sessions to quests and model the chronological voyage log.
-3. Make Captain prompts agent-first and expose Argo status/tool-result events clearly.
-4. Build the reduced shipmate shell, dashboard, account-only settings, sidebar theme control, and quest chat experience.
-5. Replace inherited Odysseus naming, labels, assets, metadata, and user-facing copy with Argos Venture branding.
-6. Add authorization, migration, and end-to-end tests for captains, shipmates, shared quests, and direct-route access.
+1. Add committed runtime profiles, macOS launcher support, profile-specific persistence roots, and profile/data-root mismatch protection.
+2. Introduce quest membership, Captain ownership, and server-side authorization for quest artifacts.
+3. Add Captain-defined challenges, acceptance criteria, and a published-artifact workflow for Quest-bound documents and gallery items.
+4. Rename sessions to quests and model the chronological voyage log.
+5. Make Captain prompts agent-first and expose Argo status/tool-result events clearly.
+6. Build the reduced shipmate shell, dashboard, account-only settings, sidebar theme control, and quest chat experience.
+7. Replace inherited Odysseus naming, labels, assets, metadata, and user-facing copy with Argos Venture branding.
+8. Add authorization, runtime-isolation, migration, and end-to-end tests for Captains, Shipmates, shared Quests, artifacts, and direct-route access.
 
 ## Security
 
-Argos Venture is a self-hosted workspace with powerful local tools. Keep authentication enabled, do not expose raw model or service ports publicly, and treat Captain credentials and quest-bound data as sensitive. The server must enforce every role and membership boundary even when a caller bypasses the frontend.
+Argos Venture is a self-hosted workspace with powerful local tools. Keep authentication enabled, do not expose raw model or service ports publicly, and treat Captain credentials and quest-bound data as sensitive. The server must enforce every role and membership boundary even when a caller bypasses the frontend. Runtime profiles are a data-isolation boundary: do not reuse a profile’s database, auth state, encryption key, or asset directories for another product line without an explicit migration.
 
 ## License
 
