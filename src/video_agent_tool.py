@@ -1,4 +1,4 @@
-"""Canonical helpers for the agent-facing local video generation tool."""
+"""Canonical helpers for the agent-facing video generation tool."""
 
 from __future__ import annotations
 
@@ -6,12 +6,13 @@ import json
 import logging
 from typing import Any
 
-from src.anchor_video_settings import VideoSettingsError
+from src.anchor_video_settings import VIDEO_PROVIDER_REMOTE_LTX, VideoSettingsError
 
 logger = logging.getLogger(__name__)
 
 VIDEO_AGENT_DISABLED_MESSAGE = "Generate video is disabled in Built-in Agent Tools."
-VIDEO_AGENT_ACK = "Creating the image anchor, then rendering local depth-aware camera motion."
+LOCAL_VIDEO_AGENT_ACK = "Creating the image anchor, then rendering local depth-aware camera motion."
+REMOTE_VIDEO_AGENT_ACK = "Creating the image anchor, then submitting remote LTX motion generation."
 
 
 def is_video_agent_enabled(owner: str | None) -> bool:
@@ -94,7 +95,7 @@ def safe_agent_video_error(exc: Exception) -> str:
         return text or "Video generation request is invalid."
     if isinstance(exc, RuntimeError):
         logger.warning("Agent video generation could not start: %s", exc)
-        return "The local depth-video engine is unavailable or not fully configured."
+        return str(exc)[:240] if str(exc).strip() else "The selected video provider is unavailable or not fully configured."
     logger.exception("Agent video generation could not start")
     return "Video generation could not be started."
 
@@ -121,14 +122,17 @@ async def dispatch_agent_video_generation(
     except Exception as exc:
         return "generate_video", {"error": safe_agent_video_error(exc), "exit_code": 1}
 
+    provider = str((getattr(job, "request_config", None) or {}).get("video_provider") or "depth_parallax")
+    ack = REMOTE_VIDEO_AGENT_ACK if provider == VIDEO_PROVIDER_REMOTE_LTX else LOCAL_VIDEO_AGENT_ACK
     return "generate_video", {
         "kind": "video_generation",
         "job_id": job.id,
+        "provider": provider,
         "status": "queued",
         "stage": "planning_anchor",
         "terminal_media_job": True,
-        "assistant_ack": VIDEO_AGENT_ACK,
-        "output": VIDEO_AGENT_ACK,
+        "assistant_ack": ack,
+        "output": ack,
         "exit_code": 0,
         "video_job_id": job.id,
         "video_status": "queued",

@@ -605,6 +605,7 @@ class ScheduledTask(TimestampMixin, Base):
     max_steps      = Column(Integer, nullable=True)       # max agent loop iterations (null=unlimited)
     email_results  = Column(Boolean, default=True)        # email results to character.email_to
     notifications_enabled = Column(Boolean, default=True) # per-task on/off for completion notifications
+    state_version = Column(Integer, default=0, nullable=False) # monotonically bumps at task lifecycle boundaries
 
     session = relationship("Session", backref=backref("scheduled_tasks", cascade="save-update, merge"))
     then_task = relationship("ScheduledTask", remote_side=[id], foreign_keys=[then_task_id])
@@ -667,6 +668,118 @@ class TaskRun(Base):
 
     __table_args__ = (
         Index('ix_task_runs_task', 'task_id', 'started_at'),
+    )
+
+
+class TaskEvent(Base):
+    """Immutable lifecycle event emitted at the scheduled-task transition boundary."""
+    __tablename__ = "task_events"
+
+    id = Column(String, primary_key=True, index=True)
+    schema_version = Column(Integer, default=1, nullable=False)
+    task_id = Column(String, ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id = Column(String, ForeignKey("task_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    workspace_scope = Column(String, nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    state = Column(String, nullable=True)
+    state_version = Column(Integer, default=0, nullable=False)
+    occurred_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    actor_type = Column(String, nullable=True)
+    actor_id = Column(String, nullable=True)
+    correlation_id = Column(String, nullable=True, index=True)
+    causation_id = Column(String, nullable=True)
+    display_payload = Column(Text, nullable=True)
+    notification_key = Column(String, nullable=True, index=True)
+
+    task = relationship("ScheduledTask")
+    run = relationship("TaskRun")
+
+    __table_args__ = (
+        Index("ix_task_events_owner_time", "owner", "occurred_at"),
+        Index("ix_task_events_task_version", "task_id", "state_version"),
+    )
+
+
+class OutboxMessage(TimestampMixin, Base):
+    """Retryable dispatch record for task events."""
+    __tablename__ = "outbox_messages"
+
+    id = Column(String, primary_key=True, index=True)
+    aggregate_type = Column(String, nullable=False, default="task")
+    aggregate_id = Column(String, nullable=False, index=True)
+    event_id = Column(String, ForeignKey("task_events.id", ondelete="CASCADE"), nullable=False, index=True)
+    payload = Column(Text, nullable=False, default="{}")
+    dispatch_state = Column(String, nullable=False, default="pending", index=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    next_retry_at = Column(DateTime, nullable=True, index=True)
+    dispatched_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    event = relationship("TaskEvent")
+
+    __table_args__ = (
+        Index("ix_outbox_dispatch_due", "dispatch_state", "next_retry_at"),
+    )
+
+
+class InteractionRequest(TimestampMixin, Base):
+    """Durable task/user interaction request mirrored into the notification inbox."""
+    __tablename__ = "interaction_requests"
+
+    id = Column(String, primary_key=True, index=True)
+    task_id = Column(String, ForeignKey("scheduled_tasks.id", ondelete="CASCADE"), nullable=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    run_id = Column(String, ForeignKey("task_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    target_user = Column(String, nullable=True, index=True)
+    request_type = Column(String, nullable=False, default="confirmation")
+    status = Column(String, nullable=False, default="pending", index=True)
+    idempotency_key = Column(String, nullable=False, unique=True, index=True)
+    presentation_payload = Column(Text, nullable=False, default="{}")
+    expires_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    response_summary = Column(Text, nullable=True)
+    sensitive = Column(Boolean, nullable=False, default=False)
+
+    task = relationship("ScheduledTask")
+    run = relationship("TaskRun")
+
+    __table_args__ = (
+        Index("ix_interaction_target_status", "target_user", "status"),
+    )
+
+
+class UserNotification(TimestampMixin, Base):
+    """Persisted, user-scoped notification record projected from task events."""
+    __tablename__ = "user_notifications"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, nullable=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    workspace_scope = Column(String, nullable=True)
+    task_id = Column(String, nullable=True, index=True)
+    event_id = Column(String, ForeignKey("task_events.id", ondelete="SET NULL"), nullable=True, index=True)
+    interaction_id = Column(String, ForeignKey("interaction_requests.id", ondelete="SET NULL"), nullable=True, index=True)
+    category = Column(String, nullable=False, index=True)  # activity | progress | inbox
+    severity = Column(String, nullable=False, default="info")
+    state = Column(String, nullable=False, default="unread", index=True)
+    title = Column(String, nullable=False, default="")
+    message = Column(Text, nullable=False, default="")
+    action_label = Column(String, nullable=True)
+    action_url = Column(String, nullable=True)
+    resource_type = Column(String, nullable=True)
+    resource_id = Column(String, nullable=True)
+    deterministic_key = Column(String, nullable=False, unique=True, index=True)
+    read_at = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, nullable=True, index=True)
+    seen_at = Column(DateTime, nullable=True)
+
+    event = relationship("TaskEvent")
+    interaction = relationship("InteractionRequest")
+
+    __table_args__ = (
+        Index("ix_user_notifications_user_category", "user_id", "category", "updated_at"),
+        Index("ix_user_notifications_user_state", "user_id", "state", "archived_at"),
     )
 
 
@@ -1568,6 +1681,19 @@ def _migrate_add_notifications_enabled():
         logging.getLogger(__name__).warning(f"notifications_enabled migration: {e}")
 
 
+def _migrate_add_task_state_version():
+    """Monotonic task lifecycle version used by durable task events."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(scheduled_tasks)"))]
+            if "state_version" not in cols:
+                conn.execute(text("ALTER TABLE scheduled_tasks ADD COLUMN state_version INTEGER DEFAULT 0 NOT NULL"))
+                conn.commit()
+                logging.getLogger(__name__).info("Added state_version column to scheduled_tasks")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"task state_version migration: {e}")
+
+
 def _migrate_add_crew_member_id():
     """Add crew_member_id column to sessions and scheduled_tasks tables if missing."""
     try:
@@ -1823,6 +1949,7 @@ def init_db():
     _migrate_add_mcp_oauth_tokens_column()
     _migrate_add_task_v2_columns()
     _migrate_add_notifications_enabled()
+    _migrate_add_task_state_version()
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
     _migrate_add_assistant_columns()

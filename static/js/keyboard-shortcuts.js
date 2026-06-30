@@ -96,7 +96,7 @@ export function initKeyboardShortcuts(modules) {
   // last one. Maps each window's modal element to the button/title that
   // opens it (mirrors modalManager's _AUTO_WIRE, plus email's section title).
   const _WINDOW_TRIGGERS = {
-    'settings-modal':         'user-bar-settings',
+    'settings-modal':         'workspace-account-btn',
     'theme-modal':            'tool-theme-btn',
     'tasks-modal':            'tool-tasks-btn',
     'notes-panel':            'tool-notes-btn',

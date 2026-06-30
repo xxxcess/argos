@@ -314,23 +314,40 @@ class TaskScheduler:
         """Persist short live progress text for Activity while a run is active."""
         if not run_id:
             return
+        event_ids = []
         try:
-            from core.database import SessionLocal, TaskRun
+            from core.database import SessionLocal, TaskRun, ScheduledTask
+            from src.task_notifications import append_task_event, TASK_PROGRESS_REPORTED, dispatch_outbox_for_events
             db = SessionLocal()
             try:
                 run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if run and run.status in ("queued", "running"):
                     run.result = (message or "")[:4000]
+                    task = db.query(ScheduledTask).filter(ScheduledTask.id == run.task_id).first()
+                    if task:
+                        ev = append_task_event(
+                            db,
+                            task,
+                            event_type=TASK_PROGRESS_REPORTED,
+                            run=run,
+                            safe_message=message,
+                        )
+                        if ev:
+                            event_ids.append(ev.id)
                     db.commit()
             finally:
                 db.close()
+            if event_ids:
+                dispatch_outbox_for_events(event_ids)
         except Exception:
             logger.debug("Task progress update failed", exc_info=True)
 
     def _mark_run_aborted(self, task_id: str, run_id: str | None = None, message: str = "Stopped by user") -> bool:
         """Mark an active run as aborted. Used by stop/cancel paths."""
+        event_ids = []
         try:
-            from core.database import SessionLocal, TaskRun
+            from core.database import SessionLocal, TaskRun, ScheduledTask
+            from src.task_notifications import append_task_event, TASK_CANCELLED, dispatch_outbox_for_events
             db = SessionLocal()
             try:
                 q = db.query(TaskRun)
@@ -348,7 +365,20 @@ class TaskScheduler:
                 run.error = message
                 run.result = run.result or message
                 run.finished_at = _utcnow()
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == run.task_id).first()
+                if task:
+                    ev = append_task_event(
+                        db,
+                        task,
+                        event_type=TASK_CANCELLED,
+                        run=run,
+                        safe_message=message,
+                    )
+                    if ev:
+                        event_ids.append(ev.id)
                 db.commit()
+                if event_ids:
+                    dispatch_outbox_for_events(event_ids)
                 return True
             finally:
                 db.close()
@@ -675,11 +705,13 @@ class TaskScheduler:
         # semaphore so the UI can show that a manually-triggered task is in
         # line behind another. Once we acquire the slot, flip to "running"
         # and hand off to _execute_task_locked.
-        from core.database import SessionLocal, TaskRun
+        from core.database import SessionLocal, TaskRun, ScheduledTask
+        from src.task_notifications import append_task_event, TASK_CREATED, dispatch_outbox_for_events
         current = asyncio.current_task()
         if current:
             self._task_handles[task_id] = current
         run_id = str(uuid.uuid4())
+        event_ids = []
         _q_db = SessionLocal()
         try:
             run = TaskRun(
@@ -690,11 +722,24 @@ class TaskScheduler:
                 result="Queued — waiting for a free slot…",
             )
             _q_db.add(run)
+            task = _q_db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if task:
+                ev = append_task_event(
+                    _q_db,
+                    task,
+                    event_type=TASK_CREATED,
+                    run=run,
+                    safe_message=run.result,
+                )
+                if ev:
+                    event_ids.append(ev.id)
             _q_db.commit()
         except Exception:
             logger.exception(f"Failed to create queued run row for task {task_id}")
         finally:
             _q_db.close()
+        if event_ids:
+            dispatch_outbox_for_events(event_ids)
 
         try:
             if bypass_model_slot or not self._task_needs_model_slot(task_id):
@@ -718,6 +763,15 @@ class TaskScheduler:
 
     async def _execute_task_locked(self, task_id: str, run_id: str, *, release_executing: bool = True):
         from core.database import SessionLocal, ScheduledTask, TaskRun
+        from src.task_notifications import (
+            append_task_event,
+            dispatch_outbox_for_events,
+            TASK_CANCELLED,
+            TASK_FAILED,
+            TASK_RETRY_SCHEDULED,
+            TASK_STARTED,
+            TASK_SUCCEEDED,
+        )
 
         db = SessionLocal()
         try:
@@ -741,7 +795,16 @@ class TaskScheduler:
                 run.status = "running"
                 run.started_at = _utcnow()
                 run.result = "Starting…"
+                _start_event = append_task_event(
+                    db,
+                    task,
+                    event_type=TASK_STARTED,
+                    run=run,
+                    safe_message="Starting…",
+                )
                 db.commit()
+                if _start_event:
+                    dispatch_outbox_for_events([_start_event.id])
             else:
                 # Defensive: row may have been wiped; recreate so the rest of
                 # the code can look it up by run_id without crashing.
@@ -753,7 +816,16 @@ class TaskScheduler:
                     result="Starting…",
                 )
                 db.add(run)
+                _start_event = append_task_event(
+                    db,
+                    task,
+                    event_type=TASK_STARTED,
+                    run=run,
+                    safe_message="Starting…",
+                )
                 db.commit()
+                if _start_event:
+                    dispatch_outbox_for_events([_start_event.id])
 
             task_type = task.task_type or "llm"
 
@@ -799,7 +871,16 @@ class TaskScheduler:
                 if run_obj:
                     db.delete(run_obj)
                 task.next_run = when
+                _defer_event = append_task_event(
+                    db,
+                    task,
+                    event_type=TASK_RETRY_SCHEDULED,
+                    safe_message=f"Retry scheduled for {when.isoformat()}Z.",
+                    extra={"retry_at": when.isoformat() + "Z", "delay_seconds": delay_seconds},
+                )
                 db.commit()
+                if _defer_event:
+                    dispatch_outbox_for_events([_defer_event.id])
                 return
             except asyncio.CancelledError:
                 logger.info("Task '%s' stopped by user", task.name)
@@ -820,7 +901,16 @@ class TaskScheduler:
                     )
                 else:
                     task.next_run = None
+                _cancel_event = append_task_event(
+                    db,
+                    task,
+                    event_type=TASK_CANCELLED,
+                    run=run_obj,
+                    safe_message="Stopped by user",
+                )
                 db.commit()
+                if _cancel_event:
+                    dispatch_outbox_for_events([_cancel_event.id])
                 return
             except TaskNoop as noop:
                 # Action reported "nothing to do". Mark the run as `skipped`
@@ -867,7 +957,17 @@ class TaskScheduler:
             else:
                 task.next_run = None
 
+            _final_status = run.status or "success"
+            _final_event = append_task_event(
+                db,
+                task,
+                event_type=TASK_SUCCEEDED if _final_status == "success" else TASK_FAILED,
+                run=run,
+                safe_message=run.error or run.result,
+            )
             db.commit()
+            if _final_event:
+                dispatch_outbox_for_events([_final_event.id])
             logger.info(f"Task '{task.name}' completed (run {run_id})")
             output = task.output_target or "session"
             # Per-task notification gate. Default True (notifications_enabled
@@ -963,7 +1063,20 @@ class TaskScheduler:
                     except Exception:
                         pass
                 try:
+                    _fail_event = None
+                    task_for_event = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                    if task_for_event:
+                        _fail_run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                        _fail_event = append_task_event(
+                            db,
+                            task_for_event,
+                            event_type=TASK_FAILED,
+                            run=_fail_run,
+                            safe_message=err_text,
+                        )
                     db.commit()
+                    if _fail_event:
+                        dispatch_outbox_for_events([_fail_event.id])
                 except Exception as commit_err:
                     # Commit failed — without a fallback the run row stays
                     # "running" forever AND next_run stays in the past, so the

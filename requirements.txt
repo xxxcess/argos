@@ -3,6 +3,7 @@ uvicorn
 python-multipart
 python-dotenv
 httpx
+gradio_client
 pydantic>=2.13.4
 pydantic-settings>=2.14.1
 SQLAlchemy

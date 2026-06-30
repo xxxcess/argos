@@ -1761,28 +1761,6 @@ function initAppearance() {
         return;
       }
 
-      // Hiding the Settings cog removes the only visible way to re-open this
-      // panel. Warn the user and remind them about the `/settings` slash
-      // command so they don't lock themselves out.
-      if (key === 'sidebar-settings-btn' && !chk.checked) {
-        var ok = true;
-        try {
-          ok = await (uiModule && uiModule.styledConfirm
-            ? uiModule.styledConfirm(
-                'Hide the Settings cog?\n\nYou can re-open this panel any time by typing /settings in the chat input.',
-                { confirmText: 'Hide', cancelText: 'Cancel' }
-              )
-            : Promise.resolve(window.confirm('Hide the Settings cog?\n\nYou can re-open this panel any time by typing /settings in the chat input.')));
-        } catch (_) { ok = false; }
-        if (!ok) {
-          chk.checked = true;
-          return;
-        }
-        if (uiModule && uiModule.showToast) {
-          uiModule.showToast('Settings cog hidden — type /settings to bring it back.', 5000);
-        }
-      }
-
       var s = window.loadUIVis();
       s[key] = chk.checked;
       window.saveUIVis(s);

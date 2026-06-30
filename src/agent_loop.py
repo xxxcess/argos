@@ -418,7 +418,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
 ```generate_video
 {"prompt": "<video intent>", "seed": 123}
 ```
-Create a silent 10-second local depth-parallax video. The tool queues one durable video job, creates the Gallery image anchor internally through the selected Image Default, then renders local depth-aware camera motion. Do not call generate_image for the anchor. `seed` is optional.""",
+Create a short silent video with the user's saved Video Generation provider. The tool queues one durable video job, creates the Gallery image anchor internally through the selected Image Default, then renders private Local Motion or consent-gated Remote LTX motion. Do not call generate_image for the anchor. Do not choose or mention a provider unless the user asks; Settings owns that choice. `seed` is optional.""",
 
     "chat_with_model": "- ```chat_with_model``` — Ask a DIFFERENT AI model and relay its answer. Line 1 = model name (or 'model@endpoint'), rest = your message. Use when the user says 'ask <model>', 'what does <model> think', or wants to compare/their answer from another model.",
     "ask_teacher": "- ```ask_teacher``` — Escalate a hard question to a more capable model. Line 1 = model name or 'auto', rest = the question. Use when stuck or need expert knowledge.",
@@ -3275,6 +3275,17 @@ async def stream_agent_loop(
                 # text (once) so it persists and is replayed. The card shows the
                 # options only, so this is the single visible copy of the question.
                 _auq = result["ask_user"]
+                try:
+                    from src.interaction_requests import create_session_interaction_request
+                    _interaction_id = create_session_interaction_request(
+                        owner=owner,
+                        session_id=session_id,
+                        payload=_auq,
+                    )
+                    if _interaction_id:
+                        _auq = {**_auq, "interaction_id": _interaction_id, "kind": _auq.get("kind") or "choice"}
+                except Exception:
+                    logger.debug("Failed to persist ask_user interaction", exc_info=True)
                 _auq_q = (_auq.get("question") or "").strip()
                 if _auq_q and _auq_q not in full_response:
                     _auq_delta = ("\n\n" if full_response.strip() else "") + _auq_q

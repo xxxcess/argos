@@ -52,6 +52,14 @@ def test_mission_control_exposes_full_view_new_chat_draft():
     assert "viewNewChatDraft" in source[source.index("const sessionControlModule"):]
 
 
+def test_full_chat_uses_home_tab_instead_of_return_button():
+    source = SESSION_CONTROL_JS.read_text(encoding="utf-8")
+
+    assert "mission-return-btn" not in source
+    assert "Session Control" not in source
+    assert "ensureReturnButton" not in source
+
+
 def test_full_conversation_navigation_closes_dashboard_active_panel():
     source = SESSION_CONTROL_JS.read_text(encoding="utf-8")
     helper_body = _slice(

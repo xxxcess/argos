@@ -3,7 +3,7 @@
 // Several primary controls in Odysseus are authored as click-only <div>s
 // (most notably the whole sidebar navigation: New Chat, Search, Brain,
 // Calendar, Compare, Cookbook, Deep Research, Gallery, Library, Notes,
-// Tasks, Theme, plus the account row). <div>s are not in the tab order and
+// Tasks, and Theme). <div>s are not in the tab order and
 // are not announced as buttons, so keyboard and screen-reader users cannot
 // reach or operate them.
 //
@@ -18,7 +18,7 @@
   'use strict';
 
   // Click-as-button rows we want reachable by keyboard.
-  var ROW_SELECTOR = ['#sidebar .list-item', '#user-bar-profile'].join(',');
+  var ROW_SELECTOR = '#sidebar .list-item';
 
   // Native interactive descendants. If a row contains one of these we must
   // NOT give the row role="button" — a button inside a button is invalid

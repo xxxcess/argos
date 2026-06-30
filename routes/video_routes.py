@@ -1,4 +1,4 @@
-"""API for the guided local depth-parallax video workflow."""
+"""API for the guided anchor-first video workflow."""
 from __future__ import annotations
 
 import logging
@@ -6,10 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from services.anchor_video_generation import get_video_generation_service, runtime_status
+from services.anchor_video_generation import get_video_generation_service
 from services.local_image_runtime import repair_log_tail, start_repair as start_image_runtime_repair, status as image_runtime_status
+from services.remote_ltx_video import remote_ltx_status
+from services.video_render_providers import provider_status
 from services.video_runtime_setup import install_log_tail, start_install
-from src.anchor_video_settings import VideoSettingsError, get_video_defaults, save_video_defaults
+from src.anchor_video_settings import VIDEO_PROVIDER_DEPTH, VIDEO_PROVIDER_REMOTE_LTX, VideoSettingsError, get_video_defaults, save_video_defaults
 from src.auth_helpers import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -53,21 +55,40 @@ def _planner(owner: str | None) -> dict[str, Any]:
 
 
 def _setup(owner: str | None) -> dict[str, Any]:
-    runtime = runtime_status()
+    defaults = get_video_defaults(owner)
+    provider = defaults["video_provider"]
+    local_status = provider_status(VIDEO_PROVIDER_DEPTH)
+    remote_status = remote_ltx_status() if provider == VIDEO_PROVIDER_REMOTE_LTX else {
+        "available": False,
+        "provider": VIDEO_PROVIDER_REMOTE_LTX,
+        "message": "Remote LTX status is checked when selected.",
+    }
     image = _image_default(owner)
     planner = _planner(owner)
+    selected_status = remote_status if provider == VIDEO_PROVIDER_REMOTE_LTX else local_status
     return {
-        "ready": bool(runtime.get("available") and image["ready"] and planner["ready"]),
-        "runtime": runtime,
+        "ready": bool(selected_status.get("available") and image["ready"] and planner["ready"]),
+        "provider": provider,
+        "providers": {
+            "depth_parallax": local_status,
+            "remote_ltx": remote_status,
+        },
+        "runtime": local_status,
+        "remote_ltx": remote_status,
         "image_default": image,
         "planner": planner,
+        "defaults": defaults,
         "profile": {
-            "mode": "anchor_first_depth_parallax",
-            "description": "Subtle depth-aware camera motion from a stable Gallery image anchor.",
+            "mode": "remote_ltx" if provider == VIDEO_PROVIDER_REMOTE_LTX else "local_motion",
+            "description": (
+                "Public image-to-video generation through the Lightricks LTX Video Hugging Face Space."
+                if provider == VIDEO_PROVIDER_REMOTE_LTX
+                else "Private depth-aware camera motion from a stable Gallery image anchor."
+            ),
             "width": 512,
             "height": 512,
-            "duration_seconds": 10,
-            "fps": 24,
+            "duration_seconds": 8.0 if provider == VIDEO_PROVIDER_REMOTE_LTX else 8,
+            "fps": 30 if provider == VIDEO_PROVIDER_REMOTE_LTX else 24,
             "audio": False,
         },
     }
@@ -88,6 +109,10 @@ def setup_video_routes() -> APIRouter:
     @router.get("/setup")
     async def get_setup(request: Request) -> dict[str, Any]:
         return _setup(get_current_user(request))
+
+    @router.get("/setup/remote-status")
+    async def get_remote_status(_request: Request) -> dict[str, Any]:
+        return remote_ltx_status(force=True)
 
     @router.post("/setup/install", status_code=202)
     async def install_engine(_request: Request) -> dict[str, Any]:
@@ -115,6 +140,8 @@ def setup_video_routes() -> APIRouter:
     async def run_guided_test(request: Request) -> dict[str, Any]:
         owner = get_current_user(request)
         state = _setup(owner)
+        if state["provider"] != VIDEO_PROVIDER_DEPTH:
+            raise HTTPException(409, "Guided local test is available when Local Motion is selected.")
         if not state["runtime"].get("available"):
             raise HTTPException(409, "Install and verify the local depth engine before running a test.")
         if not state["image_default"]["ready"] or not state["planner"]["ready"]:
@@ -155,6 +182,9 @@ def setup_video_routes() -> APIRouter:
         state = _setup(get_current_user(request))
         if not state["image_default"]["ready"]:
             raise HTTPException(409, state["image_default"].get("message") or "The Image Default is not ready.")
+        if not state["ready"]:
+            selected = state["remote_ltx"] if state["provider"] == VIDEO_PROVIDER_REMOTE_LTX else state["runtime"]
+            raise HTTPException(409, selected.get("message") or selected.get("reason") or "The selected video provider is not ready.")
         try:
             await service.start()
             job = service.create_job(get_current_user(request), body)

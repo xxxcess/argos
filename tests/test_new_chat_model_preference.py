@@ -64,7 +64,7 @@ def test_desktop_new_chat_actions_use_shared_preference_helper():
     brand_handler = _slice(
         source,
         "// Logo click \u2192 new chat",
-        "const sidebarNewChatBtn = el('sidebar-new-chat-btn');",
+        "// Delete session button on icon rail",
     )
 
     assert "if (await _createDirectChatFromPreferredModel()) {" in rail_handler
@@ -90,12 +90,21 @@ def test_new_chat_actions_exit_session_control_dashboard():
     brand_handler = _slice(
         source,
         "// Logo click \u2192 new chat",
-        "const sidebarNewChatBtn = el('sidebar-new-chat-btn');",
+        "// Delete session button on icon rail",
     )
 
     assert "sessionControlModule?.viewNewChatDraft?.();" in rail_handler
     assert "sessionControlModule?.viewNewChatDraft?.();" in mobile_handler
     assert "sessionControlModule?.viewNewChatDraft?.();" in brand_handler
+
+
+def test_sidebar_new_chat_option_removed():
+    source = APP_JS.read_text(encoding="utf-8")
+    index = Path("static/index.html").read_text(encoding="utf-8")
+
+    assert "sidebar-new-chat-btn" not in source
+    assert "sidebar-new-chat-btn" not in index
+    assert 'data-ui-key="sidebar-new-chat"' not in index
 
 
 def test_new_session_shortcut_opens_full_conversation_when_session_control_exists():

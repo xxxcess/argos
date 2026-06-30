@@ -55,10 +55,11 @@ def test_new_chat_paths_persist_and_clear_draft_marker():
 
     materialize_body = _slice(
         source,
-        "export async function materializePendingSession()",
+        "export async function materializePendingSession(options = {})",
         "export function hasPendingChat()",
     )
     assert "_clearNewChatDraft();" in materialize_body
+    assert "openInFullView: !!options.openInFullView" in materialize_body
 
 
 def test_select_session_applies_ai_default_chat_model_before_history_load():

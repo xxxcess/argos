@@ -1,9 +1,9 @@
-"""Durable anchor-first local depth/parallax video generation.
+"""Durable anchor-first video generation.
 
 A planner derives two production prompts from the user's intent. The first goes
 to the selected Image Default and produces a stable Gallery anchor. The second
-is used only to choose a subtle deterministic camera path for the local renderer.
-The raw intent never reaches image generation or rendering unchanged.
+is provider-specific motion guidance. The raw intent never reaches image
+generation, local rendering, or remote rendering unchanged.
 """
 from __future__ import annotations
 
@@ -17,12 +17,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text
 
 from core.database import Base, GalleryImage, SessionLocal, engine
-from services.depth_parallax_renderer import RenderCancelled, render_depth_parallax_video
-from services.video_runtime_setup import prepare_runtime
-from src.anchor_video_settings import VideoSettingsError, resolve_generation_request
+from services.depth_parallax_renderer import RenderCancelled
+from services.video_render_providers import (
+    LOCAL_DURATION_SECONDS,
+    LOCAL_FRAME_COUNT,
+    LOCAL_TARGET_FPS,
+    provider_for,
+    provider_status,
+)
+from src.anchor_video_settings import (
+    VIDEO_PROVIDER_DEPTH,
+    VIDEO_PROVIDER_REMOTE_LTX,
+    VideoSettingsError,
+    resolve_generation_request,
+)
 from src.constants import DATA_DIR, GENERATED_IMAGES_DIR
 
 logger = logging.getLogger(__name__)
@@ -63,9 +74,9 @@ class VideoMediaMetadata(Base):
     anchor_prompt = Column(Text, nullable=False)
     motion_prompt = Column(Text, nullable=False)
     planner_model = Column(String, nullable=True)
-    duration_seconds = Column(Integer, nullable=False, default=10)
-    fps = Column(Integer, nullable=False, default=24)
-    frame_count = Column(Integer, nullable=False, default=240)
+    duration_seconds = Column(Float, nullable=False, default=8.0)
+    fps = Column(Float, nullable=False, default=24.0)
+    frame_count = Column(Integer, nullable=False, default=192)
     seed = Column(Integer, nullable=False)
     generation_params = Column(JSON, nullable=False, default=dict)
 
@@ -95,16 +106,7 @@ def recover_interrupted_jobs() -> int:
 
 
 def runtime_status() -> dict[str, Any]:
-    prepared = prepare_runtime()
-    return {
-        **prepared,
-        "mode": "anchor_first_depth_parallax",
-        "width": 512,
-        "height": 512,
-        "duration_seconds": 10,
-        "fps": 24,
-        "audio": False,
-    }
+    return provider_status(VIDEO_PROVIDER_DEPTH)
 
 
 def _safe_error(error: Exception | str) -> str:
@@ -139,12 +141,20 @@ async def _plan(owner: str | None, source: str, kind: str, anchor_prompt: str | 
             "Do not mention motion, duration, audio, captions, or cuts. Do not copy the user's wording. Return only the prompt."
         )
         user = "Video intent to reinterpret:\n" + source
-    else:
+    elif kind == "local_motion":
         system = (
             "You are a cinematographer planning subtle depth-aware camera movement from an existing still image. "
             "Return one detailed continuous-shot instruction that preserves the anchor's subject, composition, environment, lighting, and identity. "
             "Use only a gentle pan, tilt, push-in, pull-back, or drift. Do not introduce new action, cuts, audio, text, or a new scene. "
             "Do not copy the user's wording. Return only the motion direction."
+        )
+        user = "Original intent:\n" + source + "\n\nAnchor art direction:\n" + (anchor_prompt or "")
+    else:
+        system = (
+            "You are an image-to-video motion director. Rewrite the user's request as one concise LTX image-to-video action prompt. "
+            "Preserve the anchor image identity, anatomy, composition, lighting, scale, markings, and environment. "
+            "Describe physical subject motion, environmental motion, and camera behavior in a single continuous shot. "
+            "Do not request cuts, captions, logos, audio, new characters, or a different scene. Do not copy the user's wording. Return only the motion prompt."
         )
         user = "Original intent:\n" + source + "\n\nAnchor art direction:\n" + (anchor_prompt or "")
     response = await llm_call_async(url, model, [{"role": "system", "content": system}, {"role": "user", "content": user}], headers=headers, timeout=120)
@@ -194,34 +204,67 @@ def _gallery_filename(image_id: str | None, owner: str | None) -> str:
         db.close()
 
 
+def _video_metadata(image_id: str | None, owner: str | None) -> dict[str, Any] | None:
+    if not image_id:
+        return None
+    db = SessionLocal()
+    try:
+        query = db.query(VideoMediaMetadata).filter(VideoMediaMetadata.gallery_image_id == image_id)
+        if owner:
+            query = query.join(GalleryImage, GalleryImage.id == VideoMediaMetadata.gallery_image_id).filter(GalleryImage.owner == owner)
+        meta = query.first()
+        if not meta:
+            return None
+        params = dict(meta.generation_params or {})
+        return {
+            "duration_seconds": float(meta.duration_seconds or 0.0),
+            "fps": float(meta.fps or 0.0),
+            "frame_count": int(meta.frame_count or 0),
+            "seed": int(meta.seed or 0),
+            "generation_params": params,
+        }
+    finally:
+        db.close()
+
+
+def _display_duration(provider_id: str, metadata: dict[str, Any] | None) -> str:
+    if provider_id == VIDEO_PROVIDER_REMOTE_LTX:
+        fps = metadata.get("fps") if metadata else 30
+        return f"About 8 seconds · Remote LTX · {int(round(float(fps or 30)))} FPS"
+    return "8 seconds · Local Motion · 24 FPS"
+
+
 class AnchorVideoGenerationService:
     def __init__(self) -> None:
-        self._task: asyncio.Task | None = None
+        self._tasks: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
         await asyncio.to_thread(ensure_video_tables)
         await asyncio.to_thread(recover_interrupted_jobs)
-        if self._task and not self._task.done():
-            return
         self._stop.clear()
-        self._task = asyncio.create_task(self._worker(), name="depth-parallax-video-worker")
+        for provider_id in (VIDEO_PROVIDER_DEPTH, VIDEO_PROVIDER_REMOTE_LTX):
+            task = self._tasks.get(provider_id)
+            if task and not task.done():
+                continue
+            self._tasks[provider_id] = asyncio.create_task(
+                self._worker(provider_id),
+                name=f"video-{provider_id}-worker",
+            )
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task:
+        for task in list(self._tasks.values()):
             try:
-                await asyncio.wait_for(self._task, timeout=8)
+                await asyncio.wait_for(task, timeout=8)
             except asyncio.TimeoutError:
-                self._task.cancel()
+                task.cancel()
 
     def create_job(self, owner: str | None, body: dict[str, Any], *, allow_disabled: bool = False) -> VideoGenerationJob:
         config = resolve_generation_request(owner, body)
         if not allow_disabled and not config["video_gen_enabled"]:
             raise ValueError("Video generation is disabled in AI Defaults.")
-        status = runtime_status()
-        if not status.get("available"):
-            raise RuntimeError(status.get("reason") or "The local depth-video engine is unavailable.")
+        provider_for(config["video_provider"]).validate_request(config)
         from src.image_generation_defaults import resolve_configured_image_endpoint
         if resolve_configured_image_endpoint(owner) is None:
             raise ValueError("Configure and enable an Image Default before generating video anchors.")
@@ -278,14 +321,21 @@ class AnchorVideoGenerationService:
     def serialize(self, job: VideoGenerationJob) -> dict[str, Any]:
         anchor_filename = _gallery_filename(job.anchor_gallery_image_id, job.owner)
         video_filename = _gallery_filename(job.gallery_image_id, job.owner)
+        config = dict(job.request_config or {})
+        provider_id = str(config.get("video_provider") or VIDEO_PROVIDER_DEPTH)
+        metadata = _video_metadata(job.gallery_image_id, job.owner)
         return {
             "job_id": job.id,
+            "provider": provider_id,
+            "provider_label": "Remote LTX" if provider_id == VIDEO_PROVIDER_REMOTE_LTX else "Local Motion",
             "status": job.status,
             "stage": job.stage,
             "error": job.error_summary,
             "anchor_ready": bool(job.anchor_gallery_image_id),
             "anchor_url": f"/api/generated-image/{anchor_filename}" if anchor_filename else None,
             "video_url": f"/api/generated-image/{video_filename}" if video_filename else None,
+            "video_metadata": metadata,
+            "display_duration": _display_duration(provider_id, metadata),
             "anchor_prompt": job.anchor_prompt,
             "motion_prompt": job.motion_prompt,
             "planner_model": job.planner_model,
@@ -312,21 +362,24 @@ class AnchorVideoGenerationService:
         finally:
             db.close()
 
-    def _claim(self) -> VideoGenerationJob | None:
+    def _claim(self, provider_id: str) -> VideoGenerationJob | None:
         db = SessionLocal()
         try:
-            job = db.query(VideoGenerationJob).filter(VideoGenerationJob.status == "queued", VideoGenerationJob.cancellation_requested == False).order_by(VideoGenerationJob.created_at.asc()).first()  # noqa: E712
-            if not job:
-                return None
-            job.status, job.stage, job.started_at = "running", "planning_anchor", _now()
-            db.commit(); db.refresh(job); db.expunge(job)
-            return job
+            jobs = db.query(VideoGenerationJob).filter(VideoGenerationJob.status == "queued", VideoGenerationJob.cancellation_requested == False).order_by(VideoGenerationJob.created_at.asc()).all()  # noqa: E712
+            for job in jobs:
+                config = dict(job.request_config or {})
+                if str(config.get("video_provider") or VIDEO_PROVIDER_DEPTH) != provider_id:
+                    continue
+                job.status, job.stage, job.started_at = "running", "planning_anchor", _now()
+                db.commit(); db.refresh(job); db.expunge(job)
+                return job
+            return None
         finally:
             db.close()
 
-    async def _worker(self) -> None:
+    async def _worker(self, provider_id: str) -> None:
         while not self._stop.is_set():
-            job = await asyncio.to_thread(self._claim)
+            job = await asyncio.to_thread(self._claim, provider_id)
             if job is None:
                 await asyncio.sleep(0.7)
                 continue
@@ -357,35 +410,33 @@ class AnchorVideoGenerationService:
             if self._cancelled(job.id):
                 self._update(job.id, status="cancelled", stage="cancelled", finished_at=_now())
                 return
-            motion_prompt, motion_model = await _plan(job.owner, job.source_intent, "motion", anchor_prompt)
-            self._update(job.id, stage="rendering_depth_parallax", motion_prompt=motion_prompt, planner_model=motion_model)
-            prepared = prepare_runtime()
-            if not prepared.get("available"):
-                raise RuntimeError(prepared.get("reason") or "The local depth-video engine is unavailable.")
+            config = dict(job.request_config or {})
+            provider_id = str(config.get("video_provider") or VIDEO_PROVIDER_DEPTH)
+            provider = provider_for(provider_id)
+            motion_kind = "remote_motion" if provider_id == VIDEO_PROVIDER_REMOTE_LTX else "local_motion"
+            planning_stage = "planning_remote_motion" if provider_id == VIDEO_PROVIDER_REMOTE_LTX else "planning_local_motion"
+            self._update(job.id, stage=planning_stage)
+            motion_prompt, motion_model = await _plan(job.owner, job.source_intent, motion_kind, anchor_prompt)
+            self._update(job.id, motion_prompt=motion_prompt, planner_model=motion_model)
             anchor_path = await asyncio.to_thread(_anchor_file, anchor_id, job.owner, work)
-            draft = work / "video.mp4"
-            await asyncio.to_thread(
-                render_depth_parallax_video,
+            rendered = await asyncio.to_thread(
+                provider.render,
                 anchor_path=anchor_path,
-                output_path=draft,
-                model_path=Path(str(prepared["model_path"])),
-                ffmpeg_path=str(prepared["ffmpeg"]),
                 motion_prompt=motion_prompt,
-                seed=int(job.request_config["video_seed"]),
-                source_fps=int(job.request_config["video_source_fps"]),
-                duration_seconds=int(job.request_config["video_duration_seconds"]),
-                target_fps=int(job.request_config["video_fps"]),
+                seed=int(config["video_seed"]),
+                progress_callback=lambda stage: self._update(job.id, stage=stage),
                 cancelled=lambda: self._cancelled(job.id),
+                work_dir=work,
             )
             if self._cancelled(job.id):
                 self._update(job.id, status="cancelled", stage="cancelled", finished_at=_now())
                 return
             self._update(job.id, stage="saving_gallery")
-            digest = hashlib.sha256(draft.read_bytes()).hexdigest()[:24]
+            digest = hashlib.sha256(rendered.path.read_bytes()).hexdigest()[:24]
             filename = f"{digest}.mp4"
             target = Path(GENERATED_IMAGES_DIR) / filename
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(draft, target)
+            shutil.copy2(rendered.path, target)
             gallery_id = str(uuid.uuid4())
             db = SessionLocal()
             try:
@@ -393,11 +444,13 @@ class AnchorVideoGenerationService:
                     id=gallery_id,
                     filename=filename,
                     prompt=motion_prompt,
-                    model="local-depth-parallax:Depth-Anything-V2-Small",
+                    model=rendered.model,
                     size="512x512",
-                    quality="depth-parallax",
+                    quality=rendered.quality,
                     session_id=job.session_id,
                     owner=job.owner,
+                    file_hash=hashlib.sha256(target.read_bytes()).hexdigest(),
+                    file_size=target.stat().st_size,
                 ))
                 db.add(VideoMediaMetadata(
                     id=str(uuid.uuid4()),
@@ -406,11 +459,15 @@ class AnchorVideoGenerationService:
                     anchor_prompt=anchor_prompt,
                     motion_prompt=motion_prompt,
                     planner_model=motion_model,
-                    duration_seconds=10,
-                    fps=24,
-                    frame_count=240,
-                    seed=int(job.request_config["video_seed"]),
-                    generation_params={"provider": "depth_parallax", "source_fps": 6, "depth_model": "Depth-Anything-V2-Small"},
+                    duration_seconds=float(rendered.actual_duration_seconds),
+                    fps=float(rendered.actual_fps),
+                    frame_count=int(rendered.actual_frame_count),
+                    seed=int(config["video_seed"]),
+                    generation_params={
+                        **rendered.generation_params,
+                        "provider": provider_id,
+                        "requested_duration_seconds": float(rendered.requested_duration_seconds),
+                    },
                 ))
                 db.commit()
             finally:
@@ -419,7 +476,7 @@ class AnchorVideoGenerationService:
         except RenderCancelled:
             self._update(job.id, status="cancelled", stage="cancelled", finished_at=_now())
         except Exception as exc:
-            logger.exception("Depth-parallax video job %s failed", job.id)
+            logger.exception("Video generation job %s failed", job.id)
             self._update(job.id, status="failed", stage="failed", error_summary=_safe_error(exc), finished_at=_now())
         finally:
             shutil.rmtree(work, ignore_errors=True)

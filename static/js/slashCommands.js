@@ -1347,7 +1347,7 @@ async function _cmdOpen(args, ctx) {
     }
     if (target === 'settings' || target === 'setting' || target === 'config') {
       if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open();
-      else clickFirst('user-bar-settings', 'rail-settings');
+      else clickFirst('workspace-account-btn', 'rail-settings');
       return true;
     }
     const targets = {
@@ -1415,7 +1415,7 @@ async function _cmdToolPanel(tool, args, ctx) {
   }
   if (target === 'settings') {
     if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open(rest || undefined);
-    else document.getElementById('user-bar-settings')?.click();
+    else document.getElementById('workspace-account-btn')?.click();
     return true;
   }
   return _cmdOpen([target], ctx);
@@ -1429,8 +1429,8 @@ async function _cmdSettings(args, ctx) {
     if (settingsModule && typeof settingsModule.open === 'function') {
       settingsModule.open(tab);
     } else {
-      // Fallback: click the cog directly if the module isn't loaded.
-      const cog = document.getElementById('user-bar-settings');
+      // Fallback: open the account menu if the settings module isn't loaded.
+      const cog = document.getElementById('workspace-account-btn');
       if (cog) cog.click();
     }
   } catch (e) {
@@ -2492,7 +2492,7 @@ async function _cmdDemo(args, ctx) {
   const sidebar = document.getElementById('sidebar');
 
   const steps = [
-    { sel: '#sidebar-new-chat-btn', text: 'Start a new chat here. <b>Click it.</b> You can do it!', mode: 'click',
+    { sel: '#workspace-new-tab', text: 'Start a new chat here. <b>Click it.</b> You can do it!', mode: 'click',
       before() { if (sidebar?.classList.contains('hidden')) sidebar.classList.remove('hidden'); } },
     { sel: '#model-picker-btn',   text: 'Pick your LLM, Local or API.', advanceOnClick: true },
     { sel: '#mode-agent-btn',     text: '<b>Agent mode</b> gives Odysseus more control of the app when your model supports tools: create a theme, download a model, make a daily task, organize things, and more.', mode: 'click' },
@@ -3321,9 +3321,13 @@ async function _cmdTourSettings(args, ctx) {
   // Open the settings modal.
   let modal = document.getElementById('settings-modal');
   if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('rail-settings')
-      || document.getElementById('tool-settings-btn');
-    if (opener) opener.click();
+    if (settingsModule && typeof settingsModule.open === 'function') {
+      settingsModule.open();
+    } else {
+      const opener = document.getElementById('rail-settings')
+        || document.getElementById('tool-settings-btn');
+      if (opener) opener.click();
+    }
     for (let i = 0; i < 25; i++) {
       await new Promise(r => setTimeout(r, 80));
       modal = document.getElementById('settings-modal');

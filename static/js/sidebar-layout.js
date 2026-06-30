@@ -92,10 +92,9 @@ export function initSidebarLayout(Storage, opts) {
     });
   }
 
-  // New chat buttons — same as clicking brand
+  // New chat button — same as clicking brand
   const chatNewBtn = document.getElementById('chat-new-btn');
-  const sidebarNewChat = document.getElementById('sidebar-new-chat-btn');
-  [chatNewBtn, sidebarNewChat].forEach(btn => {
+  [chatNewBtn].forEach(btn => {
     if (btn) btn.addEventListener('click', () => {
       const brandBtn = document.getElementById('sidebar-brand-btn');
       if (brandBtn) brandBtn.click();
