@@ -119,7 +119,7 @@ def prepare_runtime() -> dict[str, Any]:
         "model_repo": _MODEL_REPO,
         "model_path": str(model_path),
         "ffmpeg": ffmpeg,
-        "profile": "512x512 · 10 seconds · 24 FPS · muted",
+        "profile": "512x512 · 8 seconds · 24 FPS · muted",
     }
 
 

@@ -25,7 +25,7 @@ def test_media_settings_has_explicit_generate_video_row():
     assert "name: 'Generate video'" in _ADMIN
     assert "cat: 'Media'" in _ADMIN
     assert (
-        "Creates an image anchor through the selected Image Default, then generates a local depth-parallax video."
+        "Creates an image anchor through the selected Image Default, then uses the saved Video Generation provider."
         in _ADMIN
     )
 
@@ -45,6 +45,24 @@ def test_video_settings_button_uses_stable_settings_tab_and_card_targets():
     assert "settings.js" in _MEDIA_RENDERER_TEXT
     assert 'data-settings-tab="${tab}"' in _MEDIA_RENDERER_TEXT
     assert "local-depth-video-card" in _MEDIA_RENDERER_TEXT
+    assert "video-provider-section" in _MEDIA_RENDERER_TEXT
+
+
+def test_video_settings_has_provider_selector_and_remote_consent_gate():
+    assert "video-provider-select" in _VIDEO
+    assert "Local Motion - private" in _VIDEO
+    assert "Remote LTX Video - public shared GPU" in _VIDEO
+    assert "remote-ltx-consent" in _VIDEO
+    assert "REMOTE_LTX_CONSENT_VERSION" in _VIDEO
+    assert "public Lightricks LTX Video Hugging Face Space" in _VIDEO
+    assert "Install local depth engine" in _VIDEO
+    assert "Check Remote LTX availability" in _VIDEO
+
+
+def test_remote_provider_pending_selection_does_not_revert_before_consent():
+    assert "providerSelect.value = 'depth_parallax';" not in _VIDEO
+    assert "Acknowledge public Remote LTX processing before selecting Remote LTX." in _VIDEO
+    assert "updates.video_provider = 'remote_ltx'" in _VIDEO
 
 
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")

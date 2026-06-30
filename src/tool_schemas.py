@@ -462,16 +462,17 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "generate_video",
             "description": (
-                "Create a local silent 10-second depth-aware parallax video. Argos first "
-                "creates a Gallery image anchor through the user's Image Default, then "
-                "renders subtle local camera motion. Do not call generate_image first."
+                "Create a short silent video using the user's saved Video Generation provider. "
+                "Argos first creates a Gallery image anchor through the user's Image Default, "
+                "then renders either private Local Motion or consent-gated Remote LTX motion. "
+                "Do not call generate_image first."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": "High-level video intent used to plan the image anchor and camera motion.",
+                        "description": "High-level video intent used to plan the image anchor and provider-specific motion.",
                     },
                     "seed": {
                         "type": "integer",

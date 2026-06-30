@@ -19,20 +19,30 @@ function videoJobId(payload) {
 function normalizedJob(payload) {
   return {
     job_id: videoJobId(payload),
+    provider: String(payload?.provider || payload?.video_provider || 'depth_parallax'),
     status: String(payload?.video_status || payload?.status || 'queued'),
     stage: String(payload?.video_stage || payload?.stage || 'planning_anchor'),
     error: payload?.error || '',
     anchor_url: payload?.anchor_url || '',
     video_url: payload?.video_url || '',
+    display_duration: payload?.display_duration || '',
   };
 }
 
 function stageText(job) {
-  if (job.status === 'succeeded') return 'Video ready';
+  if (job.status === 'succeeded') return job.display_duration || (job.provider === 'remote_ltx' ? 'About 8 seconds - Remote LTX - 30 FPS' : '8 seconds - Local Motion - 24 FPS');
   if (job.status === 'failed') return job.error || 'Video generation failed';
   if (job.status === 'cancelled') return 'Video generation cancelled';
   if (job.status === 'interrupted') return 'Video generation was interrupted';
-  if (job.stage === 'anchor_ready') return 'Animation anchor generated - now creating depth-aware motion.';
+  if (job.stage === 'generating_anchor') return 'Creating image anchor';
+  if (job.stage === 'anchor_ready') return 'Animation anchor generated';
+  if (job.stage === 'planning_remote_motion') return 'Preparing motion direction';
+  if (job.stage === 'submitting_remote_ltx') return 'Submitting to public LTX queue';
+  if (job.stage === 'waiting_remote_queue') return 'Waiting for shared GPU';
+  if (job.stage === 'generating_remote_ltx') return 'Generating video';
+  if (job.stage === 'downloading_remote_video') return 'Downloading final video';
+  if (job.stage === 'validating_remote_video') return 'Validating final video';
+  if (job.stage === 'planning_local_motion') return 'Preparing local camera motion';
   if (job.stage === 'rendering_depth_parallax') return 'Rendering depth-aware motion';
   return 'Preparing image anchor';
 }
@@ -65,6 +75,11 @@ function scrollToVideoSettingsCard() {
     const card = document.getElementById('local-depth-video-card');
     if (card && typeof card.scrollIntoView === 'function') {
       card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const providerSection = document.getElementById('video-provider-section');
+      if (providerSection && typeof providerSection.focus === 'function') {
+        providerSection.setAttribute('tabindex', '-1');
+        providerSection.focus({ preventScroll: true });
+      }
     }
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(scroll);
@@ -130,6 +145,8 @@ export function updateVideoJobCard(card, payload) {
       ? 'Animation anchor generated before rendering stopped.'
       : job.status === 'succeeded'
         ? 'Animation anchor'
+      : job.provider === 'remote_ltx'
+        ? 'Animation anchor generated - preparing remote motion.'
       : 'Animation anchor generated - now creating depth-aware motion.';
     const image = document.createElement('img');
     image.src = anchorSrc;

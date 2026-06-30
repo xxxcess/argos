@@ -21,7 +21,7 @@ class _FakeVideoService:
 
     def create_job(self, owner, body, *, allow_disabled=False):
         self.created.append((owner, body, allow_disabled))
-        return SimpleNamespace(id="job-123", status="queued", stage="queued")
+        return SimpleNamespace(id="job-123", status="queued", stage="queued", request_config={"video_provider": "remote_ltx"})
 
 
 def _schema_names(disabled=()):
@@ -108,5 +108,6 @@ def test_generate_video_dispatch_creates_one_durable_job(monkeypatch):
     assert result["exit_code"] == 0
     assert result["kind"] == "video_generation"
     assert result["job_id"] == "job-123"
+    assert result["provider"] == "remote_ltx"
     assert result["stage"] == "planning_anchor"
     assert result["terminal_media_job"] is True

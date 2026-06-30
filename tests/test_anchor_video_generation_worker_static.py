@@ -18,3 +18,9 @@ def test_video_gallery_filename_matches_generated_media_route():
     assert 'filename = f"{digest}.mp4"' in _SERVICE
     assert "depth-parallax-{digest}.mp4" not in _SERVICE
     assert GENERATED_IMAGE_RE.fullmatch("72fe6fc23594b0ed0d8ed94d.mp4")
+
+
+def test_video_service_uses_separate_provider_workers():
+    assert "VIDEO_PROVIDER_DEPTH, VIDEO_PROVIDER_REMOTE_LTX" in _SERVICE
+    assert "self._worker(provider_id)" in _SERVICE
+    assert "def _claim(self, provider_id: str)" in _SERVICE

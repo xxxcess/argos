@@ -122,11 +122,11 @@ def render_depth_parallax_video(
     motion_prompt: str,
     seed: int,
     source_fps: int = 6,
-    duration_seconds: int = 10,
+    duration_seconds: int = 8,
     target_fps: int = 24,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Create a fixed 10-second, muted 512px MP4 using local resources only."""
+    """Create a fixed 8-second, muted 512px MP4 using local resources only."""
     import numpy as np
     from PIL import Image
 
