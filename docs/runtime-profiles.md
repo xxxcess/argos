@@ -49,3 +49,31 @@ Run the current checkout normally:
 ```
 
 The launcher exports `ARGOS_DATA_DIR` and also sets `ODYSSEUS_DATA_DIR` to the same profile-specific path as a temporary compatibility alias for existing application modules.
+
+## Application runtime gate
+
+Backend product behavior is selected by `ARGOS_RUNTIME_ID`, not by branch name.
+
+- `ARGOS_RUNTIME_ID=nightly` keeps the normal Odysseus workspace behavior.
+- `ARGOS_RUNTIME_ID=argos-venture` enables Venture Quest APIs, Venture capabilities, invitation-based Shipmate recruitment, Captain approval for Artifact Drafts, and Quest-local Voyage Memory.
+
+Changing Git branches changes code only. It must not copy, migrate, merge, adopt, or reuse another runtime's database, auth state, upload directory, Chroma data, source checkpoints, memory collections, documents, email configuration, or workspace data.
+
+## Venture memory storage
+
+Argos Venture does not use Nightly's user/global memory model. Every Quest has an isolated Voyage Memory partition:
+
+```text
+<ARGOS_DATA_DIR>/
+  chroma/
+    quest-memory/
+      <session_id>/
+```
+
+The logical collection name is:
+
+```text
+quest-memory:<session_id>
+```
+
+The runtime ID and Quest ID are part of the storage contract. A Venture process must never query one Quest's memory collection while serving another Quest, even if the Captain, Shipmate, email integration, or source scope is identical.

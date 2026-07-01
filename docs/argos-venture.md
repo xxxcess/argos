@@ -18,7 +18,13 @@ Unknown → observed evidence → emerging insight → reviewed artifact → sha
 
 `argos-venture` is a separate product line for source-grounded, collaborative exploration. It uses the same runtime-isolation rules as the broader Argos project, but has its own product language, authorization model, Quest workflows, and memory boundary.
 
-Do not add Venture terminology, Shipmate restrictions, Quest Source workflows, or Captain publication approval to `nightly`.
+Venture behavior is enabled only when the process runs with:
+
+```bash
+ARGOS_RUNTIME_ID=argos-venture
+```
+
+Do not infer product identity from the checked-out Git branch. Do not add Venture terminology, Shipmate restrictions, Quest Source workflows, Quest-local memory, or Captain publication approval to `nightly`.
 
 ## Venture language
 
@@ -206,13 +212,32 @@ or Dynamic source update
 
 The process must batch related changes, apply evidence thresholds and novelty checks, and update or supersede related drafts rather than creating notification noise.
 
-## Quest-local memory principle
+## Quest-local Voyage Memory
 
 Venture memory serves one Quest at a time. It is not a Captain-centered cross-chat memory system.
 
 Each Quest receives an isolated Voyage Memory partition that recalls the Current Bearing, evidence, open questions, decisions, source state, artifact links, and other durable exploration context for that Quest only. Memory from one Quest must never be retrieved, injected, searched, or silently reused in another Quest, even when the Captain, Shipmate, or source connection is the same.
 
-Detailed memory design belongs in the Venture implementation plan. The core boundary is non-negotiable: no cross-Quest recall.
+Voyage Memory entries always carry a non-null Quest ID. There is no global or nullable Venture memory scope, and inherited Nightly user-memory endpoints are unavailable in Venture.
+
+Visibility is explicit:
+
+```text
+captain_private
+quest_shared
+```
+
+Captains may see both visibility classes for their own Quests. Shipmates may see only `quest_shared` memory in accepted Quests. Pending invitees and non-members receive non-enumerating `404` responses.
+
+Vector storage is isolated per Quest using the convention:
+
+```text
+runtime:argos-venture
+collection:quest-memory:<session_id>
+path:<ARGOS_DATA_DIR>/chroma/quest-memory/<session_id>/
+```
+
+The `session_id` is stored in metadata and validated on every read. A Quest collection must never be mounted, queried, embedded, summarized, or copied into another Quest path.
 
 ## Design principles
 

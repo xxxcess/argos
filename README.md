@@ -17,7 +17,7 @@ Unknown → observed evidence → emerging insight → reviewed artifact → sha
 
 Read the full [Argos Venture product principles](docs/argos-venture.md).
 
-> **Branch status:** `argos-venture` is the design and implementation line for this product model. `nightly` remains the normal Odysseus workspace product line. Venture-specific roles, source workflows, artifact approval, and Quest-local memory must not be added to `nightly`.
+> **Branch status:** `argos-venture` is the design and implementation line for this product model. Runtime behavior is gated by `ARGOS_RUNTIME_ID=argos-venture`, not by Git branch detection. `nightly` remains the normal Odysseus workspace product line. Venture-specific roles, source workflows, artifact approval, and Quest-local memory must not be added to `nightly`.
 
 ## The Venture model
 
