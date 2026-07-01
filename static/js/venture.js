@@ -3,6 +3,7 @@
 const API_BASE = window.API_BASE || '';
 let caps = null;
 let currentQuestId = null;
+const questSessionIds = new Set();
 
 const captainOnlySelectors = [
   '#workspace-new-tab', '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
@@ -37,6 +38,21 @@ async function loadCapabilities() {
   } catch (_) {
     return null;
   }
+}
+
+function publishQuestRegistry() {
+  window.argosVentureIsQuestSession = sessionId => questSessionIds.has(String(sessionId || ''));
+  document.dispatchEvent(new CustomEvent('argos-venture:quest-registry-updated'));
+}
+
+async function refreshQuestRegistry() {
+  if (!caps?.is_venture) return;
+  const data = await getJson('/api/quests');
+  questSessionIds.clear();
+  (data?.quests || []).forEach(quest => {
+    if (quest?.id) questSessionIds.add(String(quest.id));
+  });
+  publishQuestRegistry();
 }
 
 function installStyles() {
@@ -496,6 +512,8 @@ async function createQuestFromWizard(modal, status, emailAccountsById) {
     }
   }
   currentQuestId = questId;
+  questSessionIds.add(String(questId));
+  publishQuestRegistry();
   history.replaceState(null, '', `#${questId}`);
   await window.sessionModule?.loadSessions?.();
   await window.sessionModule?.selectSession?.(questId);
@@ -633,6 +651,7 @@ async function initVenture() {
   document.body.classList.add('argos-venture', caps.role === 'captain' ? 'venture-captain' : 'venture-shipmate');
   installStyles();
   applyTerminology();
+  await refreshQuestRegistry();
   hideVentureNewChatShortcuts();
   installShipmateCaptureGuards();
   hardDisableShipmateControls();

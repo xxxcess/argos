@@ -97,8 +97,18 @@ function _setShellClasses() {
   document.body.classList.toggle('workspace-session-active', !isHome);
 }
 
-function _iconFor(kind) {
+function _isQuestTab(tab) {
+  if (!tab || tab.kind !== 'session') return false;
+  try {
+    return !!window.argosVentureIsQuestSession?.(tab.sessionId);
+  } catch (_) {
+    return false;
+  }
+}
+
+function _iconFor(kind, tab = null) {
   if (kind === 'home') return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/></svg>';
+  if (_isQuestTab(tab)) return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19 11.5 3l2.2 7.5L21 12l-6.9 2.2L11.5 21l-2-6.8z"/><path d="M11.5 3v18"/></svg>';
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 }
 
@@ -117,7 +127,7 @@ function _renderTabs() {
     btn.setAttribute('aria-selected', String(_state.selected === tabId));
     btn.setAttribute('tabindex', _state.selected === tabId ? '0' : '-1');
     btn.innerHTML = `
-      <span class="workspace-tab-icon">${_iconFor(tab.kind)}</span>
+      <span class="workspace-tab-icon">${_iconFor(tab.kind, tab)}</span>
       <span class="workspace-tab-title"></span>
       ${tab.kind === 'session' ? '<button type="button" class="workspace-tab-menu-btn" aria-label="Chat controls" title="Chat controls"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></button>' : ''}
       <span class="workspace-tab-state" aria-hidden="true"></span>
@@ -651,6 +661,9 @@ function _wireSessionEvents() {
   document.addEventListener('odysseus:session-runtime-state', e => {
     const detail = e.detail || {};
     _setSessionRuntimeState(detail.sessionId, detail.state);
+  });
+  document.addEventListener('argos-venture:quest-registry-updated', () => {
+    _renderTabs();
   });
   document.addEventListener('odysseus:request-session-tab-rename', e => {
     const detail = e.detail || {};
