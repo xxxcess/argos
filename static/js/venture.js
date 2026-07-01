@@ -766,6 +766,10 @@ async function initVenture() {
   await renderRightRail();
   window.addEventListener('hashchange', () => loadQuest(selectedQuestId()));
   window.addEventListener('odysseus:session-selected', e => loadQuest(e.detail?.id || selectedQuestId()));
+  window.addEventListener('argos-venture:quest-membership-updated', async e => {
+    await refreshQuestRegistry();
+    await loadQuest(e.detail?.questId || selectedQuestId());
+  });
   document.addEventListener('odysseus:workspace-tab-activated', e => {
     if (e.detail?.kind === 'session') loadQuest(e.detail?.sessionId || selectedQuestId());
     else renderRightRail();

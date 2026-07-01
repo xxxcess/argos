@@ -4,14 +4,16 @@ import html
 import json
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from fastapi import APIRouter, Form, HTTPException, Response, Request
 import logging
 
 from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
-from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive
+from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, QuestBearing, QuestMember, utcnow_naive
 from src.auth_helpers import effective_user, _auth_disabled, owner_filter
+from src.runtime_profile import is_venture_runtime
 from src.session_actions import is_session_recently_active
 
 
@@ -90,6 +92,27 @@ def _reject_compact_during_active_run(session_id: str) -> None:
     from src import agent_runs
     if agent_runs.is_active(session_id):
         raise HTTPException(409, "Session has an active run; try compacting after it finishes")
+
+
+def _venture_visible_session_ids(db, user: str | None) -> set[str]:
+    """Return Venture Quest sessions visible by ownership or accepted membership."""
+    if not user or not is_venture_runtime():
+        return set()
+    owned = {
+        r[0]
+        for r in db.query(DbSession.id)
+        .join(QuestBearing, QuestBearing.session_id == DbSession.id)
+        .filter(DbSession.owner == user)
+        .all()
+    }
+    joined = {
+        r[0]
+        for r in db.query(QuestMember.session_id)
+        .join(QuestBearing, QuestBearing.session_id == QuestMember.session_id)
+        .filter(QuestMember.username == user)
+        .all()
+    }
+    return owned | joined
 
 
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
@@ -246,10 +269,27 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
                 _purge_db.close()
         except Exception:
             pass
-        user_sessions = session_manager.get_sessions_for_user(user)
+        user_sessions = dict(session_manager.get_sessions_for_user(user))
         # Fetch folder info from DB for each session
         db = SessionLocal()
         try:
+            venture_visible_ids = _venture_visible_session_ids(db, user)
+            if venture_visible_ids:
+                all_loaded_sessions = getattr(session_manager, "sessions", {}) or {}
+                for sid in venture_visible_ids:
+                    if sid not in user_sessions and sid in all_loaded_sessions:
+                        user_sessions[sid] = all_loaded_sessions[sid]
+                missing_visible_ids = venture_visible_ids - set(user_sessions.keys())
+                if missing_visible_ids:
+                    for row in db.query(DbSession).filter(DbSession.id.in_(missing_visible_ids)).all():
+                        user_sessions[row.id] = SimpleNamespace(
+                            id=row.id,
+                            name=row.name,
+                            model=row.model,
+                            endpoint_url=row.endpoint_url,
+                            rag=False,
+                            archived=bool(row.archived),
+                        )
             folder_map = {}
             token_map = {}
             important_map = {}
@@ -259,7 +299,10 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             mode_map = {}
             msg_count_map = {}
             q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count).filter(DbSession.archived == False)
-            q = owner_filter(q, DbSession, user)
+            if venture_visible_ids:
+                q = q.filter(DbSession.id.in_(set(user_sessions.keys()) | venture_visible_ids))
+            else:
+                q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
                 folder_map[row.id] = row.folder

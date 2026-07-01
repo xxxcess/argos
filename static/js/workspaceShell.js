@@ -598,6 +598,15 @@ async function _runVentureNotificationAction(row, actionId, item) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || 'Action failed');
   }
+  const data = await res.json().catch(() => ({}));
+  if (row.resource_type === 'quest_invitation' && actionId === 'accept') {
+    if (window.sessionModule?.loadSessions) {
+      await window.sessionModule.loadSessions().catch(() => {});
+    }
+    window.dispatchEvent(new CustomEvent('argos-venture:quest-membership-updated', {
+      detail: { questId: data?.quest_id || row.resource_id }
+    }));
+  }
   const fb = item?.querySelector('.workspace-notification-feedback');
   if (fb) fb.textContent = 'Saved.';
 }

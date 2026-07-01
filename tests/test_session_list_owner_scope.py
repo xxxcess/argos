@@ -16,7 +16,7 @@ from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import ChatMessage as DbMessage
-from core.database import Session as DbSession
+from core.database import QuestBearing, QuestMember, Session as DbSession
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
@@ -74,6 +74,47 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     returned_ids = {s["id"] for s in result}
     assert alice_id in returned_ids
     assert bob_id not in returned_ids
+
+
+def test_venture_session_list_includes_accepted_joined_quests_for_shipmate(monkeypatch):
+    import routes.session_routes as sr
+    from unittest.mock import MagicMock
+
+    _stub_multipart_if_missing(monkeypatch)
+    monkeypatch.setenv("ARGOS_RUNTIME_ID", "argos-venture")
+    monkeypatch.setattr(sr, "SessionLocal", _TS)
+    monkeypatch.setattr(sr, "effective_user", lambda request: "mara")
+
+    quest_id = str(uuid.uuid4())
+    other_id = str(uuid.uuid4())
+    db = _TS()
+    try:
+        db.query(QuestMember).delete()
+        db.query(QuestBearing).delete()
+        db.query(DbSession).delete()
+        db.add(DbSession(id=quest_id, owner="ada", name="Atlas Review",
+                         endpoint_url="http://localhost", model="gpt-4", archived=False))
+        db.add(QuestBearing(session_id=quest_id, title="Atlas Review", exploration_goal="Review evidence"))
+        db.add(QuestMember(id=str(uuid.uuid4()), session_id=quest_id, username="mara",
+                           role="shipmate", recruited_by="ada"))
+        db.add(DbSession(id=other_id, owner="ada", name="Ada private chat",
+                         endpoint_url="http://localhost", model="gpt-4", archived=False))
+        db.commit()
+    finally:
+        db.close()
+
+    sm = MagicMock()
+    sm.get_sessions_for_user.return_value = {}
+    sm.sessions = {}
+    router = sr.setup_session_routes(sm, {})
+    endpoint = next(r.endpoint for r in router.routes
+                    if getattr(r, "path", "") == "/api/sessions"
+                    and "GET" in getattr(r, "methods", set()))
+
+    result = endpoint(request=MagicMock())
+    returned_ids = {s["id"] for s in result}
+    assert quest_id in returned_ids
+    assert other_id not in returned_ids
 
 
 def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(monkeypatch):
