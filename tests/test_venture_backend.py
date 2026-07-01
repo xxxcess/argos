@@ -104,6 +104,21 @@ def test_quest_creation_requires_primary_source_and_backfills_captain(monkeypatc
         db.close()
 
 
+def test_regular_venture_chat_is_not_listed_or_read_as_quest(monkeypatch):
+    client, _SessionLocal, _app, sm, *_ = _client(monkeypatch)
+    sm.create_session(
+        session_id="regular-chat",
+        name="Regular Chat",
+        endpoint_url="http://localhost:11434/v1",
+        model="gpt-test",
+        owner="ada",
+    )
+
+    listed = client.get("/api/quests").json()["quests"]
+    assert all(row["id"] != "regular-chat" for row in listed)
+    assert client.get("/api/quests/regular-chat").status_code == 404
+
+
 def test_pending_invitation_grants_no_access_and_accept_is_idempotent(monkeypatch):
     client, SessionLocal, app, *_ = _client(monkeypatch)
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]

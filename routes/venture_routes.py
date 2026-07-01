@@ -447,6 +447,8 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             row = db.query(DbSession).filter(DbSession.id == quest_id).first()
             if not row:
                 raise HTTPException(404, "Quest not found")
+            if not db.query(QuestBearing).filter(QuestBearing.session_id == quest_id).first():
+                raise HTTPException(404, "Quest not found")
             return {"quest": _session_to_quest(row, get_quest_role(user, quest_id))}
         finally:
             db.close()

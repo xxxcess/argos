@@ -213,7 +213,7 @@ async function renderRightRail() {
   installStyles();
   const qid = selectedQuestId();
   let rail = document.getElementById('venture-right-rail');
-  if (!qid) {
+  if (!qid || !questSessionIds.has(String(qid))) {
     rail?.remove();
     return;
   }

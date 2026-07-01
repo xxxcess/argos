@@ -15,6 +15,7 @@ from fastapi import HTTPException, Request
 from core.database import (
     Document,
     GalleryImage,
+    QuestBearing,
     QuestMember,
     QuestMemoryEntry,
     QuestSource,
@@ -96,10 +97,17 @@ def get_visible_quest_ids(user: str | None) -> list[str]:
         return []
     db = SessionLocal()
     try:
-        owned = [r[0] for r in db.query(DbSession.id).filter(DbSession.owner == user).all()]
+        owned = [
+            r[0]
+            for r in db.query(DbSession.id)
+            .join(QuestBearing, QuestBearing.session_id == DbSession.id)
+            .filter(DbSession.owner == user)
+            .all()
+        ]
         joined = [
             r[0]
             for r in db.query(QuestMember.session_id)
+            .join(QuestBearing, QuestBearing.session_id == QuestMember.session_id)
             .filter(QuestMember.username == user)
             .all()
         ]
@@ -179,4 +187,3 @@ def require_quest_memory_access(request: Request, session_id: str, visibility: s
 
 def assert_memory_row_access(request: Request, row: QuestMemoryEntry) -> str:
     return require_quest_memory_access(request, row.session_id, row.visibility)
-
