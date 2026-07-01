@@ -1,95 +1,137 @@
 <p align="center">
   <strong>ARGOS VENTURE</strong><br>
-  <em>A voyage-led AI workspace for captains, shipmates, quests, and the living log of an expedition.</em>
+  <em>An evidence-guided workspace for crews exploring the unknown.</em>
 </p>
 
 ---
 
 # Argos Venture
 
-**Argos Venture** is an experimental product branch of Argos. It turns the workspace into a ship setting out toward an unknown destination: the voyage may take an undetermined amount of time, but every decision, discovery, question, and result becomes part of a shared quest log.
+**Argos Venture** is a separate Argos product line for productive, source-grounded exploration. It is inspired by Argo, the talking ship of Greek myth: an intelligent guide that helped a crew navigate unfamiliar territory.
 
-This branch reinterprets the original development workspace as a **chat-adventure workspace**:
+In Venture, Argo helps Captains and optional Shipmates investigate a defined source of information, notice evidence and patterns, preserve what matters, and turn supported discoveries into durable Markdown knowledge.
 
-- **Admins are Captains.** They command the ship, choose its course, run the full agent toolset, and recruit shipmates.
-- **Argo is the ship’s AI.** Argo is the configured default chat model acting in an agent context: it reports status, tool activity, outcomes, and the questions that need a captain’s judgment.
-- **Chat sessions are Quests.** A quest is the chronological record of events and decisions for one expedition thread.
-- **Regular users are Shipmates.** Captains recruit them into individual quests. Shipmates can converse inside those quests and read only the documents and gallery assets bound to quests they have joined.
+```text
+Unknown → observed evidence → emerging insight → reviewed artifact → shared direction or solution
+```
 
-> **Branch status:** `argos-venture` is the design and implementation line for this product model. The inherited `nightly` feature set remains the starting point; this branch deliberately narrows regular-user access and changes the language, navigation, and data model around quests.
+Read the full [Argos Venture product principles](docs/argos-venture.md).
 
-## The Voyage Model
+> **Branch status:** `argos-venture` is the design and implementation line for this product model. `nightly` remains the normal Odysseus workspace product line. Venture-specific roles, source workflows, artifact approval, and Quest-local memory must not be added to `nightly`.
 
-### Captains
+## The Venture model
 
-Captains are administrators. They retain the complete workspace command surface: quests, documents, gallery assets, email, comparisons, Cookbook, signatures, API tokens, user tools, crew members, tasks, drafts, memories, deep research, account administration, and the rest of the operational toolset.
+### Captains, Shipmates, and Argo
 
-A Captain opening or creating a quest works in agent mode by default. Argo should make its actions legible in the voyage log: what it is doing, what a tool returned, what has changed, what is blocked, and what Captain input is needed next.
+- **Captains** are existing administrators. They set a Quest's Current Bearing, choose and scope sources, use the authorized Captain tool surface, recruit Shipmates when helpful, and decide which findings become shared Quest knowledge.
+- **Shipmates** are existing regular users recruited into individual Quests. They are optional collaborators who help the Captain notice patterns, contradictions, and unanswered questions. A Captain may venture alone.
+- **Argo** is the virtual ship AI, not an account or membership row. It guides exploration with evidence-grounded summaries, operational context, and useful next steps; it does not replace Captain judgment.
+- **Quests** are source-grounded exploration threads. Their central record is a chronological **Voyage Log**, not a generic chat transcript.
 
-### Shipmates
+Captain access does not override another Captain's owner-based privacy. A Shipmate receives no Quest access until accepting an invitation.
 
-Shipmates are regular users recruited to specific quests. They have no global workspace inventory and no access to Captain-only operational systems.
+### Quest Sources
 
-After login, a shipmate sees only:
+A Venture Quest begins with a primary **Quest Source** and a stated **Current Bearing**. It is not an empty generic chat.
 
-- Search
-- Chats / Quests
-- Tools → Library → Documents and Gallery
-- Recent Chats and Activity on the dashboard
-- Settings limited to **Account**
-- A dedicated **Theme** control in the sidebar, outside Settings
+A Captain creates a Quest through this flow:
 
-The dashboard has no active quest and no prompt composer. A shipmate can still converse through the full chat view after opening a quest they are a member of.
+```text
+1. Set Current Bearing
+2. Choose Quest Source
+3. Define source scope and access
+4. Recruit Shipmates (optional)
+5. Review and launch Quest
+```
 
-### Quests and the voyage log
+Quest Sources are either:
 
-Every session becomes a **Quest**. A quest begins with two participants:
+- **Static** — websites, files, CSV datasets, PDFs, text or Word documents, Captain-owned documents, and connected databases queried through a defined schema or saved query.
+- **Dynamic** — sources that grow over time and need incremental polling. For the first Venture release, Email is the only dynamic source.
 
-1. its Captain; and
-2. Argo, the ship’s AI assistant.
+Every source has an explicit Shipmate access mode:
 
-A Captain may recruit regular users as shipmates. The default chat surface is the chronological voyage log—not a generic chat transcript—and records the Captain’s decisions, Argo’s status messages, tool activity, results, and shipmate contributions.
+```text
+captain_only | shared_read | shared_summaries
+```
 
-## Access and Data-Boundary Contract
+Email defaults to `captain_only`. A Quest must never default to reading an entire mailbox; it stores only a Captain-owned integration reference and a constrained scope such as mailbox, label, sender, subject, or search query.
 
-Argos Venture must enforce access in the backend, not only by hiding UI.
+### Invitations
 
-- A quest has one Captain and zero or more shipmates.
-- A document or gallery asset created in a quest is bound to that quest.
-- Captains retain full access to their operational workspace.
-- A shipmate can read a quest-bound document or gallery asset only when they are a member of that quest.
-- Shipmates may send messages only in quests they belong to.
-- Direct object URLs, list endpoints, downloads, previews, and search results must all apply the same membership check.
-- Existing owner-based isolation remains relevant for Captain-private data; quest membership adds a second access boundary for shared expedition artifacts.
+Captains recruit Shipmates through a durable Quest Invitation, not immediate membership:
 
-`owner IS NULL` legacy/shared records must never accidentally become visible to shipmates. Migrations must classify them explicitly.
+```text
+Captain selects Shipmate
+→ Shipmate receives Inbox invitation
+→ Shipmate Accepts or Declines
+→ accepted invitee becomes a Quest Member
+```
 
-## Development Flow
+The Shipmate's notification bell Inbox must show both **Accept** and **Decline** actions. The recruiting Captain receives an Inbox notification for either response. Pending invitees cannot see the Quest, Voyage Log, source content, artifacts, crew, search results, or related metadata.
+
+### Artifact Drafts and publication
+
+Argo Exploration Synthesis examines new Voyage Log messages, permitted source updates, existing Artifacts, and open questions. When a meaningful evidence-backed insight or potential solution emerges, Argo creates a Markdown **Artifact Draft** in the Captain's private Library.
+
+A draft remains private until the Captain approves it:
+
+```text
+draft → pending Captain review → published
+                         ↘ declined
+```
+
+When published, the Markdown Document is assigned to the Quest, becomes a **Quest Artifact**, is recorded in the Voyage Log, and notifies accepted Shipmates. A declined draft remains Captain-private unless the Captain deletes it.
+
+Every proposed artifact should state what was discovered, why it matters, the relevant evidence, confidence and uncertainty, and the recommended next bearing.
+
+### Quest-local memory
+
+Venture memory is fundamentally session-focused. Each Quest owns an isolated **Voyage Memory** partition that records its Current Bearing, evidence, open questions, decisions, source state, artifact links, and other durable exploration context.
+
+Memory from one Quest must never be retrieved, injected, searched, or silently reused in another Quest—even where the Captain, Shipmate, or source connection is the same. Venture does not use the inherited Captain-centered cross-chat memory model.
+
+## Access and data-boundary contract
+
+Argos Venture enforces all role, membership, source, and artifact restrictions in the backend, not only by hiding UI.
+
+- A Quest has one Captain and zero or more accepted Shipmates.
+- Shipmates may read only joined Quests and only permitted source material and Artifacts.
+- Shipmates may send plain text messages only in joined Quests.
+- Shipmates cannot create Quests, alter source scopes, use tools or agent mode, switch models or workspaces, upload or attach files, create or publish Artifacts, or access Captain-only systems.
+- A generated Artifact Draft is Captain-private until publication.
+- Direct object URLs, list endpoints, search, downloads, previews, thumbnails, websocket payloads, legacy routes, and crafted requests must apply the same authorization.
+- Existing owner-based isolation remains in force for Captain-private data.
+
+`owner IS NULL` legacy/shared records must never accidentally become visible to Shipmates. Migrations must classify them explicitly.
+
+## Development flow
 
 `argos-venture` starts from `nightly` and is an intentional product fork, not a literal Git fork.
 
 ```text
 nightly
   └── argos-venture
+        ├── feat/venture-quest-sources
         ├── feat/venture-quest-membership
-        ├── feat/venture-shipmate-shell
-        ├── feat/venture-captain-agent-log
-        └── feat/venture-branding
+        ├── feat/venture-artifact-synthesis
+        ├── feat/venture-voyage-memory
+        └── feat/venture-shipmate-shell
 ```
 
 Use focused feature branches from `argos-venture` and merge them back through reviewed pull requests. Periodically merge `nightly` into `argos-venture`; never force-push the voyage branch.
 
-## Runtime Profiles and Isolated Persistence
+## Runtime profiles and isolated persistence
 
-Argos Venture and the inherited Odysseus/nightly product line must never share runtime data. Switching Git branches changes code; it must not accidentally reuse another product line’s users, database, encryption key, uploads, gallery, generated images, vector stores, settings, sessions, or caches.
+Argos Venture and the inherited Odysseus/nightly product line must never share runtime data. Switching Git branches changes code; it must not accidentally reuse another product line's users, database, encryption key, uploads, Gallery assets, generated images, vector stores, settings, Quests, or caches.
 
-The macOS launcher should read a committed profile at:
+The macOS launcher reads the committed profile:
 
 ```text
 config/runtime-profile.env
 ```
 
-The profile is versioned with the branch, so feature branches inherit the profile of the product line they extend. It is the launcher’s source of truth for product identity and safe default persistence names; it must not infer those values from `git branch` at runtime.
+The profile is versioned with the branch. It is the launcher source of truth for product identity and safe persistence names; it must not infer those values from the active Git branch.
 
 `nightly` and its feature branches use an Odysseus profile:
 
@@ -133,13 +175,13 @@ For Argos Venture, this becomes:
 └── runtime-manifest.json
 ```
 
-The launcher must export `ARGOS_DATA_DIR` and retain `ODYSSEUS_DATA_DIR` as a temporary compatibility alias pointing to that same profile-specific path. The default SQLite database, Chroma persistence path, runtime ports, logs, and all files derived from the application data directory must use the active profile.
+The launcher exports `ARGOS_DATA_DIR` and retains `ODYSSEUS_DATA_DIR` as a temporary compatibility alias pointing to the same profile-specific path. The default database, Chroma path, runtime ports, logs, and all application-derived files must use the active profile.
 
-A startup guard must write and validate `runtime-manifest.json`, including the runtime ID and storage slug. Startup must stop on a profile/data-root mismatch unless an explicit maintenance override is supplied. The launcher must never copy, migrate, or merge data merely because a user changed Git branches.
+A startup guard writes and validates `runtime-manifest.json`, including runtime ID and storage slug. Startup must stop on a profile/data-root mismatch unless an explicit maintenance override is supplied. It must never copy, migrate, or merge data merely because a user changed Git branches.
 
-Local overrides are acceptable only when they remain profile-safe. Prefer changing a shared parent root such as `ARGOS_DATA_ROOT`; do not point `ARGOS_DATA_DIR` or `DATABASE_URL` at another product line’s persistence without an explicit migration process and a matching manifest.
+Local overrides remain acceptable only when profile-safe. Prefer a shared parent root such as `ARGOS_DATA_ROOT`; do not point `ARGOS_DATA_DIR` or `DATABASE_URL` at another product line's persistence without an explicit migration process and matching manifest.
 
-## Quick Start on macOS
+## Quick start on macOS
 
 ```bash
 git clone https://github.com/xxxcess/argos.git
@@ -148,24 +190,24 @@ git switch argos-venture
 ./start-macos.sh
 ```
 
-The runtime profile selected by this branch determines the default local port and persistence location. `start-macos.sh` may still read a local `.env` for machine-specific values, but `.env` must not silently collapse isolated runtime profiles into a shared data directory.
+The Venture runtime profile determines the default local port and persistence location. `start-macos.sh` may read a local `.env` for machine-specific values, but `.env` must not collapse isolated runtime profiles into a shared data directory.
 
-Keep authentication enabled for all network-accessible deployments. The inherited setup, deployment, and troubleshooting notes remain in [`docs/setup.md`](docs/setup.md). Those documents and the UI are being renamed from the upstream identity as the Argos Venture implementation proceeds.
+## Implementation milestones
 
-## Implementation Milestones
-
-1. Add committed runtime profiles, macOS launcher support, profile-specific persistence roots, and profile/data-root mismatch protection.
-2. Introduce quest membership, Captain ownership, and server-side authorization for quest artifacts.
-3. Add Captain-defined challenges, acceptance criteria, and a published-artifact workflow for Quest-bound documents and gallery items.
-4. Rename sessions to quests and model the chronological voyage log.
-5. Make Captain prompts agent-first and expose Argo status/tool-result events clearly.
-6. Build the reduced shipmate shell, dashboard, account-only settings, sidebar theme control, and quest chat experience.
-7. Replace inherited Odysseus naming, labels, assets, metadata, and user-facing copy with Argos Venture branding.
-8. Add authorization, runtime-isolation, migration, and end-to-end tests for Captains, Shipmates, shared Quests, artifacts, and direct-route access.
+1. Maintain committed runtime profiles, profile-specific persistence roots, and mismatch protection.
+2. Add Quest Sources, constrained Email polling, source versions, source access modes, and server-side source authorization.
+3. Add invitation-based Shipmate recruitment and non-enumerating Quest membership controls.
+4. Add Argo Exploration Synthesis, evidence provenance, private Markdown Artifact Drafts, deduplication, and Captain review notifications.
+5. Add Captain publication approval, Quest Artifact assignment, Voyage Log publication events, and Shipmate publication notifications.
+6. Replace inherited cross-chat memory with strictly Quest-local Voyage Memory partitions.
+7. Rename sessions to Quests, add Current Bearing and Voyage Log presentation, and expose Argo's safe operational status.
+8. Build the reduced Shipmate shell, dashboard, account-only Settings, sidebar Theme control, source-safe search, and plain-text Quest chat.
+9. Replace inherited Odysseus naming, labels, assets, metadata, and visible copy with Argos Venture branding.
+10. Add authorization, runtime-isolation, source, memory, notification, migration, and end-to-end tests for Captains, Shipmates, Quests, Artifacts, and direct-route access.
 
 ## Security
 
-Argos Venture is a self-hosted workspace with powerful local tools. Keep authentication enabled, do not expose raw model or service ports publicly, and treat Captain credentials and quest-bound data as sensitive. The server must enforce every role and membership boundary even when a caller bypasses the frontend. Runtime profiles are a data-isolation boundary: do not reuse a profile’s database, auth state, encryption key, or asset directories for another product line without an explicit migration.
+Argos Venture is a self-hosted workspace with powerful local tools. Keep authentication enabled, do not expose raw model or service ports publicly, and treat Captain credentials, scoped sources, Voyage Memory, and Quest Artifacts as sensitive. The server must enforce every role, source, membership, publication, and memory boundary even when a caller bypasses the frontend. Runtime profiles are a data-isolation boundary: do not reuse a profile's database, auth state, encryption key, or asset directories for another product line without an explicit migration.
 
 ## License
 
