@@ -138,6 +138,50 @@ def test_pending_invitation_grants_no_access_and_accept_is_idempotent(monkeypatc
         db.close()
 
 
+def test_invited_shipmates_show_roster_status_and_captain_progress_resolves(monkeypatch):
+    client, SessionLocal, app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invitation_id = client.post(
+        f"/api/quests/{quest_id}/invitations",
+        json={"invitee_username": "mara"},
+    ).json()["invitation_id"]
+
+    roster = client.get(f"/api/quests/{quest_id}/roster").json()["members"]
+    mara = next(member for member in roster if member["username"] == "mara")
+    assert mara["role"] == "shipmate"
+    assert mara["invitation_status"] == "pending"
+
+    db = SessionLocal()
+    try:
+        pending = db.query(UserNotification).filter(
+            UserNotification.user_id == "ada",
+            UserNotification.deterministic_key == f"quest-invite-progress:{invitation_id}",
+        ).one()
+        assert pending.category == "progress"
+        assert pending.state == "waiting"
+    finally:
+        db.close()
+
+    app.state.test_user = "mara"
+    assert client.post(f"/api/quest-invitations/{invitation_id}/decline").status_code == 200
+    app.state.test_user = "ada"
+
+    roster = client.get(f"/api/quests/{quest_id}/roster").json()["members"]
+    mara = next(member for member in roster if member["username"] == "mara")
+    assert mara["invitation_status"] == "declined"
+
+    db = SessionLocal()
+    try:
+        resolved = db.query(UserNotification).filter(
+            UserNotification.user_id == "ada",
+            UserNotification.deterministic_key == f"quest-invite-progress:{invitation_id}",
+        ).one()
+        assert resolved.category == "inbox"
+        assert resolved.state == "resolved"
+    finally:
+        db.close()
+
+
 def test_source_visibility_modes_are_enforced(monkeypatch):
     client, _SessionLocal, app, *_ = _client(monkeypatch)
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]

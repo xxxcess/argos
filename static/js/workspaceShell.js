@@ -228,6 +228,9 @@ async function _activateTab(tabId) {
     _saveState();
     _showDefaultHomeDashboard();
     _renderTabs();
+    document.dispatchEvent(new CustomEvent('odysseus:workspace-tab-activated', {
+      detail: { tabId: 'home', kind: 'home' },
+    }));
     return;
   }
   const tab = _state.tabs[tabId];
@@ -241,6 +244,9 @@ async function _activateTab(tabId) {
     await window.sessionModule?.selectSession?.(tab.sessionId);
   }
   _restoreSelectedViewState();
+  document.dispatchEvent(new CustomEvent('odysseus:workspace-tab-activated', {
+    detail: { tabId, kind: 'session', sessionId: tab.sessionId },
+  }));
 }
 
 async function _closeTab(tabId) {

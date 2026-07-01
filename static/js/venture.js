@@ -45,8 +45,8 @@ function installStyles() {
   style.id = 'venture-style';
   style.textContent = `
     body.argos-venture #current-meta::before { content: "Voyage Log · "; opacity: .75; }
-    .venture-right-rail { position: fixed; right: 0; top: 0; bottom: 0; width: min(360px, 34vw); min-width: 280px; z-index: 20; background: var(--panel, #151515); border-left: 1px solid var(--border); overflow:auto; padding: 12px; box-sizing: border-box; }
-    .venture-right-rail.collapsed { transform: translateX(calc(100% - 38px)); overflow:hidden; }
+    .venture-right-rail { position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: min(360px, 34vw); min-width: 280px; z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow:auto; padding: 12px; box-sizing: border-box; }
+    .venture-right-rail.collapsed { transform: translateX(calc(-100% + 38px)); overflow:hidden; }
     .venture-rail-toggle { position: sticky; top: 0; float: left; width: 28px; height: 28px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; }
     .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); }
     .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; }
@@ -170,9 +170,20 @@ async function loadQuest(id) {
   await renderRightRail();
 }
 
+async function enforceQuestSessionView(sessionId) {
+  if (!caps?.is_venture || !sessionId) return false;
+  const quest = await getJson(`/api/quests/${encodeURIComponent(sessionId)}`);
+  if (!quest?.quest) return false;
+  if (String(window.sessionModule?.getCurrentSessionId?.() || '') !== String(sessionId)) return false;
+  window.sessionControlModule?.viewFullConversation?.(sessionId);
+  await renderRightRail();
+  return true;
+}
+
 function selectedQuestId() {
-  const hash = (window.location.hash || '').replace(/^#/, '');
-  return hash || currentQuestId || localStorage.getItem('lastSessionId') || '';
+  if (document.body.classList.contains('workspace-home-active')) return '';
+  const activeSessionId = window.sessionModule?.getCurrentSessionId?.();
+  return activeSessionId ? String(activeSessionId) : '';
 }
 
 async function getJson(url) {
@@ -195,9 +206,14 @@ async function renderRightRail() {
     document.body.appendChild(rail);
   }
   rail.innerHTML = '';
-  const toggle = h('button', { class: 'venture-rail-toggle', type: 'button', title: 'Collapse Quest context', text: '◂', onclick: () => rail.classList.toggle('collapsed') });
+  const toggle = h('button', { class: 'venture-rail-toggle', type: 'button', title: 'Collapse Quest context', text: '▸', onclick: () => rail.classList.toggle('collapsed') });
   rail.appendChild(toggle);
   rail.appendChild(h('div', { style: 'clear:both' }));
+  const quest = await getJson(`/api/quests/${encodeURIComponent(qid)}`);
+  if (!quest?.quest) {
+    rail.remove();
+    return;
+  }
   const [bearing, roster, sources, artifacts, memory] = await Promise.all([
     getJson(`/api/quests/${encodeURIComponent(qid)}/bearing`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/roster`),
@@ -227,9 +243,20 @@ function crewRoster(members) {
     h('h3', { text: 'Crew' }),
     h('div', { class: 'venture-list' }, members.map(m => h('div', { class: 'venture-row' }, [
       h('span', { text: m.username }),
-      h('span', { class: 'venture-muted', text: m.role === 'captain' ? 'Captain' : 'Shipmate' }),
+      h('span', { class: 'venture-muted', text: crewStatusLabel(m) }),
     ]))),
   ]);
+}
+
+function crewStatusLabel(member) {
+  if (member.role === 'captain') return 'Captain';
+  const status = String(member.invitation_status || member.status || 'accepted').toLowerCase();
+  if (status === 'pending') return 'Shipmate · invited';
+  if (status === 'accepted') return 'Shipmate · accepted';
+  if (status === 'declined') return 'Shipmate · declined';
+  if (status === 'revoked') return 'Shipmate · revoked';
+  if (status === 'expired') return 'Shipmate · expired';
+  return 'Shipmate';
 }
 
 function sourceCard(sources, qid) {
@@ -472,6 +499,7 @@ async function createQuestFromWizard(modal, status, emailAccountsById) {
   history.replaceState(null, '', `#${questId}`);
   await window.sessionModule?.loadSessions?.();
   await window.sessionModule?.selectSession?.(questId);
+  window.sessionControlModule?.viewFullConversation?.(questId);
   window.dispatchEvent(new CustomEvent('odysseus:session-materialized', {
     detail: { sessionId: questId, name: title, openInFullView: true },
   }));
@@ -615,6 +643,14 @@ async function initVenture() {
   await renderRightRail();
   window.addEventListener('hashchange', () => loadQuest(selectedQuestId()));
   window.addEventListener('odysseus:session-selected', e => loadQuest(e.detail?.id || selectedQuestId()));
+  document.addEventListener('odysseus:workspace-tab-activated', e => {
+    if (e.detail?.kind === 'session') loadQuest(e.detail?.sessionId || selectedQuestId());
+    else renderRightRail();
+  });
+  document.addEventListener('odysseus:mission-stream-start', e => {
+    const sid = e.detail?.sessionId || selectedQuestId();
+    setTimeout(() => enforceQuestSessionView(sid), 0);
+  });
   window.addEventListener('argos-venture:review-artifact-draft', e => openArtifactDraft(e.detail?.proposalId));
 }
 

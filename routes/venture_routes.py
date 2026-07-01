@@ -530,6 +530,18 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                 {"id": "decline", "label": "Decline", "style": "secondary"},
             ],
         )
+        _notify(
+            db,
+            captain,
+            f"quest-invite-progress:{inv.id}",
+            category="progress",
+            state="waiting",
+            title=f"Invitation pending: {invitee}",
+            message=f"Waiting for {invitee} to respond to {quest.name if quest else 'the Quest'}.",
+            resource_type="quest_invitation",
+            resource_id=inv.id,
+            actions=[],
+        )
         db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"{invitee} was invited to the Quest.", meta_data=_json_dumps({"event_type": "shipmate_invited", "actor": captain})))
         return inv
 
@@ -566,6 +578,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             inv.status = "revoked"
             inv.responded_at = utcnow_naive()
             _notify(db, inv.invitee_username, f"quest-invite:{inv.id}", state="resolved", title="Quest invitation revoked", message="This Quest invitation was revoked.", actions=[])
+            _notify(db, captain, f"quest-invite-progress:{inv.id}", category="inbox", state="resolved", title=f"Invitation revoked: {inv.invitee_username}", message=f"You revoked the invitation for {inv.invitee_username}.", resource_type="quest_invitation", resource_id=inv.id, actions=[])
             db.commit()
             return {"ok": True, "status": inv.status, "captain": captain}
         except Exception:
@@ -605,7 +618,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             else:
                 db.add(ChatMessage(id=uuid.uuid4().hex, session_id=inv.session_id, role="system", content=f"{user} declined the Quest invitation.", meta_data=_json_dumps({"event_type": "shipmate_declined", "actor": user})))
             _notify(db, user, f"quest-invite:{inv.id}", state="resolved", title="Quest invitation resolved", message=f"You {status} the invitation.", actions=[])
-            _notify(db, inv.invited_by, f"quest-invite-response:{inv.id}", category="inbox", state="unread", title=f"{user} {status} your invitation", message=f"{user} {status} your invitation to {quest.name if quest else 'the Quest'}.", resource_type="quest_invitation", resource_id=inv.id, actions=[])
+            _notify(db, inv.invited_by, f"quest-invite-progress:{inv.id}", category="inbox", state="resolved", title=f"{user} {status} your invitation", message=f"{user} {status} your invitation to {quest.name if quest else 'the Quest'}.", resource_type="quest_invitation", resource_id=inv.id, actions=[])
             db.commit()
             return {"ok": True, "status": status, "quest_id": inv.session_id}
         except Exception:
@@ -629,7 +642,39 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         db = SessionLocal()
         try:
             rows = db.query(QuestMember).filter(QuestMember.session_id == quest_id).order_by(QuestMember.created_at.asc()).all()
-            return {"members": [{"username": r.username, "role": r.role, "created_at": r.created_at.isoformat() + "Z" if r.created_at else None} for r in rows]}
+            invitations = db.query(QuestInvitation).filter(QuestInvitation.session_id == quest_id).order_by(QuestInvitation.created_at.asc()).all()
+            latest_invitation_by_user = {}
+            for inv in invitations:
+                latest_invitation_by_user[inv.invitee_username] = inv
+            members = []
+            member_users = set()
+            for row in rows:
+                member_users.add(row.username)
+                inv = latest_invitation_by_user.get(row.username)
+                members.append({
+                    "username": row.username,
+                    "role": row.role,
+                    "status": "active" if row.role == "captain" else "accepted",
+                    "invitation_status": inv.status if inv else ("active" if row.role == "captain" else "accepted"),
+                    "invited_by": inv.invited_by if inv else row.recruited_by,
+                    "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
+                    "responded_at": inv.responded_at.isoformat() + "Z" if inv and inv.responded_at else None,
+                    "expires_at": inv.expires_at.isoformat() + "Z" if inv and inv.expires_at else None,
+                })
+            for inv in invitations:
+                if inv.invitee_username in member_users:
+                    continue
+                members.append({
+                    "username": inv.invitee_username,
+                    "role": "shipmate",
+                    "status": inv.status,
+                    "invitation_status": inv.status,
+                    "invited_by": inv.invited_by,
+                    "created_at": inv.created_at.isoformat() + "Z" if inv.created_at else None,
+                    "responded_at": inv.responded_at.isoformat() + "Z" if inv.responded_at else None,
+                    "expires_at": inv.expires_at.isoformat() + "Z" if inv.expires_at else None,
+                })
+            return {"members": members}
         finally:
             db.close()
 
