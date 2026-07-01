@@ -2,19 +2,22 @@
 """Application-wide constants and configuration values."""
 import os
 
+from src.runtime_config import load_runtime_profile_env
 from src.runtime_paths import get_app_root, get_default_data_dir
+
+load_runtime_profile_env()
 
 APP_VERSION = "1.0.1"
 
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
+DATA_DIR = os.getenv("ARGOS_DATA_DIR") or os.getenv("ODYSSEUS_DATA_DIR") or get_default_data_dir()
 
 # Data file paths
 # Single source of truth: every persisted file/dir lives under DATA_DIR, which
-# is the ONLY place ODYSSEUS_DATA_DIR is read. Import these constants instead of
-# re-deriving paths from __file__ or a relative "data" literal.
+# is resolved from the active runtime profile. Import these constants instead
+# of re-deriving paths from __file__ or a relative "data" literal.
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 MEMORY_FILE = os.path.join(DATA_DIR, "memory.json")
 MEMORY_DOC = os.path.join(DATA_DIR, "memory_doc.md")

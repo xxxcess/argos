@@ -9,7 +9,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from src.runtime_config import load_runtime_profile_env
 from src.constants import CHROMA_DIR, DATA_DIR
+
+load_runtime_profile_env()
 
 NIGHTLY_RUNTIME_ID = "nightly"
 VENTURE_RUNTIME_ID = "argos-venture"
@@ -41,4 +44,3 @@ def runtime_summary() -> dict:
         "chroma_path": CHROMA_DIR,
         "quest_memory_root": str(Path(CHROMA_DIR) / "quest-memory"),
     }
-
