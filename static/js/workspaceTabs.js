@@ -71,8 +71,9 @@ export function upsertSessionTab(state, session, { selected = true, state: visua
     state: visualState || prior.state || 'idle',
     view: prior.view || {},
   };
-  next.order = next.order.filter(t => t !== id);
-  next.order.push(id);
+  if (!next.order.includes(id)) {
+    next.order.push(id);
+  }
   const sessionTabs = next.order.filter(t => t !== 'home');
   while (sessionTabs.length > MAX_SESSION_TABS) {
     const stale = sessionTabs.shift();
@@ -95,4 +96,3 @@ export function closeTabById(state, tabId) {
   }
   return next;
 }
-

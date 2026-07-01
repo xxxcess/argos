@@ -26,6 +26,11 @@ def test_workspace_tab_controller_state_transitions():
         state.tabs['session:a'].view = { draft: 'hello', scrollTop: 42 };
         state = upsertSessionTab(state, { id: 'b', name: 'Beta' });
         assert.equal(state.tabs['session:a'].view.draft, 'hello');
+        assert.deepEqual(state.order, ['home', 'session:a', 'session:b']);
+
+        state = upsertSessionTab(state, { id: 'a', name: 'Alpha selected again' });
+        assert.deepEqual(state.order, ['home', 'session:a', 'session:b']);
+        assert.equal(state.selected, 'session:a');
 
         state = closeTabById(state, 'session:b');
         assert.equal(state.selected, 'session:a');
