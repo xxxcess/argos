@@ -366,6 +366,10 @@ function _buildShell() {
 
 function _wireShellControls() {
   document.getElementById('workspace-new-tab')?.addEventListener('click', async () => {
+    if (window.argosVentureOpenSessionWizard && window.argosVentureCapabilities?.can_create_quest) {
+      window.argosVentureOpenSessionWizard();
+      return;
+    }
     _saveCurrentViewState();
     let created = false;
     if (window.createDirectChatFromPreferredModel) {

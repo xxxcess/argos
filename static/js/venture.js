@@ -5,7 +5,7 @@ let caps = null;
 let currentQuestId = null;
 
 const captainOnlySelectors = [
-  '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
+  '#workspace-new-tab', '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
   '#overflow-rag-btn', '#overflow-workspace-btn', '#overflow-preset-btn',
   '#web-toggle-btn', '#bash-toggle-btn', '#model-picker-btn', '#model-picker-add-models-btn',
   '#mode-agent-btn', '#research-toggle-btn', '#tool-research-btn', '#tool-memory-btn',
@@ -55,12 +55,27 @@ function installStyles() {
     .venture-row { display:flex; justify-content:space-between; gap:8px; align-items:center; font-size:12px; }
     .venture-btn { border:1px solid var(--border); background:var(--bg); color:var(--fg); border-radius:6px; padding:5px 8px; cursor:pointer; font:inherit; font-size:12px; }
     .venture-btn.primary { background:var(--fg); color:var(--bg); }
-    .venture-modal { position:fixed; inset:7vh auto auto 50%; transform:translateX(-50%); width:min(720px, 94vw); max-height:86vh; overflow:auto; z-index:10000; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:16px; box-shadow:0 18px 60px rgba(0,0,0,.35); }
+    .venture-modal-backdrop { position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.45); }
+    .venture-modal { position:fixed; inset:7vh auto auto 50%; transform:translateX(-50%); width:min(760px, 94vw); max-height:86vh; overflow:auto; z-index:10000; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:16px; box-shadow:0 18px 60px rgba(0,0,0,.35); }
+    .venture-modal h2 { margin:0 0 12px; font-size:18px; letter-spacing:0; }
     .venture-modal label { display:block; font-size:12px; margin:10px 0 4px; opacity:.8; }
     .venture-modal input, .venture-modal textarea, .venture-modal select { width:100%; box-sizing:border-box; border:1px solid var(--border); background:var(--panel); color:var(--fg); border-radius:6px; padding:8px; font:inherit; }
     .venture-modal textarea { min-height:72px; resize:vertical; }
+    .venture-modal input[type="radio"], .venture-modal input[type="checkbox"] { width:auto; }
     .venture-modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+    .venture-choice-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; margin:10px 0 14px; }
+    .venture-choice { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--panel); cursor:pointer; display:grid; gap:4px; }
+    .venture-choice input { position:absolute; opacity:0; pointer-events:none; }
+    .venture-choice:has(input:checked) { outline:2px solid color-mix(in srgb, var(--fg) 38%, transparent); }
+    .venture-choice strong { font-size:13px; letter-spacing:0; }
+    .venture-form-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
+    .venture-source-panel { border:1px solid var(--border); border-radius:8px; padding:10px; margin-top:10px; background:color-mix(in srgb, var(--panel) 86%, var(--fg) 3%); }
+    .venture-check-list { display:grid; gap:6px; max-height:160px; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:8px; background:var(--panel); }
+    .venture-check-row { display:flex!important; align-items:center; gap:8px; margin:0!important; opacity:1!important; }
+    .venture-file-list { margin-top:6px; display:grid; gap:4px; }
+    .venture-full-span { grid-column:1 / -1; }
     @media (max-width: 900px) { .venture-right-rail { width:min(86vw, 360px); } }
+    @media (max-width: 720px) { .venture-choice-grid, .venture-form-grid { grid-template-columns:1fr; } }
   `;
   document.head.appendChild(style);
 }
@@ -93,6 +108,30 @@ function hardDisableShipmateControls() {
       btn.style.display = 'none';
     }
   });
+}
+
+function hideVentureNewChatShortcuts() {
+  if (!caps?.is_venture) return;
+  document.querySelectorAll('#rail-new-session, #new-session-btn, #chat-new-btn').forEach(el => {
+    el.setAttribute('hidden', '');
+    el.setAttribute('aria-hidden', 'true');
+    el.style.display = 'none';
+    if ('disabled' in el) el.disabled = true;
+  });
+  const brand = document.getElementById('sidebar-brand-btn');
+  if (brand) {
+    brand.removeAttribute('title');
+    brand.style.cursor = 'default';
+  }
+  const workspacePlus = document.getElementById('workspace-new-tab');
+  if (workspacePlus && !isShipmate()) {
+    workspacePlus.removeAttribute('hidden');
+    workspacePlus.removeAttribute('aria-hidden');
+    workspacePlus.style.display = '';
+    workspacePlus.disabled = false;
+    workspacePlus.title = 'Create session';
+    workspacePlus.setAttribute('aria-label', 'Create session');
+  }
 }
 
 function installShipmateCaptureGuards() {
@@ -145,24 +184,20 @@ async function getJson(url) {
 async function renderRightRail() {
   if (!caps?.is_venture) return;
   installStyles();
+  const qid = selectedQuestId();
   let rail = document.getElementById('venture-right-rail');
+  if (!qid) {
+    rail?.remove();
+    return;
+  }
   if (!rail) {
     rail = h('aside', { id: 'venture-right-rail', class: 'venture-right-rail', 'aria-label': 'Quest context' });
     document.body.appendChild(rail);
   }
-  const qid = selectedQuestId();
   rail.innerHTML = '';
   const toggle = h('button', { class: 'venture-rail-toggle', type: 'button', title: 'Collapse Quest context', text: '◂', onclick: () => rail.classList.toggle('collapsed') });
   rail.appendChild(toggle);
   rail.appendChild(h('div', { style: 'clear:both' }));
-  if (!qid) {
-    rail.appendChild(h('div', { class: 'venture-card' }, [
-      h('h3', { text: 'Quests' }),
-      h('div', { class: 'venture-muted', text: caps.can_create_quest ? 'Create or open a Quest to see its Current Bearing.' : 'Open an accepted Quest to see its Current Bearing.' }),
-      caps.can_create_quest ? h('button', { class: 'venture-btn primary', type: 'button', text: 'New Quest', onclick: openQuestWizard }) : null,
-    ]));
-    return;
-  }
   const [bearing, roster, sources, artifacts, memory] = await Promise.all([
     getJson(`/api/quests/${encodeURIComponent(qid)}/bearing`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/roster`),
@@ -252,51 +287,296 @@ function argoStatusCard(qid, memory) {
   ]);
 }
 
-function openQuestWizard() {
-  const modal = h('form', { class: 'venture-modal QuestCreationWizard' });
+function closeVentureModal(modal, backdrop) {
+  modal?.remove();
+  backdrop?.remove();
+}
+
+async function launchRegularChatFromWizard(modal, backdrop, status) {
+  let created = false;
+  if (window.createDirectChatFromPreferredModel) {
+    created = !!await window.createDirectChatFromPreferredModel();
+  } else if (window.sessionModule?.createDirectChat) {
+    const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
+    if (res.ok) {
+      const dc = await res.json().catch(() => null);
+      if (dc?.endpoint_url && dc?.model) {
+        await window.sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'venture-session-wizard' });
+        created = true;
+      }
+    }
+  }
+  if (created && window.sessionModule?.hasPendingChat?.() && window.sessionModule?.materializePendingSession) {
+    await window.sessionModule.materializePendingSession({ source: 'venture-session-wizard', openInFullView: true });
+  }
+  if (created || window.sessionModule?.getCurrentSessionId?.()) {
+    closeVentureModal(modal, backdrop);
+  } else if (status) {
+    status.textContent = 'Unable to start a regular chat.';
+  }
+}
+
+function selectedCheckboxValues(root, name) {
+  return Array.from(root.querySelectorAll(`input[name="${name}"]:checked`))
+    .map(input => input.value)
+    .filter(Boolean);
+}
+
+function sourceDisplayName(type, config, emailAccountsById) {
+  if (type === 'website') return config.urls?.length === 1 ? config.urls[0] : 'Website evidence';
+  if (type === 'file') return config.files?.length === 1 ? config.files[0].name : 'Selected files';
+  if (type === 'email') {
+    const names = (config.account_ids || [config.account_id])
+      .map(id => emailAccountsById.get(id)?.name || emailAccountsById.get(id)?.from_address || id)
+      .filter(Boolean);
+    return names.length === 1 ? names[0] : 'Email evidence';
+  }
+  return 'Quest Source';
+}
+
+function buildSourcePayload(modal, emailAccountsById) {
+  const type = modal.querySelector('[name="source_type"]')?.value || 'website';
+  if (type === 'website') {
+    const urls = String(modal.querySelector('[name="source_urls"]')?.value || '')
+      .split(/\n+/)
+      .map(v => v.trim())
+      .filter(Boolean);
+    if (!urls.length) throw new Error('Add at least one website URL.');
+    const config = { urls, url: urls[0], summary: urls.join('\n') };
+    return { type, config, extraSources: [] };
+  }
+  if (type === 'file') {
+    const files = Array.from(modal.querySelector('[name="source_files"]')?.files || []);
+    if (!files.length) throw new Error('Select at least one file.');
+    const fileRefs = files.map(file => ({
+      name: file.name,
+      size: file.size,
+      type: file.type || 'application/octet-stream',
+      last_modified: file.lastModified || null,
+    }));
+    const config = {
+      files: fileRefs,
+      references: fileRefs.map(file => file.name),
+      summary: fileRefs.map(file => file.name).join(', '),
+    };
+    return { type, config, extraSources: [] };
+  }
+  if (type === 'email') {
+    const accountIds = selectedCheckboxValues(modal, 'email_accounts');
+    if (!accountIds.length) throw new Error('Select at least one configured email account.');
+    const baseConfig = id => ({
+      account_id: id,
+      account_ids: accountIds,
+      scope: { mailbox: 'INBOX', query: 'in:anywhere' },
+    });
+    return {
+      type,
+      config: baseConfig(accountIds[0]),
+      extraSources: accountIds.slice(1).map(id => ({
+        source_type: 'email',
+        source_mode: 'dynamic',
+        access_mode: 'captain_only',
+        display_name: sourceDisplayName('email', { account_id: id }, emailAccountsById),
+        configuration: baseConfig(id),
+      })),
+    };
+  }
+  throw new Error('Choose a Quest Source type.');
+}
+
+function renderCheckboxList(container, items, name, emptyText, labelFor) {
+  container.innerHTML = '';
+  if (!items.length) {
+    container.appendChild(h('div', { class: 'venture-muted', text: emptyText }));
+    return;
+  }
+  items.forEach(item => {
+    const value = String(item.id || item.username || '');
+    container.appendChild(h('label', { class: 'venture-check-row' }, [
+      h('input', { type: 'checkbox', name, value }),
+      h('span', { text: labelFor(item) }),
+    ]));
+  });
+}
+
+async function loadWizardOptions(modal) {
+  const [emailData, userData] = await Promise.all([
+    getJson('/api/email/accounts'),
+    getJson('/api/auth/users'),
+  ]);
+  const emails = (emailData?.accounts || []).filter(account => account.enabled !== false);
+  const users = (userData?.users || []).filter(user => !user.is_admin);
+  const emailList = modal.querySelector('[data-email-list]');
+  const shipmateList = modal.querySelector('[data-shipmate-list]');
+  renderCheckboxList(emailList, emails, 'email_accounts', 'No configured email accounts available.', account => account.name || account.from_address || account.imap_user || account.id);
+  renderCheckboxList(shipmateList, users, 'shipmates', 'No regular users available.', user => user.username);
+  return new Map(emails.map(account => [String(account.id), account]));
+}
+
+function syncQuestWizardSourcePanel(modal) {
+  const type = modal.querySelector('[name="source_type"]')?.value || 'website';
+  modal.querySelectorAll('[data-source-panel]').forEach(panel => {
+    panel.hidden = panel.dataset.sourcePanel !== type;
+  });
+}
+
+function syncSelectedFiles(modal) {
+  const list = modal.querySelector('[data-file-list]');
+  if (!list) return;
+  const files = Array.from(modal.querySelector('[name="source_files"]')?.files || []);
+  list.innerHTML = '';
+  files.forEach(file => list.appendChild(h('div', { class: 'venture-muted', text: `${file.name} · ${Math.ceil(file.size / 1024)} KB` })));
+}
+
+async function createQuestFromWizard(modal, status, emailAccountsById) {
+  const title = String(modal.querySelector('[name="title"]')?.value || '').trim();
+  const goal = String(modal.querySelector('[name="exploration_goal"]')?.value || '').trim();
+  if (!title) throw new Error('Quest title is required.');
+  if (!goal) throw new Error('Goal is required.');
+  const { type, config, extraSources } = buildSourcePayload(modal, emailAccountsById);
+  const displayName = sourceDisplayName(type, config, emailAccountsById);
+  const payload = {
+    title,
+    exploration_goal: goal,
+    source: {
+      source_type: type,
+      source_mode: type === 'email' ? 'dynamic' : 'static',
+      access_mode: type === 'email' ? 'captain_only' : 'shared_read',
+      display_name: displayName,
+      configuration: config,
+    },
+    shipmates: selectedCheckboxValues(modal, 'shipmates'),
+  };
+  const res = await fetch(`${API_BASE}/api/quests`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Quest creation failed.');
+  const data = await res.json();
+  const questId = data.quest?.id;
+  if (!questId) throw new Error('Quest creation did not return a Quest ID.');
+  for (const source of extraSources) {
+    const sourceRes = await fetch(`${API_BASE}/api/quests/${encodeURIComponent(questId)}/sources`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(source),
+    });
+    if (!sourceRes.ok && status) {
+      status.textContent = 'Quest created, but one additional email source could not be added.';
+    }
+  }
+  currentQuestId = questId;
+  history.replaceState(null, '', `#${questId}`);
+  await window.sessionModule?.loadSessions?.();
+  await window.sessionModule?.selectSession?.(questId);
+  window.dispatchEvent(new CustomEvent('odysseus:session-materialized', {
+    detail: { sessionId: questId, name: title, openInFullView: true },
+  }));
+  await renderRightRail();
+}
+
+function openSessionWizard() {
+  if (!caps?.can_create_quest) return;
+  installStyles();
+  document.querySelectorAll('.QuestCreationWizard, .venture-modal-backdrop[data-venture-session-wizard]').forEach(el => el.remove());
+  const backdrop = h('div', { class: 'venture-modal-backdrop', 'data-venture-session-wizard': 'true' });
+  const modal = h('form', { class: 'venture-modal QuestCreationWizard', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Create session' });
   modal.innerHTML = `
-    <h2>Create Quest</h2>
-    <label>Quest title</label><input name="title" required>
-    <label>Exploration goal</label><textarea name="exploration_goal" required></textarea>
-    <label>Initial question or hypothesis</label><textarea name="initial_question"></textarea>
-    <label>Desired outcome</label><textarea name="desired_outcome"></textarea>
-    <label>Primary Quest Source name</label><input name="source_name" required>
-    <label>Source type</label><select name="source_type"><option value="website">Website</option><option value="file">File</option><option value="document">Document</option><option value="database">Database</option><option value="email">Email</option></select>
-    <label>Source reference or query</label><input name="source_ref" required>
-    <label>Shipmates (comma-separated, optional)</label><input name="shipmates">
-    <div class="venture-modal-actions"><button type="button" class="venture-btn" data-cancel>Cancel</button><button type="submit" class="venture-btn primary">Launch Quest</button></div>
+    <h2>Create Session</h2>
+    <div class="venture-choice-grid" role="radiogroup" aria-label="Session type">
+      <label class="venture-choice"><input type="radio" name="session_type" value="chat" checked><strong>Regular chat</strong><span class="venture-muted">Start a chat session without Quest configuration.</span></label>
+      <label class="venture-choice"><input type="radio" name="session_type" value="quest"><strong>Quest</strong><span class="venture-muted">Launch an evidence-guided Venture Quest.</span></label>
+    </div>
+    <div data-chat-fields>
+      <div class="venture-muted">Regular chats use the existing chat workspace and do not require Quest setup.</div>
+    </div>
+    <div data-quest-fields hidden>
+      <div class="venture-form-grid">
+        <div>
+          <label>Quest title</label>
+          <input name="title" autocomplete="off">
+        </div>
+        <div>
+          <label>Predefined source</label>
+          <select name="source_type">
+            <option value="website">Website</option>
+            <option value="file">File</option>
+            <option value="email">Email</option>
+          </select>
+        </div>
+        <div class="venture-full-span">
+          <label>Goal</label>
+          <textarea name="exploration_goal"></textarea>
+        </div>
+      </div>
+      <div class="venture-source-panel" data-source-panel="website">
+        <label>Website URLs</label>
+        <textarea name="source_urls" placeholder="https://example.com/research&#10;https://example.com/context"></textarea>
+      </div>
+      <div class="venture-source-panel" data-source-panel="file" hidden>
+        <label>Files from disk</label>
+        <input type="file" name="source_files" multiple>
+        <div class="venture-file-list" data-file-list></div>
+      </div>
+      <div class="venture-source-panel" data-source-panel="email" hidden>
+        <label>Configured emails</label>
+        <div class="venture-check-list" data-email-list><div class="venture-muted">Loading email accounts...</div></div>
+      </div>
+      <label>Shipmates</label>
+      <div class="venture-check-list" data-shipmate-list><div class="venture-muted">Loading regular users...</div></div>
+    </div>
+    <div class="venture-modal-actions">
+      <button type="button" class="venture-btn" data-cancel>Cancel</button>
+      <button type="submit" class="venture-btn primary" data-submit>Create</button>
+    </div>
     <div class="venture-muted" aria-live="polite"></div>
   `;
-  modal.querySelector('[data-cancel]').addEventListener('click', () => modal.remove());
+  document.body.appendChild(backdrop);
+  document.body.appendChild(modal);
+  let emailAccountsById = new Map();
+  const status = modal.querySelector('[aria-live]');
+  const submit = modal.querySelector('[data-submit]');
+  const syncType = () => {
+    const isQuest = modal.querySelector('[name="session_type"]:checked')?.value === 'quest';
+    modal.querySelector('[data-chat-fields]').hidden = isQuest;
+    modal.querySelector('[data-quest-fields]').hidden = !isQuest;
+    submit.textContent = isQuest ? 'Launch Quest' : 'Start Chat';
+  };
+  modal.querySelectorAll('[name="session_type"]').forEach(input => input.addEventListener('change', syncType));
+  modal.querySelector('[name="source_type"]').addEventListener('change', () => syncQuestWizardSourcePanel(modal));
+  modal.querySelector('[name="source_files"]').addEventListener('change', () => syncSelectedFiles(modal));
+  modal.querySelector('[data-cancel]').addEventListener('click', () => closeVentureModal(modal, backdrop));
+  backdrop.addEventListener('click', () => closeVentureModal(modal, backdrop));
   modal.addEventListener('submit', async e => {
     e.preventDefault();
-    const fd = new FormData(modal);
-    const type = fd.get('source_type');
-    const ref = fd.get('source_ref');
-    const config = type === 'email'
-      ? { account_id: ref, scope: { mailbox: 'INBOX', query: ref } }
-      : { reference: ref, url: type === 'website' ? ref : undefined, summary: ref };
-    const payload = {
-      title: fd.get('title'),
-      exploration_goal: fd.get('exploration_goal'),
-      initial_question: fd.get('initial_question'),
-      desired_outcome: fd.get('desired_outcome'),
-      source: { source_type: type, display_name: fd.get('source_name'), configuration: config },
-      shipmates: String(fd.get('shipmates') || '').split(',').map(s => s.trim()).filter(Boolean),
-    };
-    const res = await fetch(`${API_BASE}/api/quests`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    if (!res.ok) {
-      modal.querySelector('[aria-live]').textContent = (await res.json().catch(() => ({}))).detail || 'Quest creation failed.';
-      return;
+    submit.disabled = true;
+    status.textContent = '';
+    try {
+      const type = modal.querySelector('[name="session_type"]:checked')?.value || 'chat';
+      if (type === 'chat') {
+        await launchRegularChatFromWizard(modal, backdrop, status);
+      } else {
+        await createQuestFromWizard(modal, status, emailAccountsById);
+        closeVentureModal(modal, backdrop);
+      }
+    } catch (err) {
+      status.textContent = err?.message || 'Session creation failed.';
+    } finally {
+      submit.disabled = false;
     }
-    const data = await res.json();
-    modal.remove();
-    currentQuestId = data.quest.id;
-    history.replaceState(null, '', `#${data.quest.id}`);
-    await renderRightRail();
   });
-  document.body.appendChild(modal);
+  syncType();
+  syncQuestWizardSourcePanel(modal);
+  loadWizardOptions(modal).then(map => { emailAccountsById = map; }).catch(() => {
+    status.textContent = 'Some setup options could not be loaded.';
+  });
+  setTimeout(() => modal.querySelector('[name="session_type"]')?.focus(), 0);
 }
+
+window.argosVentureOpenSessionWizard = openSessionWizard;
 
 async function openArtifactDraft(proposalId) {
   const data = await getJson(`/api/library/artifact-drafts/${encodeURIComponent(proposalId)}`);
@@ -325,9 +605,13 @@ async function initVenture() {
   document.body.classList.add('argos-venture', caps.role === 'captain' ? 'venture-captain' : 'venture-shipmate');
   installStyles();
   applyTerminology();
+  hideVentureNewChatShortcuts();
   installShipmateCaptureGuards();
   hardDisableShipmateControls();
-  setInterval(hardDisableShipmateControls, 1000);
+  setInterval(() => {
+    hideVentureNewChatShortcuts();
+    hardDisableShipmateControls();
+  }, 1000);
   await renderRightRail();
   window.addEventListener('hashchange', () => loadQuest(selectedQuestId()));
   window.addEventListener('odysseus:session-selected', e => loadQuest(e.detail?.id || selectedQuestId()));
@@ -341,4 +625,3 @@ if (document.readyState === 'loading') {
 }
 
 export default { initVenture };
-
