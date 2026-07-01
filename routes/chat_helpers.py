@@ -1152,6 +1152,29 @@ def run_post_response_tasks(
     if _extraction_jobs:
         _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))
 
+    # Venture Quest-local synthesis. This is intentionally not an LLM call; it
+    # uses already-persisted Voyage Log/source evidence to create or update a
+    # Captain-private draft when thresholds are met.
+    try:
+        from src.runtime_profile import is_venture_runtime
+        if is_venture_runtime() and not incognito and not compare_mode:
+            from core.database import SessionLocal as _SL, Session as _DbSession
+            from src.venture_synthesis import run_argo_synthesis
+            _db = _SL()
+            try:
+                _row = _db.query(_DbSession).filter(_DbSession.id == session_id).first()
+                if _row and _row.owner:
+                    _result = run_argo_synthesis(_db, session_id, _row.owner)
+                    _db.commit()
+                    logger.debug("[venture-synthesis] %s", _result.to_dict())
+            except Exception:
+                _db.rollback()
+                logger.warning("[venture-synthesis] post-response synthesis failed for %s", session_id, exc_info=True)
+            finally:
+                _db.close()
+    except Exception:
+        logger.debug("[venture-synthesis] unavailable", exc_info=True)
+
     # Token accumulation
     if last_metrics:
         accumulate_token_usage(session_id, last_metrics)

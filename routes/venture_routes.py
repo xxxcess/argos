@@ -34,6 +34,7 @@ from core.database import (
 from core.session_manager import SessionManager
 from src.auth_helpers import effective_user, require_user
 from src.runtime_profile import require_venture_runtime, runtime_summary
+from src.venture_synthesis import run_argo_synthesis, set_synthesis_paused
 from src.venture_auth import (
     get_quest_role,
     get_visible_quest_ids,
@@ -695,6 +696,14 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             if not row:
                 raise HTTPException(404, "Quest source not found")
             now = utcnow_naive()
+            if row.source_type == "email":
+                from src.venture_email import poll_email_source
+                poll_result = poll_email_source(db, row)
+                if poll_result.get("changed"):
+                    db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Email Quest Source update detected: {row.display_name}", meta_data=_json_dumps({"event_type": "source_update_detected", "source_id": row.id, "version_id": poll_result.get("version_id"), "actor": "argo"})))
+                synthesis = run_argo_synthesis(db, quest_id, captain).to_dict() if poll_result.get("changed") else {"created": False, "updated": False, "proposal_id": None, "evidence_count": 0, "reason": "no_email_updates"}
+                db.commit()
+                return {"source": _source_to_dict(row, "raw"), "version_id": poll_result.get("version_id"), "email_poll": poll_result, "synthesis": synthesis}
             cfg = _json_loads(row.configuration_json, {})
             fingerprint = hashlib.sha256(_json_dumps({"source": row.id, "cfg": cfg, "time": now.isoformat()}).encode("utf-8")).hexdigest()
             version = QuestSourceVersion(id=uuid.uuid4().hex, quest_source_id=row.id, version_label=f"v{len(row.versions) + 1}", source_fingerprint=fingerprint, provenance_json=_json_dumps({"refreshed_by": captain, "source_type": row.source_type}), captured_at=now)
@@ -707,8 +716,9 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                 cp.cursor = hashlib.sha256(f"{row.id}:{now.isoformat()}".encode()).hexdigest()
                 db.add(cp)
             db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Source refreshed: {row.display_name}", meta_data=_json_dumps({"event_type": "source_refreshed", "source_id": row.id, "version_id": version.id, "actor": captain})))
+            synthesis = run_argo_synthesis(db, quest_id, captain).to_dict()
             db.commit()
-            return {"source": _source_to_dict(row, "raw"), "version_id": version.id}
+            return {"source": _source_to_dict(row, "raw"), "version_id": version.id, "synthesis": synthesis}
         except Exception:
             db.rollback()
             raise
@@ -736,6 +746,49 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
     @router.post("/api/quests/{quest_id}/sources/{source_id}/resume")
     def resume_source(request: Request, quest_id: str, source_id: str):
         return _set_source_status(request, quest_id, source_id, "active")
+
+    @router.post("/api/quests/{quest_id}/argo-synthesis/run")
+    def run_synthesis(request: Request, quest_id: str):
+        require_venture_runtime()
+        captain = require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            result = run_argo_synthesis(db, quest_id, captain)
+            db.commit()
+            return {"synthesis": result.to_dict()}
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @router.post("/api/quests/{quest_id}/argo-synthesis/pause")
+    def pause_synthesis(request: Request, quest_id: str):
+        require_venture_runtime()
+        require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            state = set_synthesis_paused(db, quest_id, True)
+            db.commit()
+            return {"ok": True, "synthesis_paused": bool(state.get("synthesis_paused"))}
+        finally:
+            db.close()
+
+    @router.post("/api/quests/{quest_id}/argo-synthesis/resume")
+    def resume_synthesis(request: Request, quest_id: str):
+        require_venture_runtime()
+        require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            state = set_synthesis_paused(db, quest_id, False)
+            result = run_argo_synthesis(db, quest_id, require_quest_captain(request, quest_id))
+            db.commit()
+            return {"ok": True, "synthesis_paused": bool(state.get("synthesis_paused")), "synthesis": result.to_dict()}
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def _proposal_document_content(body: ProposalCreate) -> str:
         evidence = "\n".join(f"- {item}" for item in body.evidence_refs) or "- Evidence reference pending"
@@ -994,4 +1047,3 @@ Review the cited evidence, validate the pattern, and decide whether to publish t
         return {"ok": True}
 
     return router
-
