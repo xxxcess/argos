@@ -5,10 +5,15 @@ from fastapi.testclient import TestClient
 
 from core.database import (
     Base,
+    ChatMessage,
     Document,
+    EmailAccount,
+    GalleryImage,
     QuestArtifactProposal,
     QuestMember,
     QuestMemoryEntry,
+    QuestSourceCheckpoint,
+    QuestSourceVersion,
     Session as DbSession,
     SessionLocal as RealSessionLocal,
     UserNotification,
@@ -276,3 +281,141 @@ def test_quest_memory_vector_namespace_requires_matching_session(monkeypatch):
         pass
     else:
         raise AssertionError("cross-Quest memory metadata should be rejected")
+
+
+def test_shipmate_can_read_published_document_artifact_but_not_edit(monkeypatch):
+    client, SessionLocal, app, sm, *_ = _client(monkeypatch)
+    from routes.document_routes import setup_document_routes
+    import routes.document_routes as dr
+    import routes.document_helpers as dh
+
+    monkeypatch.setattr(dr, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(dh, "SessionLocal", SessionLocal, raising=False)
+
+    app.include_router(setup_document_routes(sm))
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invitation_id = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
+    app.state.test_user = "mara"
+    client.post(f"/api/quest-invitations/{invitation_id}/accept")
+    app.state.test_user = "ada"
+
+    db = SessionLocal()
+    try:
+        doc = Document(id="artifact-doc", session_id=quest_id, title="Published Artifact", language="markdown", current_content="# Artifact", owner="ada", is_active=True)
+        draft = Document(id="draft-doc", session_id=None, title="Private Draft", language="markdown", current_content="# Draft", owner="ada", is_active=True)
+        db.add_all([doc, draft])
+        db.commit()
+    finally:
+        db.close()
+
+    app.state.test_user = "mara"
+    assert client.get("/api/document/artifact-doc").status_code == 200
+    assert client.put("/api/document/artifact-doc", json={"content": "# edited"}).status_code == 404
+    assert client.get("/api/document/draft-doc").status_code == 404
+    docs = client.get("/api/documents/library").json()["documents"]
+    assert [d["id"] for d in docs] == ["artifact-doc"]
+
+
+def test_shipmate_can_read_published_gallery_artifact(monkeypatch):
+    client, SessionLocal, app, *_ = _client(monkeypatch)
+    from routes.gallery_routes import setup_gallery_routes
+    import routes.gallery_routes as gr
+
+    monkeypatch.setattr(gr, "SessionLocal", SessionLocal)
+
+    app.include_router(setup_gallery_routes())
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invitation_id = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
+    app.state.test_user = "mara"
+    client.post(f"/api/quest-invitations/{invitation_id}/accept")
+    app.state.test_user = "ada"
+
+    db = SessionLocal()
+    try:
+        db.add(GalleryImage(id="img-artifact", filename="artifact.png", prompt="Artifact image", owner="ada", session_id=quest_id, is_active=True))
+        db.add(GalleryImage(id="img-private", filename="private.png", prompt="Private image", owner="ada", session_id=None, is_active=True))
+        db.commit()
+    finally:
+        db.close()
+
+    app.state.test_user = "mara"
+    assert client.get("/api/gallery/img-artifact").status_code == 200
+    assert client.get("/api/gallery/img-private").status_code == 404
+    items = client.get("/api/gallery/library").json()["items"]
+    assert [i["id"] for i in items] == ["img-artifact"]
+
+
+def test_static_source_refresh_runs_functional_synthesis(monkeypatch):
+    client, SessionLocal, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    source_id = client.get(f"/api/quests/{quest_id}/sources").json()["sources"][0]["id"]
+    db = SessionLocal()
+    try:
+        db.add(ChatMessage(id="m1", session_id=quest_id, role="user", content="The same churn risk appears again."))
+        db.add(ChatMessage(id="m2", session_id=quest_id, role="assistant", content="Argo notes a possible recurring pattern."))
+        db.commit()
+    finally:
+        db.close()
+
+    result = client.post(f"/api/quests/{quest_id}/sources/{source_id}/refresh").json()
+    assert result["synthesis"]["created"] is True
+
+    db = SessionLocal()
+    try:
+        proposal = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.session_id == quest_id).one()
+        doc = db.query(Document).filter(Document.id == proposal.document_id).one()
+        assert doc.session_id is None
+        assert doc.owner == "ada"
+        assert "## Evidence" in doc.current_content
+        assert db.query(UserNotification).filter(UserNotification.resource_id == proposal.id, UserNotification.state == "action_required").count() == 1
+    finally:
+        db.close()
+
+
+def test_email_source_poll_uses_checkpoint_and_marks_memory_stale(monkeypatch, tmp_path):
+    email_db = tmp_path / "email_cache.db"
+    import sqlite3
+    conn = sqlite3.connect(email_db)
+    conn.execute("CREATE TABLE email_tags (message_id TEXT, owner TEXT, uid TEXT, folder TEXT, subject TEXT, sender TEXT, tags TEXT, spam_verdict INTEGER, created_at TEXT)")
+    conn.execute("INSERT INTO email_tags VALUES ('mid1','ada','101','INBOX','Customer churn risk','analyst@example.com','retention',0,'2026-06-30T12:00:00')")
+    conn.commit()
+    conn.close()
+
+    import src.venture_email as ve
+    monkeypatch.setattr(ve, "EMAIL_CACHE_DB", str(email_db))
+
+    client, SessionLocal, *_ = _client(monkeypatch)
+    db = SessionLocal()
+    try:
+        db.add(EmailAccount(id="email-account", owner="ada", name="Work", imap_host="imap.example.test", imap_user="ada@example.test", from_address="ada@example.test"))
+        db.commit()
+    finally:
+        db.close()
+
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    email_source = client.post(
+        f"/api/quests/{quest_id}/sources",
+        json={
+            "source_type": "email",
+            "display_name": "Retention mailbox scope",
+            "configuration": {"account_id": "email-account", "scope": {"mailbox": "INBOX", "subject": "churn"}},
+        },
+    ).json()["source"]
+    db = SessionLocal()
+    try:
+        db.add(QuestMemoryEntry(id="mem-stale", session_id=quest_id, category="finding", visibility="captain_private", state="confirmed", title="Old finding", content="Old", confidence="medium", created_by="argo"))
+        db.commit()
+    finally:
+        db.close()
+
+    result = client.post(f"/api/quests/{quest_id}/sources/{email_source['id']}/refresh").json()
+    assert result["email_poll"]["changed"] is True
+    assert result["email_poll"]["matched_records"] == 1
+
+    db = SessionLocal()
+    try:
+        assert db.query(QuestSourceCheckpoint).filter(QuestSourceCheckpoint.quest_source_id == email_source["id"]).one().cursor
+        assert db.query(QuestSourceVersion).filter(QuestSourceVersion.quest_source_id == email_source["id"]).count() == 1
+        assert db.query(QuestMemoryEntry).filter(QuestMemoryEntry.id == "mem-stale").one().state == "stale"
+    finally:
+        db.close()
