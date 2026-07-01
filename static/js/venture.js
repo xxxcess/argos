@@ -84,6 +84,15 @@ function installStyles() {
     .venture-right-rail.collapsed .venture-rail-title, .venture-right-rail.collapsed .venture-card, .venture-right-rail.collapsed .venture-muted, .venture-right-rail.collapsed .venture-list { visibility:hidden; }
     body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: var(--venture-chat-offset, min(360px, 34vw)); }
     body.argos-venture.venture-quest-rail-collapsed #chat-container { margin-left: 38px; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-bar { display:none!important; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-composer-slot { display:none!important; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-dashboard-header { display:none!important; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-active-panel { display:none!important; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-recent-activity-section { display:none!important; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-operations-drawer,
+    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-palette { display:none!important; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title { font-size:0; }
+    body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title::after { content:"Recent Chats and Quests"; font-size:16px; }
     .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); }
     .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; }
     .venture-muted { opacity: .65; font-size: 12px; }
