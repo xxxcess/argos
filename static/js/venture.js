@@ -4,6 +4,7 @@ const API_BASE = window.API_BASE || '';
 let caps = null;
 let currentQuestId = null;
 const questSessionIds = new Set();
+const questHistorySignatures = new Map();
 
 const captainOnlySelectors = [
   '#workspace-new-tab', '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
@@ -261,6 +262,29 @@ async function getJson(url) {
   const res = await fetch(`${API_BASE}${url}`, { credentials: 'same-origin' });
   if (!res.ok) return null;
   return await res.json().catch(() => null);
+}
+
+function questHistorySignature(history) {
+  if (!Array.isArray(history)) return null;
+  return `count:${history.length}|` + history.map(msg => {
+    const content = typeof msg?.content === 'string' ? msg.content : JSON.stringify(msg?.content || '');
+    return `${msg?.role || ''}:${content.length}:${content.slice(0, 80)}`;
+  }).join('|');
+}
+
+async function syncActiveQuestHistory() {
+  if (!caps?.is_venture || document.hidden) return;
+  const qid = selectedQuestId();
+  if (!qid || !questSessionIds.has(String(qid))) return;
+  if (window.chatModule?.hasActiveStream?.(qid)) return;
+  const data = await getJson(`/api/history/${encodeURIComponent(qid)}`);
+  const signature = questHistorySignature(data?.history || []);
+  if (signature == null) return;
+  const previous = questHistorySignatures.get(qid);
+  questHistorySignatures.set(qid, signature);
+  if (!previous || previous === signature) return;
+  if (String(window.sessionModule?.getCurrentSessionId?.() || '') !== String(qid)) return;
+  await window.sessionModule?.selectSession?.(qid, { keepSidebar: true });
 }
 
 async function renderRightRail() {
@@ -767,9 +791,16 @@ async function initVenture() {
     hideVentureNewChatShortcuts();
     hardDisableShipmateControls();
   }, 1000);
+  setInterval(() => {
+    syncActiveQuestHistory().catch(() => {});
+  }, 4000);
   await renderRightRail();
+  syncActiveQuestHistory().catch(() => {});
   window.addEventListener('hashchange', () => loadQuest(selectedQuestId()));
   window.addEventListener('odysseus:session-selected', e => loadQuest(e.detail?.id || selectedQuestId()));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) syncActiveQuestHistory().catch(() => {});
+  });
   window.addEventListener('argos-venture:quest-membership-updated', async e => {
     await refreshQuestRegistry();
     await loadQuest(e.detail?.questId || selectedQuestId());

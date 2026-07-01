@@ -27,7 +27,7 @@ from src.auth_helpers import effective_user, get_current_user
 from routes.session_routes import _verify_session_owner
 from routes.document_helpers import _owner_session_filter
 from core.database import SessionLocal, get_session_mode, set_session_mode
-from core.database import Session as DBSession, ChatMessage as DBChatMessage
+from core.database import Session as DBSession, ChatMessage as DBChatMessage, QuestBearing
 from core.database import Document as DBDocument, ModelEndpoint
 from routes.research_routes import _resolve_research_endpoint
 from routes.model_routes import _visible_models
@@ -53,14 +53,24 @@ _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
 
 
 def _verify_chat_session_access(request: Request, session_id: str) -> None:
-    if is_venture_runtime():
+    if is_venture_runtime() and _is_venture_quest_session(session_id):
         require_quest_member(request, session_id)
         return
     _verify_session_owner(request, session_id)
 
 
+def _is_venture_quest_session(session_id: str) -> bool:
+    if not is_venture_runtime() or not session_id:
+        return False
+    db = SessionLocal()
+    try:
+        return db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+    finally:
+        db.close()
+
+
 def _shipmate_role(request: Request, session_id: str) -> bool:
-    return is_venture_runtime() and get_quest_role(effective_user(request), session_id) == "shipmate"
+    return is_venture_runtime() and _is_venture_quest_session(session_id) and get_quest_role(effective_user(request), session_id) == "shipmate"
 
 
 def _reject_shipmate_json_controls(request: Request, session_id: str, chat_request: ChatRequest) -> None:

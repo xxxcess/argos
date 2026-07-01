@@ -14,6 +14,7 @@ from routes.session_routes import (
     _message_role,
     _message_text,
     _reject_compact_during_active_run,
+    _verify_session_read_access,
     _verify_session_owner,
 )
 
@@ -45,7 +46,7 @@ def setup_history_routes(session_manager) -> APIRouter:
 
     @router.get("/api/history/{session_id}")
     async def get_session_history(request: Request, session_id: str) -> Dict[str, Any]:
-        _verify_session_owner(request, session_id)
+        _verify_session_read_access(request, session_id)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:

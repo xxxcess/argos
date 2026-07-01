@@ -143,6 +143,20 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
             return
     raise HTTPException(404, f"Session {session_id} not found")
 
+
+def _verify_session_read_access(request: Request, session_id: str, session_manager=None):
+    if is_venture_runtime():
+        db = SessionLocal()
+        try:
+            is_quest = db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+        finally:
+            db.close()
+        if is_quest:
+            from src.venture_auth import require_quest_member
+            require_quest_member(request, session_id)
+            return
+    _verify_session_owner(request, session_id, session_manager)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["sessions"])
@@ -789,7 +803,7 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
 
     @router.get("/history/{sid}")
     def get_history(request: Request, sid: str):
-        _verify_session_owner(request, sid)
+        _verify_session_read_access(request, sid, session_manager)
         try:
             session = session_manager.get_session(sid)
         except KeyError:

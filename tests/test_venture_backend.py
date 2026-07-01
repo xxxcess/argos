@@ -3,6 +3,7 @@ import tempfile
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from core.models import ChatMessage as RuntimeChatMessage
 from core.database import (
     Base,
     ChatMessage,
@@ -130,6 +131,26 @@ def test_regular_venture_chat_is_not_listed_or_read_as_quest(monkeypatch):
     assert client.get("/api/quests/regular-chat").status_code == 404
 
 
+def test_regular_venture_chat_history_remains_owner_scoped(monkeypatch):
+    client, _SessionLocal, app, sm, *_ = _client(monkeypatch)
+    import routes.session_routes as sr
+
+    monkeypatch.setattr(sr, "SessionLocal", _SessionLocal)
+    app.include_router(sr.setup_session_routes(sm, {}))
+    session = sm.create_session(
+        session_id="regular-chat",
+        name="Regular Chat",
+        endpoint_url="http://localhost:11434/v1",
+        model="gpt-test",
+        owner="ada",
+    )
+    session.add_message(RuntimeChatMessage("user", "Owner-only regular chat message"))
+
+    assert client.get("/api/history/regular-chat").status_code == 200
+    app.state.test_user = "mara"
+    assert client.get("/api/history/regular-chat").status_code == 404
+
+
 def test_pending_invitation_grants_no_access_and_accept_is_idempotent(monkeypatch):
     client, SessionLocal, app, *_ = _client(monkeypatch)
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
@@ -162,6 +183,30 @@ def test_pending_invitation_grants_no_access_and_accept_is_idempotent(monkeypatc
         ).count() == 1
     finally:
         db.close()
+
+
+def test_accepted_shipmate_can_load_shared_quest_history(monkeypatch):
+    client, _SessionLocal, app, sm, *_ = _client(monkeypatch)
+    import routes.session_routes as sr
+
+    monkeypatch.setattr(sr, "SessionLocal", _SessionLocal)
+    app.include_router(sr.setup_session_routes(sm, {}))
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invitation_id = client.post(
+        f"/api/quests/{quest_id}/invitations",
+        json={"invitee_username": "mara"},
+    ).json()["invitation_id"]
+    sm.add_message(quest_id, RuntimeChatMessage("user", "Captain note for the shared Voyage Log"))
+    sm.add_message(quest_id, RuntimeChatMessage("assistant", "Argo response for the whole Quest"))
+
+    app.state.test_user = "mara"
+    client.post(f"/api/quest-invitations/{invitation_id}/accept")
+    history = client.get(f"/api/history/{quest_id}")
+
+    assert history.status_code == 200
+    contents = [row["content"] for row in history.json()["history"]]
+    assert "Captain note for the shared Voyage Log" in contents
+    assert "Argo response for the whole Quest" in contents
 
 
 def test_invited_shipmates_show_roster_status_and_captain_progress_resolves(monkeypatch):
