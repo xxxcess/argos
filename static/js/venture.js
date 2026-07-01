@@ -99,6 +99,12 @@ function installStyles() {
     .venture-modal textarea { min-height:72px; resize:vertical; }
     .venture-modal input[type="radio"], .venture-modal input[type="checkbox"] { width:auto; }
     .venture-modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
+    .venture-memory-list { display:grid; gap:8px; margin-top:12px; max-height:58vh; overflow:auto; }
+    .venture-memory-entry { border:1px solid var(--border); border-radius:8px; padding:10px; background:color-mix(in srgb, var(--panel) 86%, var(--fg) 3%); }
+    .venture-memory-entry-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
+    .venture-memory-title { font-weight:700; font-size:13px; }
+    .venture-memory-meta { font-size:11px; opacity:.62; }
+    .venture-memory-content { font-size:12px; line-height:1.45; white-space:pre-wrap; }
     .venture-choice-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; margin:10px 0 14px; }
     .venture-choice { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--panel); cursor:pointer; display:grid; gap:4px; }
     .venture-choice input { position:absolute; opacity:0; pointer-events:none; }
@@ -378,11 +384,45 @@ function argoStatusCard(qid, memory) {
   return h('section', { class: 'venture-card ArgoStatusCard' }, [
     h('h3', { text: 'Argo Status' }),
     h('div', { class: 'venture-muted', text: `${memory.length} Voyage Memory entries visible.` }),
+    caps.can_view_quest_memory ? h('button', { class: 'venture-btn', type: 'button', text: 'View Voyage Memory', onclick: () => openVoyageMemory(qid) }) : null,
     caps.can_review_artifacts ? h('button', { class: 'venture-btn', type: 'button', text: 'Run Synthesis', onclick: async () => {
       await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/argo-synthesis/run`, { method: 'POST', credentials: 'same-origin' });
       await renderRightRail();
     } }) : null,
   ]);
+}
+
+async function openVoyageMemory(qid) {
+  if (!qid || !caps?.can_view_quest_memory) return;
+  const data = await getJson(`/api/quests/${encodeURIComponent(qid)}/memory`);
+  const entries = data?.memory || [];
+  document.querySelectorAll('.VoyageMemoryWindow, .venture-modal-backdrop[data-voyage-memory]').forEach(el => el.remove());
+  const backdrop = h('div', { class: 'venture-modal-backdrop', 'data-voyage-memory': 'true' });
+  const modal = h('div', { class: 'venture-modal VoyageMemoryWindow', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Voyage Memory' });
+  modal.appendChild(h('h2', { text: 'Voyage Memory' }));
+  modal.appendChild(h('div', { class: 'venture-muted', text: 'Quest-local memory for this Voyage Log.' }));
+  const list = h('div', { class: 'venture-memory-list' });
+  if (!entries.length) {
+    list.appendChild(h('div', { class: 'venture-muted', text: 'No Voyage Memory entries yet.' }));
+  } else {
+    entries.forEach(entry => {
+      list.appendChild(h('article', { class: 'venture-memory-entry' }, [
+        h('div', { class: 'venture-memory-entry-head' }, [
+          h('div', { class: 'venture-memory-title', text: entry.title || 'Untitled memory' }),
+          h('div', { class: 'venture-memory-meta', text: [entry.category, entry.state, entry.visibility, entry.confidence].filter(Boolean).join(' · ') }),
+        ]),
+        h('div', { class: 'venture-memory-content', text: entry.content || '' }),
+        entry.pinned ? h('div', { class: 'venture-memory-meta', text: 'Pinned' }) : null,
+      ]));
+    });
+  }
+  modal.appendChild(list);
+  modal.appendChild(h('div', { class: 'venture-modal-actions' }, [
+    h('button', { class: 'venture-btn', type: 'button', text: 'Close', onclick: () => { modal.remove(); backdrop.remove(); } }),
+  ]));
+  backdrop.addEventListener('click', () => { modal.remove(); backdrop.remove(); });
+  document.body.appendChild(backdrop);
+  document.body.appendChild(modal);
 }
 
 function closeVentureModal(modal, backdrop) {
