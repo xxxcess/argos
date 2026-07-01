@@ -76,10 +76,10 @@ function installStyles() {
   style.id = 'venture-style';
   style.textContent = `
     body.argos-venture #current-meta::before { content: "Voyage Log · "; opacity: .75; }
-    .venture-right-rail { --venture-rail-width: min(360px, 34vw); position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: var(--venture-rail-width); min-width: 280px; z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow:auto; padding: 12px; box-sizing: border-box; transition: transform 160ms cubic-bezier(0.22, 0.61, 0.36, 1); }
+    .venture-right-rail { --venture-rail-width: min(360px, 34vw); position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: var(--venture-rail-width); min-width: 280px; max-width: calc(100vw - var(--icon-rail-w, 0px)); z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow-x:hidden; overflow-y:auto; padding: 12px; box-sizing: border-box; transition: transform 160ms cubic-bezier(0.22, 0.61, 0.36, 1); overflow-wrap:anywhere; }
     .venture-right-rail.collapsed { transform: translateX(calc(-100% + 38px)); overflow:hidden; }
     .venture-rail-header { position: sticky; top: 0; z-index: 2; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 0 8px; background:var(--panel, #151515); }
-    .venture-rail-title { font-size:12px; font-weight:700; opacity:.75; }
+    .venture-rail-title { font-size:12px; font-weight:700; opacity:.75; min-width:0; overflow-wrap:anywhere; }
     .venture-rail-toggle { width: 30px; height: 30px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:18px; line-height:1; }
     .venture-right-rail.collapsed .venture-rail-title, .venture-right-rail.collapsed .venture-card, .venture-right-rail.collapsed .venture-muted, .venture-right-rail.collapsed .venture-list { visibility:hidden; }
     body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: var(--venture-chat-offset, min(360px, 34vw)); }
@@ -93,12 +93,16 @@ function installStyles() {
     body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-palette { display:none!important; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title { font-size:0; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title::after { content:"Recent Chats and Quests"; font-size:16px; }
-    .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); }
-    .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; }
-    .venture-muted { opacity: .65; font-size: 12px; }
-    .venture-list { display:flex; flex-direction:column; gap:6px; }
-    .venture-row { display:flex; justify-content:space-between; gap:8px; align-items:center; font-size:12px; }
-    .venture-btn { border:1px solid var(--border); background:var(--bg); color:var(--fg); border-radius:6px; padding:5px 8px; cursor:pointer; font:inherit; font-size:12px; }
+    .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); min-width:0; max-width:100%; box-sizing:border-box; overflow:hidden; overflow-wrap:anywhere; }
+    .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; overflow-wrap:anywhere; }
+    .venture-card p, .venture-card div, .venture-card span { min-width:0; overflow-wrap:anywhere; }
+    .venture-muted { opacity: .65; font-size: 12px; overflow-wrap:anywhere; }
+    .venture-list { display:flex; flex-direction:column; gap:6px; min-width:0; max-width:100%; }
+    .venture-row { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; font-size:12px; min-width:0; max-width:100%; flex-wrap:wrap; }
+    .venture-row > span:first-child, .venture-row > div:first-child { flex:1 1 150px; min-width:0; }
+    .venture-row > .venture-muted { flex:0 1 120px; text-align:right; }
+    .venture-row > .venture-btn { flex:0 0 auto; }
+    .venture-btn { border:1px solid var(--border); background:var(--bg); color:var(--fg); border-radius:6px; padding:5px 8px; cursor:pointer; font:inherit; font-size:12px; max-width:100%; white-space:normal; text-align:center; overflow-wrap:anywhere; }
     .venture-btn.primary { background:var(--fg); color:var(--bg); }
     .venture-modal-backdrop { position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.45); }
     .venture-modal { position:fixed; inset:7vh auto auto 50%; transform:translateX(-50%); width:min(760px, 94vw); max-height:86vh; overflow:auto; z-index:10000; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:16px; box-shadow:0 18px 60px rgba(0,0,0,.35); }
@@ -108,12 +112,12 @@ function installStyles() {
     .venture-modal textarea { min-height:72px; resize:vertical; }
     .venture-modal input[type="radio"], .venture-modal input[type="checkbox"] { width:auto; }
     .venture-modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
-    .venture-memory-list { display:grid; gap:8px; margin-top:12px; max-height:58vh; overflow:auto; }
-    .venture-memory-entry { border:1px solid var(--border); border-radius:8px; padding:10px; background:color-mix(in srgb, var(--panel) 86%, var(--fg) 3%); }
-    .venture-memory-entry-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
-    .venture-memory-title { font-weight:700; font-size:13px; }
-    .venture-memory-meta { font-size:11px; opacity:.62; }
-    .venture-memory-content { font-size:12px; line-height:1.45; white-space:pre-wrap; }
+    .venture-memory-list { display:grid; gap:8px; margin-top:12px; max-height:58vh; overflow:auto; min-width:0; }
+    .venture-memory-entry { border:1px solid var(--border); border-radius:8px; padding:10px; background:color-mix(in srgb, var(--panel) 86%, var(--fg) 3%); min-width:0; overflow-wrap:anywhere; }
+    .venture-memory-entry-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:6px; flex-wrap:wrap; min-width:0; }
+    .venture-memory-title { font-weight:700; font-size:13px; flex:1 1 180px; min-width:0; overflow-wrap:anywhere; }
+    .venture-memory-meta { font-size:11px; opacity:.62; min-width:0; overflow-wrap:anywhere; }
+    .venture-memory-content { font-size:12px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
     .venture-choice-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; margin:10px 0 14px; }
     .venture-choice { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--panel); cursor:pointer; display:grid; gap:4px; }
     .venture-choice input { position:absolute; opacity:0; pointer-events:none; }
