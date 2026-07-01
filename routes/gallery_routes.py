@@ -31,6 +31,34 @@ logger = logging.getLogger(__name__)
 def _current_user_is_admin(request: Request, user: str | None) -> bool:
     if not user:
         return False
+
+
+def _verify_gallery_read_access(request: Request, img: GalleryImage, user: str | None) -> None:
+    from src.runtime_profile import is_venture_runtime
+
+    if is_venture_runtime() and img.session_id:
+        from src.venture_auth import require_gallery_read_access
+
+        require_gallery_read_access(request, img)
+        return
+    if not user or img.owner != user:
+        raise HTTPException(404, "Image not found")
+
+
+def _venture_gallery_visibility_filter(q, user: str | None):
+    from src.runtime_profile import is_venture_runtime
+
+    if not is_venture_runtime():
+        return _owner_filter(q, user)
+    if not user:
+        return q.filter(False)
+    from src.venture_auth import get_visible_quest_ids
+
+    visible_quests = get_visible_quest_ids(user)
+    return q.filter(
+        (GalleryImage.owner == user)
+        | ((GalleryImage.session_id != None) & (GalleryImage.session_id.in_(visible_quests)))  # noqa: E711
+    )
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     is_admin = getattr(auth_mgr, "is_admin", None)
     if not callable(is_admin):
@@ -444,7 +472,7 @@ def setup_gallery_routes() -> APIRouter:
             q = db.query(GalleryImage.tags).filter(
                 GalleryImage.is_active == True, GalleryImage.tags != None, GalleryImage.tags != ""
             )
-            q = _owner_filter(q, user)
+            q = _venture_gallery_visibility_filter(q, user)
             rows = q.all()
             tag_set = set()
             for (raw,) in rows:
@@ -477,7 +505,7 @@ def setup_gallery_routes() -> APIRouter:
             tag_q = db.query(GalleryImage.tags).filter(
                 GalleryImage.is_active == True, GalleryImage.tags != None, GalleryImage.tags != ""
             )
-            tag_q = _owner_filter(tag_q, user)
+            tag_q = _venture_gallery_visibility_filter(tag_q, user)
             tag_rows = tag_q.all()
             all_tags = set()
             for (raw,) in tag_rows:
@@ -490,7 +518,7 @@ def setup_gallery_routes() -> APIRouter:
             model_q = db.query(GalleryImage.model).filter(
                 GalleryImage.is_active == True, GalleryImage.model != None
             )
-            model_q = _owner_filter(model_q, user)
+            model_q = _venture_gallery_visibility_filter(model_q, user)
             model_rows = model_q.distinct().all()
             all_models = sorted([m for (m,) in model_rows if m])
 
@@ -500,7 +528,7 @@ def setup_gallery_routes() -> APIRouter:
                 .outerjoin(DbSession, GalleryImage.session_id == DbSession.id)
                 .filter(GalleryImage.is_active == True)
             )
-            q = _owner_filter(q, user)
+            q = _venture_gallery_visibility_filter(q, user)
 
             # Search filter (prompt + tags + ai_tags)
             if search:
@@ -664,8 +692,8 @@ def setup_gallery_routes() -> APIRouter:
             base = db.query(GalleryImage).filter(GalleryImage.is_active == True)
             size_q = db.query(func.sum(GalleryImage.file_size)).filter(GalleryImage.is_active == True)
             album_q = db.query(GalleryAlbum)
-            base = _owner_filter(base, user)
-            size_q = _owner_filter(size_q, user)
+            base = _venture_gallery_visibility_filter(base, user)
+            size_q = _venture_gallery_visibility_filter(size_q, user)
             album_q = _owner_filter(album_q, user, GalleryAlbum)
             total = base.count()
             total_size = size_q.scalar() or 0
@@ -718,8 +746,7 @@ def setup_gallery_routes() -> APIRouter:
             if not row:
                 raise HTTPException(404, "Image not found")
             img, session_name = row
-            if not user or img.owner != user:
-                raise HTTPException(404, "Image not found")
+            _verify_gallery_read_access(request, img, user)
             return _image_to_dict(img, session_name)
         finally:
             db.close()
@@ -790,10 +817,8 @@ def setup_gallery_routes() -> APIRouter:
             raise HTTPException(400, "No images specified")
         db = SessionLocal()
         try:
-            imgs = db.query(GalleryImage).filter(
-                GalleryImage.id.in_(ids),
-                GalleryImage.owner == user,
-            ).all()
+            imgs_q = db.query(GalleryImage).filter(GalleryImage.id.in_(ids))
+            imgs = _venture_gallery_visibility_filter(imgs_q, user).all()
             if not imgs:
                 raise HTTPException(404, "No images found")
             import io

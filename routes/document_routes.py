@@ -57,7 +57,7 @@ def _library_language_for_document(doc: Document) -> str:
 from routes.document_helpers import (
     DocumentCreate, DocumentUpdate, DocumentPatch,
     _doc_to_dict, _version_to_dict,
-    _verify_doc_owner, _owner_session_filter,
+    _verify_doc_owner, _verify_doc_read_access, _owner_session_filter, _venture_document_visibility_filter,
     _slug, _resolve_user_upload_path, _assert_pdf_marker_upload_owned, _derive_title,
     _PDF_RENDER_SCALE,
 )
@@ -295,7 +295,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
                 .filter(Document.is_active == True).filter(_arch_cond)
             )
-            lang_q = _owner_session_filter(lang_q, user)
+            lang_q = _venture_document_visibility_filter(lang_q, user)
             lang_rows = lang_q.group_by(library_language_expr).all()
             languages = _aggregate_language_facets(lang_rows)
 
@@ -305,7 +305,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
                 .filter(Document.is_active == True).filter(_arch_cond)
             )
-            sc_q = _owner_session_filter(sc_q, user)
+            sc_q = _venture_document_visibility_filter(sc_q, user)
             session_count = sc_q.scalar()
 
             # Base query
@@ -314,7 +314,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
                 .outerjoin(DbSession, Document.session_id == DbSession.id)
                 .filter(Document.is_active == True).filter(_arch_cond)
             )
-            q = _owner_session_filter(q, user)
+            q = _venture_document_visibility_filter(q, user)
 
             # Search filter — split on whitespace and require EACH term to
             # match (title OR content). A single `%foo bar%` LIKE only matched
@@ -394,11 +394,16 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             # can't see this session, instead of returning [] which the
             # UI treats identically to "no docs" and silently masks
             # auth failures.
-            _get_session_or_404(db, session_id, user)
+            from src.runtime_profile import is_venture_runtime
+            if is_venture_runtime():
+                from src.venture_auth import require_quest_member
+                require_quest_member(request, session_id)
+            else:
+                _get_session_or_404(db, session_id, user)
             q = db.query(Document).filter(
                 Document.session_id == session_id
             )
-            if user:
+            if user and not is_venture_runtime():
                 q = q.filter(or_(Document.owner == user, Document.owner.is_(None)))
             docs = q.order_by(Document.created_at.desc()).all()
             return [_doc_to_dict(d) for d in docs]
@@ -414,7 +419,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             doc = db.query(Document).filter(Document.id == doc_id).first()
             if not doc:
                 raise HTTPException(404, "Document not found")
-            _verify_doc_owner(db, doc, user)
+            _verify_doc_read_access(request, db, doc, user)
             return _doc_to_dict(doc)
         finally:
             db.close()
@@ -530,7 +535,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for doc in docs:
                     try:
-                        _verify_doc_owner(db, doc, user)
+                        _verify_doc_read_access(request, db, doc, user)
                     except HTTPException:
                         continue   # skip docs the user doesn't own
                     ext = _ext.get(doc.language or "text", ".txt")

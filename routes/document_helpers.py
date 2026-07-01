@@ -94,6 +94,24 @@ def _verify_doc_owner(db, doc: Document, user: str):
         raise HTTPException(404, "Document not found")
 
 
+def _verify_doc_read_access(request, db, doc: Document, user: str):
+    """Verify read access to a document.
+
+    Nightly keeps the historical owner-only behavior. In Argos Venture, a
+    document assigned to a Quest is a published Quest Artifact and accepted
+    Quest members may read it. Captain-private Artifact Drafts have
+    ``session_id`` NULL and remain owner-only.
+    """
+    from src.runtime_profile import is_venture_runtime
+
+    if is_venture_runtime() and doc.session_id:
+        from src.venture_auth import require_document_read_access
+
+        require_document_read_access(request, doc)
+        return
+    _verify_doc_owner(db, doc, user)
+
+
 def _owner_session_filter(q, user):
     """Restrict a documents query to those owned by `user`.
 
@@ -111,6 +129,25 @@ def _owner_session_filter(q, user):
             return q
         return q.filter(False)
     return q.filter(Document.owner == user)
+
+
+def _venture_document_visibility_filter(q, user):
+    """Restrict document query to owner docs plus published Quest artifacts."""
+    from src.runtime_profile import is_venture_runtime
+
+    if not is_venture_runtime():
+        return _owner_session_filter(q, user)
+    if not user:
+        if user == "" or _auth_disabled():
+            return q
+        return q.filter(False)
+    from src.venture_auth import get_visible_quest_ids
+
+    visible_quests = get_visible_quest_ids(user)
+    return q.filter(
+        (Document.owner == user)
+        | ((Document.session_id != None) & (Document.session_id.in_(visible_quests)))  # noqa: E711
+    )
 
 
 

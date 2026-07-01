@@ -459,8 +459,16 @@ async def serve_generated_image(filename: str, request: Request):
                 _row = _db.query(_GI).filter(_GI.filename == filename).first()
                 # Generated-but-not-yet-imported images have no row → allow.
                 # Row exists with a different owner → 404 (don't confirm existence).
-                if _row is not None and _row.owner and _row.owner != _user:
-                    raise HTTPException(status_code=404, detail="Image not found")
+                if _row is not None:
+                    try:
+                        from src.runtime_profile import is_venture_runtime
+                        if is_venture_runtime() and getattr(_row, "session_id", None):
+                            from src.venture_auth import require_gallery_read_access
+                            require_gallery_read_access(request, _row)
+                        elif _row.owner and _row.owner != _user:
+                            raise HTTPException(status_code=404, detail="Image not found")
+                    except HTTPException:
+                        raise
             finally:
                 _db.close()
     except HTTPException:
