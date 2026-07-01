@@ -88,6 +88,17 @@ def test_venture_routes_are_runtime_gated(monkeypatch):
     assert client.get("/api/venture/capabilities").status_code == 404
 
 
+def test_shipmate_capabilities_expose_only_search_chats_and_quests(monkeypatch):
+    client, *_ = _client(monkeypatch, username="mara")
+    caps = client.get("/api/venture/capabilities").json()
+    assert caps["role"] == "shipmate"
+    assert caps["visible_navigation"] == ["Search", "Chats", "Quests"]
+    assert caps["visible_feature_categories"] == ["quests", "chat"]
+    assert caps["can_use_tools"] is False
+    assert caps["can_switch_model"] is False
+    assert caps["can_attach_files"] is False
+
+
 def test_quest_creation_requires_primary_source_and_backfills_captain(monkeypatch):
     client, SessionLocal, *_ = _client(monkeypatch)
     missing_source = _quest_payload()

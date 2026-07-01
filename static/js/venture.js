@@ -15,6 +15,21 @@ const captainOnlySelectors = [
   'input[type="file"]', '.attachment-strip', '#attach-strip',
 ];
 
+const shipmateSidebarBlockedSelectors = [
+  '#rail-delete-session', '#rail-documents', '#rail-calendar', '#rail-compare', '#rail-cookbook',
+  '#rail-research', '#rail-email', '#rail-gallery', '#rail-archive', '#rail-memory',
+  '#rail-notes', '#rail-tasks', '#rail-theme', '#rail-settings',
+  '#email-section', '#models-section', '#tools-section',
+  '#chats-library-btn', '#session-bulk-bar', '#session-actions-dropdown',
+  '#session-sort-btn', '#session-sort-dropdown', '#session-select-from-dropdown',
+  '#session-bulk-archive', '#session-bulk-delete', '#session-bulk-cancel',
+  '#tool-memory-btn', '#tool-calendar-btn', '#tool-compare-btn', '#tool-cookbook-btn',
+  '#tool-research-btn', '#tool-gallery-btn', '#tool-library-btn', '#tool-notes-btn',
+  '#tool-tasks-btn', '#tool-theme-btn', '#library-new-doc-btn',
+  '#email-compose-btn', '#email-section-title',
+  '#model-sort-btn', '#model-sort-dropdown', '#model-select', '#btn-model-chat',
+];
+
 function h(tag, attrs = {}, children = []) {
   const el = document.createElement(tag);
   Object.entries(attrs || {}).forEach(([k, v]) => {
@@ -61,9 +76,14 @@ function installStyles() {
   style.id = 'venture-style';
   style.textContent = `
     body.argos-venture #current-meta::before { content: "Voyage Log · "; opacity: .75; }
-    .venture-right-rail { position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: min(360px, 34vw); min-width: 280px; z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow:auto; padding: 12px; box-sizing: border-box; }
+    .venture-right-rail { --venture-rail-width: min(360px, 34vw); position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: var(--venture-rail-width); min-width: 280px; z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow:auto; padding: 12px; box-sizing: border-box; transition: transform 160ms cubic-bezier(0.22, 0.61, 0.36, 1); }
     .venture-right-rail.collapsed { transform: translateX(calc(-100% + 38px)); overflow:hidden; }
-    .venture-rail-toggle { position: sticky; top: 0; float: left; width: 28px; height: 28px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; }
+    .venture-rail-header { position: sticky; top: 0; z-index: 2; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 0 8px; background:var(--panel, #151515); }
+    .venture-rail-title { font-size:12px; font-weight:700; opacity:.75; }
+    .venture-rail-toggle { width: 30px; height: 30px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:18px; line-height:1; }
+    .venture-right-rail.collapsed .venture-rail-title, .venture-right-rail.collapsed .venture-card, .venture-right-rail.collapsed .venture-muted, .venture-right-rail.collapsed .venture-list { visibility:hidden; }
+    body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: var(--venture-chat-offset, min(360px, 34vw)); }
+    body.argos-venture.venture-quest-rail-collapsed #chat-container { margin-left: 38px; }
     .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); }
     .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; }
     .venture-muted { opacity: .65; font-size: 12px; }
@@ -91,7 +111,9 @@ function installStyles() {
     .venture-file-list { margin-top:6px; display:grid; gap:4px; }
     .venture-full-span { grid-column:1 / -1; }
     @media (max-width: 900px) { .venture-right-rail { width:min(86vw, 360px); } }
+    @media (max-width: 900px) { body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: min(86vw, 360px); } }
     @media (max-width: 720px) { .venture-choice-grid, .venture-form-grid { grid-template-columns:1fr; } }
+    @media (max-width: 720px) { body.argos-venture.venture-quest-rail-visible #chat-container, body.argos-venture.venture-quest-rail-collapsed #chat-container { margin-left:0; } }
   `;
   document.head.appendChild(style);
 }
@@ -109,7 +131,7 @@ function applyTerminology() {
 
 function hardDisableShipmateControls() {
   if (!isShipmate()) return;
-  captainOnlySelectors.forEach(sel => {
+  [...captainOnlySelectors, ...shipmateSidebarBlockedSelectors].forEach(sel => {
     document.querySelectorAll(sel).forEach(el => {
       el.setAttribute('hidden', '');
       el.setAttribute('aria-hidden', 'true');
@@ -124,6 +146,20 @@ function hardDisableShipmateControls() {
       btn.style.display = 'none';
     }
   });
+  document.querySelectorAll('#rail-search-btn, #sidebar-search-btn, #sessions-section, #session-list').forEach(el => {
+    el.removeAttribute('hidden');
+    el.removeAttribute('aria-hidden');
+    if (el.style.display === 'none') el.style.display = '';
+    if ('disabled' in el) el.disabled = false;
+  });
+  const label = document.getElementById('chats-section-label');
+  if (label) label.textContent = 'Chats and Quests';
+}
+
+function setRailLayoutState(visible, collapsed = false) {
+  document.body.classList.toggle('venture-quest-rail-visible', !!visible && !collapsed);
+  document.body.classList.toggle('venture-quest-rail-collapsed', !!visible && !!collapsed);
+  document.documentElement.style.setProperty('--venture-chat-offset', visible && !collapsed ? 'min(360px, 34vw)' : '0px');
 }
 
 function hideVentureNewChatShortcuts() {
@@ -153,7 +189,7 @@ function hideVentureNewChatShortcuts() {
 function installShipmateCaptureGuards() {
   document.addEventListener('click', e => {
     if (!isShipmate()) return;
-    const blocked = e.target.closest(captainOnlySelectors.join(','));
+    const blocked = e.target.closest([...captainOnlySelectors, ...shipmateSidebarBlockedSelectors].join(','));
     if (blocked) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -215,6 +251,7 @@ async function renderRightRail() {
   let rail = document.getElementById('venture-right-rail');
   if (!qid || !questSessionIds.has(String(qid))) {
     rail?.remove();
+    setRailLayoutState(false);
     return;
   }
   if (!rail) {
@@ -222,12 +259,30 @@ async function renderRightRail() {
     document.body.appendChild(rail);
   }
   rail.innerHTML = '';
-  const toggle = h('button', { class: 'venture-rail-toggle', type: 'button', title: 'Collapse Quest context', text: '▸', onclick: () => rail.classList.toggle('collapsed') });
-  rail.appendChild(toggle);
-  rail.appendChild(h('div', { style: 'clear:both' }));
+  setRailLayoutState(true, rail.classList.contains('collapsed'));
+  const toggle = h('button', {
+    class: 'venture-rail-toggle',
+    type: 'button',
+    title: rail.classList.contains('collapsed') ? 'Expand Quest context' : 'Collapse Quest context',
+    'aria-label': rail.classList.contains('collapsed') ? 'Expand Quest context' : 'Collapse Quest context',
+    text: rail.classList.contains('collapsed') ? '›' : '‹',
+    onclick: () => {
+      rail.classList.toggle('collapsed');
+      const collapsed = rail.classList.contains('collapsed');
+      toggle.textContent = collapsed ? '›' : '‹';
+      toggle.title = collapsed ? 'Expand Quest context' : 'Collapse Quest context';
+      toggle.setAttribute('aria-label', toggle.title);
+      setRailLayoutState(true, collapsed);
+    },
+  });
+  rail.appendChild(h('div', { class: 'venture-rail-header' }, [
+    h('div', { class: 'venture-rail-title', text: 'Quest Context' }),
+    toggle,
+  ]));
   const quest = await getJson(`/api/quests/${encodeURIComponent(qid)}`);
   if (!quest?.quest) {
     rail.remove();
+    setRailLayoutState(false);
     return;
   }
   const [bearing, roster, sources, artifacts, memory] = await Promise.all([

@@ -347,9 +347,9 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             "role": "captain" if is_captain else "shipmate",
             "visible_navigation": (
                 ["Search", "Quests", "Library", "Email", "Documents", "Gallery", "Theme", "Settings"]
-                if is_captain else ["Search", "Quests", "Library", "Documents", "Gallery", "Theme", "Settings"]
+                if is_captain else ["Search", "Chats", "Quests"]
             ),
-            "visible_feature_categories": ["quests", "documents", "gallery"] + (["email", "sources", "artifacts"] if is_captain else []),
+            "visible_feature_categories": ["quests", "chat"] + (["documents", "gallery", "email", "sources", "artifacts"] if is_captain else []),
             "allowed_settings_sections": ["account", "workspace", "models"] if is_captain else ["account"],
             "can_create_quest": is_captain,
             "can_create_artifact": is_captain,
