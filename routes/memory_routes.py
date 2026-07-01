@@ -1,5 +1,5 @@
 # routes/memory_routes.py
-from fastapi import APIRouter, Form, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from typing import Dict, Any, Optional, List
 import json
 import os
@@ -37,7 +37,12 @@ logger = logging.getLogger(__name__)
 
 def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionManager, memory_vector=None):
     """Set up memory-related routes."""
-    router = APIRouter(prefix="/api/memory", tags=["memory"])
+    def _nightly_memory_only():
+        from src.runtime_profile import is_venture_runtime
+        if is_venture_runtime():
+            raise HTTPException(404, "Not found")
+
+    router = APIRouter(prefix="/api/memory", tags=["memory"], dependencies=[Depends(_nightly_memory_only)])
 
     def _owner(request: Request) -> Optional[str]:
         return get_current_user(request)

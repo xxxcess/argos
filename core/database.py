@@ -3,7 +3,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -207,6 +207,120 @@ class ChatMessage(Base):
     __table_args__ = (
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
     )
+
+
+class QuestMember(TimestampMixin, Base):
+    """Accepted Argos Venture Quest roster entry.
+
+    The Quest Captain remains the owning ``sessions.owner``. This table records
+    explicit Quest access only; pending invitations never appear here.
+    """
+    __tablename__ = "quest_members"
+
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    username = Column(String, nullable=False, index=True)
+    role = Column(String, nullable=False, default="shipmate")
+    recruited_by = Column(String, nullable=True)
+
+    session = relationship("Session", backref=backref("quest_members", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "username", name="uq_quest_members_session_username"),
+    )
+
+
+class QuestInvitation(TimestampMixin, Base):
+    """Invitation to recruit a Shipmate into a Venture Quest."""
+    __tablename__ = "quest_invitations"
+
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    invitee_username = Column(String, nullable=False, index=True)
+    invited_by = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)
+    responded_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+    session = relationship("Session", backref=backref("quest_invitations", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        Index(
+            "uq_quest_invitations_pending",
+            "session_id",
+            "invitee_username",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
+
+
+class QuestBearing(Base):
+    """Current Bearing metadata for a Venture Quest."""
+    __tablename__ = "quest_bearings"
+
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True)
+    title = Column(String, nullable=False, default="")
+    exploration_goal = Column(Text, nullable=False, default="")
+    initial_question = Column(Text, nullable=True)
+    desired_outcome = Column(Text, nullable=True)
+    constraints = Column(Text, nullable=True)
+    time_horizon = Column(String, nullable=True)
+    current_summary = Column(Text, nullable=True)
+    open_questions_json = Column(Text, nullable=True, default="[]")
+    next_bearing = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
+
+    session = relationship("Session", backref=backref("quest_bearing", uselist=False, cascade="all, delete-orphan"))
+
+
+class QuestSource(TimestampMixin, Base):
+    """Scoped evidence source attached to one Venture Quest."""
+    __tablename__ = "quest_sources"
+
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    captain_username = Column(String, nullable=False, index=True)
+    source_type = Column(String, nullable=False)
+    source_mode = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    access_mode = Column(String, nullable=False, default="captain_only")
+    configuration_json = Column(Text, nullable=False, default="{}")
+    status = Column(String, nullable=False, default="active", index=True)
+    last_refreshed_at = Column(DateTime, nullable=True)
+    last_processed_at = Column(DateTime, nullable=True)
+
+    session = relationship("Session", backref=backref("quest_sources", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+    )
+
+
+class QuestSourceVersion(Base):
+    __tablename__ = "quest_source_versions"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_source_id = Column(String, ForeignKey("quest_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_label = Column(String, nullable=False)
+    source_fingerprint = Column(String, nullable=True, index=True)
+    provenance_json = Column(Text, nullable=False, default="{}")
+    captured_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    source = relationship("QuestSource", backref=backref("versions", cascade="all, delete-orphan"))
+
+
+class QuestSourceCheckpoint(Base):
+    __tablename__ = "quest_source_checkpoints"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_source_id = Column(String, ForeignKey("quest_sources.id", ondelete="CASCADE"), nullable=False, index=True, unique=True)
+    cursor = Column(Text, nullable=True)
+    last_polled_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    source = relationship("QuestSource", backref=backref("checkpoint", uselist=False, cascade="all, delete-orphan"))
 
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
@@ -767,6 +881,7 @@ class UserNotification(TimestampMixin, Base):
     message = Column(Text, nullable=False, default="")
     action_label = Column(String, nullable=True)
     action_url = Column(String, nullable=True)
+    actions_json = Column(Text, nullable=True)
     resource_type = Column(String, nullable=True)
     resource_id = Column(String, nullable=True)
     deterministic_key = Column(String, nullable=False, unique=True, index=True)
@@ -780,6 +895,78 @@ class UserNotification(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_user_notifications_user_category", "user_id", "category", "updated_at"),
         Index("ix_user_notifications_user_state", "user_id", "state", "archived_at"),
+    )
+
+
+class QuestArtifactProposal(TimestampMixin, Base):
+    """Captain-private Artifact Draft review proposal for one Venture Quest."""
+    __tablename__ = "quest_artifact_proposals"
+
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(String, ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)
+    captain_username = Column(String, nullable=False, index=True)
+    source_task_run_id = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, default="pending_review", index=True)
+    artifact_type = Column(String, nullable=False, default="insight")
+    title = Column(String, nullable=False)
+    summary = Column(Text, nullable=False, default="")
+    evidence_refs_json = Column(Text, nullable=False, default="[]")
+    evidence_fingerprint = Column(String, nullable=False, index=True)
+    source_version_refs_json = Column(Text, nullable=False, default="[]")
+    reviewed_at = Column(DateTime, nullable=True)
+    published_at = Column(DateTime, nullable=True)
+    declined_at = Column(DateTime, nullable=True)
+
+    session = relationship("Session", backref=backref("quest_artifact_proposals", cascade="all, delete-orphan"))
+    document = relationship("Document")
+
+    __table_args__ = (
+        Index("ix_quest_artifact_proposals_session_status", "session_id", "status"),
+        Index("ix_quest_artifact_proposals_fingerprint", "session_id", "evidence_fingerprint"),
+    )
+
+
+class QuestMemoryState(Base):
+    """Quest-local rolling memory state. No global Venture memory scope exists."""
+    __tablename__ = "quest_memory_states"
+
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True)
+    current_bearing_json = Column(Text, nullable=False, default="{}")
+    rolling_summary = Column(Text, nullable=False, default="")
+    last_processed_log_event_id = Column(String, nullable=True)
+    last_processed_source_update_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive, nullable=False)
+
+    session = relationship("Session", backref=backref("quest_memory_state", uselist=False, cascade="all, delete-orphan"))
+
+
+class QuestMemoryEntry(TimestampMixin, Base):
+    """Durable, Quest-local Voyage Memory ledger entry."""
+    __tablename__ = "quest_memory_entries"
+
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    category = Column(String, nullable=False, index=True)
+    visibility = Column(String, nullable=False, default="captain_private", index=True)
+    state = Column(String, nullable=False, default="provisional", index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False, default="")
+    confidence = Column(String, nullable=False, default="low")
+    provenance_json = Column(Text, nullable=False, default="{}")
+    source_version_refs_json = Column(Text, nullable=False, default="[]")
+    origin_event_ids_json = Column(Text, nullable=False, default="[]")
+    created_by = Column(String, nullable=False, default="argo")
+    supersedes_id = Column(String, ForeignKey("quest_memory_entries.id", ondelete="SET NULL"), nullable=True)
+    pinned = Column(Boolean, nullable=False, default=False)
+    valid_until = Column(DateTime, nullable=True)
+
+    session = relationship("Session", backref=backref("quest_memory_entries", cascade="all, delete-orphan"), foreign_keys=[session_id])
+    supersedes = relationship("QuestMemoryEntry", remote_side=[id], foreign_keys=[supersedes_id])
+
+    __table_args__ = (
+        Index("ix_quest_memory_entries_session_state", "session_id", "state"),
+        Index("ix_quest_memory_entries_session_visibility", "session_id", "visibility"),
     )
 
 
@@ -1965,6 +2152,65 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+    _migrate_add_notification_actions()
+    _migrate_backfill_quest_captain_members()
+
+
+def _migrate_add_notification_actions():
+    """Add structured notification actions for Venture approval workflows."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(user_notifications)"))]
+            if "actions_json" not in cols:
+                conn.execute(text("ALTER TABLE user_notifications ADD COLUMN actions_json TEXT"))
+                conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"notification actions migration: {e}")
+
+
+def _migrate_backfill_quest_captain_members():
+    """Backfill one Captain QuestMember for every owned Session.
+
+    Null-owner legacy sessions are intentionally skipped. Shipmates are never
+    inferred or auto-enrolled by migration.
+    """
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                """
+                SELECT id, owner FROM sessions
+                WHERE owner IS NOT NULL AND owner != ''
+                """
+            )).fetchall()
+            now = utcnow_naive()
+            inserted = 0
+            for sid, owner in rows:
+                existing = conn.execute(text(
+                    "SELECT 1 FROM quest_members WHERE session_id = :sid AND username = :owner"
+                ), {"sid": sid, "owner": owner}).first()
+                if existing:
+                    continue
+                conn.execute(text(
+                    """
+                    INSERT INTO quest_members
+                      (id, session_id, username, role, recruited_by, created_at, updated_at)
+                    VALUES
+                      (:id, :sid, :owner, 'captain', :owner, :created_at, :updated_at)
+                    """
+                ), {
+                    "id": __import__("uuid").uuid4().hex,
+                    "sid": sid,
+                    "owner": owner,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+                inserted += 1
+            conn.commit()
+            if inserted:
+                logging.getLogger(__name__).info("Backfilled %d Quest Captain membership row(s)", inserted)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"quest captain membership backfill: {e}")
 
 
 def _migrate_backfill_task_folders():

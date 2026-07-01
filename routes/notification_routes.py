@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -40,6 +41,14 @@ def setup_notification_routes() -> APIRouter:
             return None
 
     def _notification_to_dict(row: UserNotification) -> dict:
+        actions = []
+        if row.actions_json:
+            try:
+                parsed = json.loads(row.actions_json)
+                if isinstance(parsed, list):
+                    actions = [a for a in parsed if isinstance(a, dict)]
+            except Exception:
+                actions = []
         return {
             "id": row.id,
             "category": row.category,
@@ -52,6 +61,7 @@ def setup_notification_routes() -> APIRouter:
             "interaction_id": row.interaction_id,
             "action_label": row.action_label,
             "action_url": row.action_url,
+            "actions": actions,
             "resource_type": row.resource_type,
             "resource_id": row.resource_id,
             "read": row.read_at is not None,
@@ -185,4 +195,3 @@ def setup_notification_routes() -> APIRouter:
             db.close()
 
     return router
-

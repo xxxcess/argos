@@ -693,6 +693,8 @@ from routes.notification_routes import setup_notification_routes
 app.include_router(setup_notification_routes())
 from routes.interaction_routes import setup_interaction_routes
 app.include_router(setup_interaction_routes())
+from routes.venture_routes import setup_venture_routes
+app.include_router(setup_venture_routes(session_manager))
 
 from routes.assistant_routes import setup_assistant_routes
 app.include_router(setup_assistant_routes(task_scheduler))
@@ -902,6 +904,7 @@ async def runtime_info() -> Dict[str, object]:
     return {
         "in_docker": in_docker,
         "ollama_base_url": ollama_url,
+        **__import__("src.runtime_profile", fromlist=["runtime_summary"]).runtime_summary(),
     }
 
 # ========= LIFECYCLE =========

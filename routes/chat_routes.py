@@ -41,12 +41,69 @@ from routes.chat_helpers import (
 )
 from src.action_intents import classify_tool_intent as _classify_tool_intent
 from src.tool_policy import build_effective_tool_policy
+from src.runtime_profile import is_venture_runtime
+from src.venture_auth import get_quest_role, require_quest_member
+from src.venture_auth import get_visible_quest_ids
 
 logger = logging.getLogger(__name__)
 
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
 _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
+
+
+def _verify_chat_session_access(request: Request, session_id: str) -> None:
+    if is_venture_runtime():
+        require_quest_member(request, session_id)
+        return
+    _verify_session_owner(request, session_id)
+
+
+def _shipmate_role(request: Request, session_id: str) -> bool:
+    return is_venture_runtime() and get_quest_role(effective_user(request), session_id) == "shipmate"
+
+
+def _reject_shipmate_json_controls(request: Request, session_id: str, chat_request: ChatRequest) -> None:
+    if not _shipmate_role(request, session_id):
+        return
+    if chat_request.attachments:
+        raise HTTPException(403, "Shipmates can send plain Quest messages only")
+    if chat_request.use_web or chat_request.use_research or chat_request.preset_id:
+        raise HTTPException(403, "Shipmates cannot use agent, tool, research, or preset controls")
+
+
+def _form_has_enabled_value(form_data, key: str) -> bool:
+    value = form_data.get(key)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "none", "null", "[]"}
+    return bool(value)
+
+
+def _reject_shipmate_form_controls(request: Request, session_id: str, form_data, body: dict | None) -> None:
+    if not _shipmate_role(request, session_id):
+        return
+    forbidden_form = {
+        "attachments",
+        "use_web",
+        "use_research",
+        "allow_bash",
+        "allow_web_search",
+        "use_rag",
+        "search_context",
+        "workspace",
+        "preset_id",
+        "approved_plan",
+    }
+    if any(_form_has_enabled_value(form_data, key) for key in forbidden_form):
+        raise HTTPException(403, "Shipmates can send plain Quest messages only")
+    if str(form_data.get("mode") or "").strip().lower() in {"agent", "research"}:
+        raise HTTPException(403, "Shipmates cannot use agent mode")
+    if isinstance(body, dict):
+        forbidden_body = forbidden_form | {"mode", "model", "endpoint_url", "tools"}
+        if any(body.get(key) not in (None, "", False, [], {}) for key in forbidden_body):
+            raise HTTPException(403, "Shipmates can send plain Quest messages only")
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -355,9 +412,10 @@ def setup_chat_routes(
         time_filter = chat_request.time_filter
         preset_id = chat_request.preset_id
 
-        # Verify the caller owns this session before loading it.
-        # Without this, any authenticated user can post into another user's chat.
-        _verify_session_owner(request, session)
+        # Verify session access before loading it. Venture allows accepted
+        # Shipmates into joined Quests; Nightly remains owner-scoped.
+        _verify_chat_session_access(request, session)
+        _reject_shipmate_json_controls(request, session, chat_request)
 
         try:
             sess = session_manager.get_session(session)
@@ -386,7 +444,7 @@ def setup_chat_routes(
 
         # Inline memory command
         memory_response = None
-        if not tool_policy.blocks("manage_memory"):
+        if not _shipmate_role(request, session) and not tool_policy.blocks("manage_memory"):
             memory_response = await chat_handler.handle_memory_command(sess, message)
         if memory_response:
             return {"response": memory_response}
@@ -599,9 +657,10 @@ def setup_chat_routes(
             message, session = coerce_message_and_session(
                 body, message, session, session_manager, allow_empty=_has_atts,
             )
-            # Verify ownership AFTER coerce (which may resolve a default session)
+            # Verify access AFTER coerce (which may resolve a default session)
             # but BEFORE loading. Prevents cross-user session hijack.
-            _verify_session_owner(request, session)
+            _verify_chat_session_access(request, session)
+            _reject_shipmate_form_controls(request, session, form_data, body)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
@@ -1441,7 +1500,7 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/resume/{session_id}")
     async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
-        _verify_session_owner(request, session_id)
+        _verify_chat_session_access(request, session_id)
         if not agent_runs.is_active(session_id):
             raise HTTPException(404, "No active run for this session")
         return StreamingResponse(agent_runs.subscribe(session_id), media_type="text/event-stream")
@@ -1452,7 +1511,7 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/chat/stop/{session_id}")
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
-        _verify_session_owner(request, session_id)
+        _verify_chat_session_access(request, session_id)
         stopped = agent_runs.stop(session_id)
         return {"stopped": stopped}
 
@@ -1461,7 +1520,7 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.get("/api/chat/stream_status/{session_id}")
     async def chat_stream_status(request: Request, session_id: str) -> Dict[str, Any]:
-        _verify_session_owner(request, session_id)
+        _verify_chat_session_access(request, session_id)
         # A detached run can still be going even if _active_streams was popped;
         # report it as active so the client knows to reconnect via /resume.
         # Read once via .get() to avoid a KeyError race between the membership
@@ -1479,7 +1538,9 @@ def setup_chat_routes(
     # ------------------------------------------------------------------ #
     @router.post("/api/inject_context/{session_id}")
     async def inject_context(request: Request, session_id: str, context: str = Form(...)) -> Dict[str, str]:
-        _verify_session_owner(request, session_id)
+        if _shipmate_role(request, session_id):
+            raise HTTPException(403, "Shipmates cannot inject context")
+        _verify_chat_session_access(request, session_id)
         try:
             sess = session_manager.get_session(session_id)
             msg = untrusted_context_message("injected research context", f"Research Context: {context}")
@@ -1502,6 +1563,41 @@ def setup_chat_routes(
             return []
 
         _user = effective_user(request)
+        if is_venture_runtime():
+            ids = get_visible_quest_ids(_user)
+            if not ids:
+                return []
+            db = SessionLocal()
+            try:
+                like = f"%{q.strip()}%"
+                rows = (
+                    db.query(DBChatMessage, DBSession.name)
+                    .join(DBSession, DBChatMessage.session_id == DBSession.id)
+                    .filter(
+                        DBChatMessage.session_id.in_(ids),
+                        DBChatMessage.role.in_(("user", "assistant")),
+                        DBChatMessage.content.ilike(like),
+                        DBSession.archived == False,
+                    )
+                    .order_by(DBChatMessage.timestamp.desc())
+                    .limit(limit)
+                    .all()
+                )
+                return [
+                    {
+                        "message_id": msg.id,
+                        "session_id": msg.session_id,
+                        "session_name": session_name,
+                        "role": msg.role,
+                        "content_snippet": (msg.content or "")[:240],
+                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                        "context_before": [],
+                        "context_after": [],
+                    }
+                    for msg, session_name in rows
+                ]
+            finally:
+                db.close()
         return [
             result.to_dict()
             for result in search_session_messages(
@@ -1535,7 +1631,9 @@ def setup_chat_routes(
         if not session_id or not original_text or not instruction:
             raise HTTPException(400, "session_id, original_text, and instruction are required")
 
-        _verify_session_owner(request, session_id)
+        if _shipmate_role(request, session_id):
+            raise HTTPException(403, "Shipmates cannot rewrite Argo responses")
+        _verify_chat_session_access(request, session_id)
 
         try:
             sess = session_manager.get_session(session_id)
