@@ -205,7 +205,7 @@ export function initKeyboardShortcuts(modules) {
           if (!sessionModule.getSessions().some(x => !x.archived)) {
             sessionModule.setCurrentSessionId(null);
             el('chat-history').innerHTML = '';
-            el('current-meta').textContent = 'Odysseus Chat';
+            el('current-meta').textContent = window.ARGOS_BRAND?.quest_label || 'Odysseus Chat';
             Storage.remove('lastSessionId');
             if (chatModule && chatModule.showWelcomeScreen) chatModule.showWelcomeScreen();
           }

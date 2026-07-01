@@ -1,7 +1,7 @@
 {
-  "name": "Odysseus",
-  "short_name": "Odysseus",
-  "description": "Self-hosted AI chat with memory, documents, and tools",
+  "name": "Argos Venture",
+  "short_name": "Argos Venture",
+  "description": "Evidence-guided exploration workspace with Quests, sources, artifacts, and Voyage Memory",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -807,10 +807,33 @@ app.include_router(setup_companion_routes())
 
 def _serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
     """Read an HTML file and inject the CSP nonce into inline <script> tags."""
+    import json
+
+    from src.runtime_profile import is_venture_runtime, runtime_summary
+
     with open(file_path, "r", encoding="utf-8") as f:
         html = f.read()
     nonce = getattr(request.state, "csp_nonce", "")
     html = html.replace("{{CSP_NONCE}}", nonce)
+    summary = runtime_summary()
+    venture = is_venture_runtime()
+    product_name = summary.get("product") or ("Argos Venture" if venture else "Odysseus")
+    assistant_name = "Argo" if venture else "Odysseus"
+    quest_label = "Quest" if venture else "Odysseus Chat"
+    html = html.replace("{{ARGOS_PRODUCT_NAME}}", str(product_name))
+    html = html.replace("{{ARGOS_ASSISTANT_NAME}}", assistant_name)
+    html = html.replace("{{ARGOS_QUEST_LABEL}}", quest_label)
+    html = html.replace(
+        "{{ARGOS_BRAND_JSON}}",
+        json.dumps(
+            {
+                "product": product_name,
+                "assistant": assistant_name,
+                "quest_label": quest_label,
+                "is_venture": venture,
+            }
+        ),
+    )
     return HTMLResponse(html)
 
 @app.get("/")
@@ -873,6 +896,36 @@ async def serve_login(request: Request):
     if not AUTH_ENABLED:
         return RedirectResponse(url="/", status_code=302)
     return _serve_html_with_nonce(request, abs_join(BASE_DIR, "static/login.html"))
+
+@app.get("/manifest.json")
+async def serve_manifest():
+    from src.runtime_profile import is_venture_runtime, runtime_summary
+
+    venture = is_venture_runtime()
+    product_name = runtime_summary().get("product") or ("Argos Venture" if venture else "Odysseus")
+    description = (
+        "Evidence-guided exploration workspace with Quests, sources, artifacts, and Voyage Memory"
+        if venture
+        else "Self-hosted AI chat with memory, documents, and tools"
+    )
+    return JSONResponse(
+        {
+            "name": product_name,
+            "short_name": product_name,
+            "description": description,
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "orientation": "any",
+            "background_color": "#282c34",
+            "theme_color": "#282c34",
+            "icons": [
+                {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+                {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+                {"src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            ],
+        }
+    )
 
 @app.get("/api/version")
 async def get_version():

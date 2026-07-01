@@ -29,6 +29,13 @@ const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
 let _defaultChatCache = null;
 
+const _brand = () => window.ARGOS_BRAND || {
+  product: 'Odysseus',
+  assistant: 'Odysseus',
+  quest_label: 'Odysseus Chat',
+  is_venture: false,
+};
+
 function _readNewChatDraft() {
   const draft = Storage.getJSON(NEW_CHAT_DRAFT_KEY, null);
   return draft && typeof draft === 'object' ? draft : null;
@@ -1657,7 +1664,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     currentSessionId = id;
     // Identify Assistant / task-output sessions so we don't "trap" the user
     // there on return. Skipped from both `lastSessionId` persistence and the
-    // URL hash — the user complained that coming back to Odysseus kept
+    // URL hash - the user complained that coming back to Argos Venture kept
     // landing them on the auto-firing task-log chat instead of their last
     // real conversation.
     const _meta = sessions.find(s => s.id === id);
@@ -1730,7 +1737,7 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
 
     const currentMetaEl = uiModule.el('current-meta');
     if (currentMetaEl) {
-      currentMetaEl.textContent = meta ? meta.name : 'Odysseus Chat';
+      currentMetaEl.textContent = meta ? meta.name : _brand().quest_label;
     }
     // Update model picker visibility
     updateModelPicker();

@@ -305,7 +305,8 @@ function restoreComposerToChat() {
     }
   }
   const input = document.getElementById('message');
-  if (input) input.placeholder = 'Message Odysseus...';
+  const assistantName = window.ARGOS_BRAND?.assistant || 'Odysseus';
+  if (input) input.placeholder = `Message ${assistantName}...`;
   if (window._updateSendBtnIcon) setTimeout(window._updateSendBtnIcon, 0);
 }
 
@@ -320,7 +321,7 @@ function buildShell() {
   root.setAttribute('aria-label', 'Home dashboard');
   root.innerHTML = `
     <header class="mission-dashboard-header">
-      <div class="mission-dashboard-title"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>Odysseus</div>
+      <div class="mission-dashboard-title"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>${window.ARGOS_BRAND?.product || 'Odysseus'}</div>
     </header>
     <div class="mission-command-bar" aria-label="Session command bar">
       <div class="mission-command-meta">
