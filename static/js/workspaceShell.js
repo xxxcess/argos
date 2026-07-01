@@ -500,14 +500,19 @@ function _renderNotificationRow(row) {
   item.dataset.state = row.state || '';
   item.setAttribute('role', 'listitem');
   const when = row.updated_at ? new Date(row.updated_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  const actions = Array.isArray(row.actions) ? row.actions : [];
+  const actionButtons = actions.length
+    ? actions.map(a => `<button type="button" data-action="venture:${_escAttr(a.id || '')}" class="${a.style === 'primary' ? 'primary' : ''}"></button>`).join('')
+    : (row.action_label ? '<button type="button" data-action="open"></button>' : '');
   item.innerHTML = `
     <div class="workspace-notification-item-top">
       <span class="workspace-notification-item-title"></span>
       <span class="workspace-notification-time">${when}</span>
     </div>
     <div class="workspace-notification-message"></div>
+    <div class="workspace-notification-feedback" aria-live="polite"></div>
     <div class="workspace-notification-actions">
-      ${row.action_label ? '<button type="button" data-action="open"></button>' : ''}
+      ${actionButtons}
       <button type="button" data-action="read">${row.read ? 'Unread' : 'Read'}</button>
       <button type="button" data-action="archive">Archive</button>
     </div>
@@ -516,20 +521,72 @@ function _renderNotificationRow(row) {
   item.querySelector('.workspace-notification-message').textContent = row.message || '';
   const open = item.querySelector('[data-action="open"]');
   if (open) open.textContent = row.action_label || 'Open';
+  actions.forEach(a => {
+    const btn = item.querySelector(`[data-action="venture:${CSS.escape(a.id || '')}"]`);
+    if (btn) btn.textContent = a.label || a.id || 'Action';
+  });
   item.addEventListener('click', async e => {
-    const action = e.target.closest('button')?.dataset.action;
+    const button = e.target.closest('button');
+    const action = button?.dataset.action;
     if (!action) return;
-    if (action === 'open') {
-      _openNotificationTarget(row);
-      await _markNotification(row.id, true);
-    } else if (action === 'read') {
-      await _markNotification(row.id, !row.read);
-    } else if (action === 'archive') {
-      await fetch(`${API_BASE}/api/notifications/${encodeURIComponent(row.id)}/archive`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    try {
+      item.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      if (action.startsWith('venture:')) {
+        await _runVentureNotificationAction(row, action.slice('venture:'.length), item);
+      } else if (action === 'open') {
+        _openNotificationTarget(row);
+        await _markNotification(row.id, true);
+      } else if (action === 'read') {
+        await _markNotification(row.id, !row.read);
+      } else if (action === 'archive') {
+        await fetch(`${API_BASE}/api/notifications/${encodeURIComponent(row.id)}/archive`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+      }
+      _loadNotificationView(_activeView);
+    } catch (err) {
+      const fb = item.querySelector('.workspace-notification-feedback');
+      if (fb) fb.textContent = err?.message || 'Action failed. Try again.';
+      item.querySelectorAll('button').forEach(b => { b.disabled = false; });
     }
-    _loadNotificationView(_activeView);
   });
   return item;
+}
+
+function _escAttr(v) {
+  return String(v || '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+async function _runVentureNotificationAction(row, actionId, item) {
+  let url = '';
+  if (row.resource_type === 'quest_invitation') {
+    if (actionId === 'accept') url = `/api/quest-invitations/${encodeURIComponent(row.resource_id)}/accept`;
+    if (actionId === 'decline') url = `/api/quest-invitations/${encodeURIComponent(row.resource_id)}/decline`;
+  } else if (row.resource_type === 'quest_artifact_proposal') {
+    if (actionId === 'review') {
+      window.dispatchEvent(new CustomEvent('argos-venture:review-artifact-draft', { detail: { proposalId: row.resource_id } }));
+      await _markNotification(row.id, true);
+      return;
+    }
+    const proposal = await _fetchArtifactProposalLocation(row.resource_id);
+    if (proposal?.session_id) {
+      if (actionId === 'publish') url = `/api/quests/${encodeURIComponent(proposal.session_id)}/artifact-proposals/${encodeURIComponent(row.resource_id)}/publish`;
+      if (actionId === 'decline') url = `/api/quests/${encodeURIComponent(proposal.session_id)}/artifact-proposals/${encodeURIComponent(row.resource_id)}/decline`;
+    }
+  }
+  if (!url) throw new Error('Unsupported notification action');
+  const res = await fetch(`${API_BASE}${url}`, { method: 'POST', credentials: 'same-origin' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || 'Action failed');
+  }
+  const fb = item?.querySelector('.workspace-notification-feedback');
+  if (fb) fb.textContent = 'Saved.';
+}
+
+async function _fetchArtifactProposalLocation(proposalId) {
+  const res = await fetch(`${API_BASE}/api/library/artifact-drafts/${encodeURIComponent(proposalId)}`, { credentials: 'same-origin' });
+  if (!res.ok) return null;
+  const data = await res.json().catch(() => ({}));
+  return data.draft || null;
 }
 
 async function _markNotification(id, read) {
@@ -555,6 +612,10 @@ function _openNotificationTarget(row) {
   }
   if (row.resource_type === 'session' && row.resource_id) {
     window.sessionModule?.selectSession?.(row.resource_id);
+    return;
+  }
+  if (row.resource_type === 'quest_artifact_proposal' && row.resource_id) {
+    window.dispatchEvent(new CustomEvent('argos-venture:review-artifact-draft', { detail: { proposalId: row.resource_id } }));
     return;
   }
   if (row.action_url) window.location.href = row.action_url;
