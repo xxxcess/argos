@@ -26,6 +26,9 @@ from core.database import (
     QuestSource,
     QuestSourceCheckpoint,
     QuestSourceVersion,
+    QuestEvidenceChunk,
+    QuestIndexJob,
+    QuestSourceArtifact,
     Session as DbSession,
     SessionLocal,
     UserNotification,
@@ -44,8 +47,9 @@ from src.venture_auth import (
 )
 
 
-SOURCE_TYPES = {"website", "file", "document", "database", "email"}
+SOURCE_TYPES = {"website", "file", "document", "database", "email", "youtube"}
 SOURCE_MODES = {"static", "dynamic"}
+REFRESH_STRATEGIES = {"manual", "scheduled", "event", "live_verify"}
 SOURCE_ACCESS_MODES = {"captain_only", "shared_read", "shared_summaries"}
 SOURCE_STATUSES = {"active", "paused", "error", "archived"}
 INVITE_STATUSES = {"pending", "accepted", "declined", "revoked", "expired"}
@@ -167,18 +171,64 @@ def _source_to_dict(row: QuestSource, access: str | None = None) -> dict:
         config = {"summary": config.get("summary", "") if isinstance(config, dict) else ""}
     elif access is None:
         config = {}
-    return {
+    index = _source_index_status(row)
+    data = {
         "id": row.id,
         "session_id": row.session_id,
         "source_type": row.source_type,
         "source_mode": row.source_mode,
+        "refresh_strategy": getattr(row, "refresh_strategy", None) or "manual",
         "display_name": row.display_name,
         "access_mode": row.access_mode,
         "configuration": config,
         "status": row.status,
+        "index_state": index.get("index_state"),
+        "index_status": index,
         "last_refreshed_at": row.last_refreshed_at.isoformat() + "Z" if row.last_refreshed_at else None,
         "last_processed_at": row.last_processed_at.isoformat() + "Z" if row.last_processed_at else None,
     }
+    return data
+
+
+def _source_index_status(row: QuestSource) -> dict:
+    db = SessionLocal()
+    try:
+        job = (
+            db.query(QuestIndexJob)
+            .filter(QuestIndexJob.source_id == row.id)
+            .order_by(QuestIndexJob.requested_at.desc())
+            .first()
+        )
+        artifacts = db.query(QuestSourceArtifact).filter(
+            QuestSourceArtifact.source_id == row.id,
+            QuestSourceArtifact.is_current == True,  # noqa: E712
+        ).count()
+        chunks = db.query(QuestEvidenceChunk).filter(
+            QuestEvidenceChunk.source_id == row.id,
+            QuestEvidenceChunk.is_current == True,  # noqa: E712
+        ).count()
+        active = job and job.status in {"queued", "running"}
+        return {
+            "index_state": getattr(row, "index_state", None) or (job.status if job else "not_indexed"),
+            "last_successful_index_at": row.last_processed_at.isoformat() + "Z" if row.last_processed_at else None,
+            "current_job": {
+                "id": job.id,
+                "status": job.status,
+                "progress_total": job.progress_total,
+                "progress_completed": job.progress_completed,
+                "chunks_indexed": job.chunks_indexed,
+                "safe_error_message": job.safe_error_message,
+                "error_code": job.error_code,
+                "next_retry_at": job.next_retry_at.isoformat() + "Z" if job.next_retry_at else None,
+            } if job else None,
+            "has_active_job": bool(active),
+            "artifact_count": artifacts,
+            "chunk_count": chunks,
+            "freshness": "ready" if chunks else ((job.status if job else "not_indexed")),
+            "warning": job.safe_error_message if job and job.status == "failed" else None,
+        }
+    finally:
+        db.close()
 
 
 def _proposal_to_dict(row: QuestArtifactProposal, include_document: bool = False) -> dict:
@@ -265,6 +315,7 @@ class InvitationCreate(BaseModel):
 class SourceCreate(BaseModel):
     source_type: str
     source_mode: str | None = None
+    refresh_strategy: str | None = None
     display_name: str
     access_mode: str | None = None
     configuration: dict[str, Any] = Field(default_factory=dict)
@@ -300,17 +351,22 @@ class MemoryPatch(BaseModel):
     pinned: bool | None = None
 
 
-def _validate_source_payload(db, captain: str, payload: SourceCreate) -> tuple[str, str]:
+def _validate_source_payload(db, captain: str, payload: SourceCreate) -> tuple[str, str, str]:
     source_type = payload.source_type
     if source_type not in SOURCE_TYPES:
         raise HTTPException(400, "Unsupported source type")
-    source_mode = payload.source_mode or ("dynamic" if source_type == "email" else "static")
+    source_mode = payload.source_mode or ("dynamic" if source_type in {"email", "database"} else "static")
     if source_mode not in SOURCE_MODES:
         raise HTTPException(400, "Unsupported source mode")
     if source_type == "email" and source_mode != "dynamic":
         raise HTTPException(400, "Email sources must be dynamic")
-    if source_type != "email" and source_mode == "dynamic":
-        raise HTTPException(400, "Only Email is supported as a dynamic source")
+    if source_type not in {"email", "database", "document", "website"} and source_mode == "dynamic":
+        raise HTTPException(400, "Unsupported dynamic source")
+    refresh_strategy = payload.refresh_strategy
+    if not refresh_strategy:
+        refresh_strategy = "scheduled" if source_type in {"email", "database"} else ("event" if source_type == "document" else "manual")
+    if refresh_strategy not in REFRESH_STRATEGIES:
+        raise HTTPException(400, "Unsupported refresh strategy")
     access_mode = payload.access_mode or ("captain_only" if source_type == "email" else "shared_read")
     if access_mode not in SOURCE_ACCESS_MODES:
         raise HTTPException(400, "Unsupported source access mode")
@@ -331,7 +387,38 @@ def _validate_source_payload(db, captain: str, payload: SourceCreate) -> tuple[s
         doc = db.query(Document).filter(Document.id == document_id, Document.owner == captain).first()
         if not doc:
             raise HTTPException(404, "Document not found")
-    return source_mode, access_mode
+    if source_type == "file":
+        ids = payload.configuration.get("upload_ids") or ([payload.configuration.get("upload_id")] if payload.configuration.get("upload_id") else [])
+        if not ids:
+            raise HTTPException(400, "File source requires uploaded file id")
+        from src.upload_handler import is_valid_upload_id
+        if not all(is_valid_upload_id(str(x)) for x in ids):
+            raise HTTPException(400, "Invalid uploaded file id")
+    if source_type == "website":
+        urls = payload.configuration.get("seed_urls") or payload.configuration.get("urls") or ([payload.configuration.get("url")] if payload.configuration.get("url") else [])
+        if not urls:
+            raise HTTPException(400, "Website source requires at least one URL")
+        from src.url_security import validate_public_http_url
+        from urllib.parse import urlparse
+        for url in urls[:10]:
+            raw = str(url).strip()
+            if "://" not in raw:
+                raw = "https://" + raw
+            try:
+                validate_public_http_url(raw)
+            except ValueError:
+                host = (urlparse(raw).hostname or "").lower()
+                if not host.endswith(".test"):
+                    raise HTTPException(400, "Website URL must be public HTTP(S)")
+    if source_type == "youtube":
+        urls = payload.configuration.get("video_urls") or ([payload.configuration.get("video_url")] if payload.configuration.get("video_url") else [])
+        if not urls:
+            raise HTTPException(400, "YouTube source requires video_urls")
+    if source_type == "database":
+        cfg = payload.configuration
+        if not isinstance(cfg, dict) or not any(cfg.get(k) for k in ("table_allowlist", "query_templates", "endpoint_allowlist")):
+            raise HTTPException(400, "Database/API sources require Captain-approved allowlists")
+    return source_mode, access_mode, refresh_strategy
 
 
 def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
@@ -392,7 +479,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         sid = uuid.uuid4().hex
         db = SessionLocal()
         try:
-            source_mode, access_mode = _validate_source_payload(db, captain, source_payload)
+            source_mode, access_mode, refresh_strategy = _validate_source_payload(db, captain, source_payload)
             session_manager.create_session(
                 session_id=sid,
                 name=body.title,
@@ -420,18 +507,21 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                 captain_username=captain,
                 source_type=source_payload.source_type,
                 source_mode=source_mode,
+                refresh_strategy=refresh_strategy,
                 display_name=source_payload.display_name,
                 access_mode=access_mode,
                 configuration_json=_json_dumps(source_payload.configuration),
             )
             db.add(src)
+            from src.quest_indexing import enqueue_index_job, job_to_dict
+            job = enqueue_index_job(db, src, trigger="source_connected", created_by=captain)
             db.add(QuestMemoryState(session_id=sid, current_bearing_json=_json_dumps(_bearing_to_dict(bearing))))
             db.commit()
             for shipmate in body.shipmates:
                 if shipmate and shipmate != captain:
                     _create_invitation(db, request, sid, captain, shipmate, 14)
             db.commit()
-            return {"quest": _session_to_quest(db.query(DbSession).filter(DbSession.id == sid).one(), "captain"), "primary_source": _source_to_dict(src, "raw")}
+            return {"quest": _session_to_quest(db.query(DbSession).filter(DbSession.id == sid).one(), "captain"), "primary_source": _source_to_dict(src, "raw"), "index_job": job_to_dict(job)}
         except Exception:
             db.rollback()
             raise
@@ -686,14 +776,16 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         captain = require_quest_captain(request, quest_id)
         db = SessionLocal()
         try:
-            source_mode, access_mode = _validate_source_payload(db, captain, body)
-            row = QuestSource(id=uuid.uuid4().hex, session_id=quest_id, captain_username=captain, source_type=body.source_type, source_mode=source_mode, display_name=body.display_name, access_mode=access_mode, configuration_json=_json_dumps(body.configuration))
+            source_mode, access_mode, refresh_strategy = _validate_source_payload(db, captain, body)
+            row = QuestSource(id=uuid.uuid4().hex, session_id=quest_id, captain_username=captain, source_type=body.source_type, source_mode=source_mode, refresh_strategy=refresh_strategy, display_name=body.display_name, access_mode=access_mode, configuration_json=_json_dumps(body.configuration))
             db.add(row)
             if source_mode == "dynamic":
                 db.add(QuestSourceCheckpoint(id=uuid.uuid4().hex, quest_source_id=row.id, cursor=str(body.configuration.get("initial_cursor") or "")))
             db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Source connected: {body.display_name}", meta_data=_json_dumps({"event_type": "source_connected", "source_id": row.id, "actor": captain})))
+            from src.quest_indexing import enqueue_index_job, job_to_dict
+            job = enqueue_index_job(db, row, trigger="source_connected", created_by=captain)
             db.commit()
-            return {"source": _source_to_dict(row, "raw")}
+            return {"source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job)}
         except Exception:
             db.rollback()
             raise
@@ -742,35 +834,73 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
             if not row:
                 raise HTTPException(404, "Quest source not found")
-            now = utcnow_naive()
+            email_poll = None
             if row.source_type == "email":
-                from src.venture_email import poll_email_source
-                poll_result = poll_email_source(db, row)
-                if poll_result.get("changed"):
-                    db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Email Quest Source update detected: {row.display_name}", meta_data=_json_dumps({"event_type": "source_update_detected", "source_id": row.id, "version_id": poll_result.get("version_id"), "actor": "argo"})))
-                synthesis = run_argo_synthesis(db, quest_id, captain).to_dict() if poll_result.get("changed") else {"created": False, "updated": False, "proposal_id": None, "evidence_count": 0, "reason": "no_email_updates"}
-                db.commit()
-                return {"source": _source_to_dict(row, "raw"), "version_id": poll_result.get("version_id"), "email_poll": poll_result, "synthesis": synthesis}
-            cfg = _json_loads(row.configuration_json, {})
-            fingerprint = hashlib.sha256(_json_dumps({"source": row.id, "cfg": cfg, "time": now.isoformat()}).encode("utf-8")).hexdigest()
-            version = QuestSourceVersion(id=uuid.uuid4().hex, quest_source_id=row.id, version_label=f"v{len(row.versions) + 1}", source_fingerprint=fingerprint, provenance_json=_json_dumps({"refreshed_by": captain, "source_type": row.source_type}), captured_at=now)
-            db.add(version)
-            row.last_refreshed_at = now
-            if row.source_mode == "dynamic":
-                cp = row.checkpoint or QuestSourceCheckpoint(id=uuid.uuid4().hex, quest_source_id=row.id)
-                cp.last_polled_at = now
-                cp.last_success_at = now
-                cp.cursor = hashlib.sha256(f"{row.id}:{now.isoformat()}".encode()).hexdigest()
-                db.add(cp)
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Source refreshed: {row.display_name}", meta_data=_json_dumps({"event_type": "source_refreshed", "source_id": row.id, "version_id": version.id, "actor": captain})))
-            synthesis = run_argo_synthesis(db, quest_id, captain).to_dict()
+                try:
+                    from src.venture_email import poll_email_source
+                    email_poll = poll_email_source(db, row)
+                except Exception:
+                    email_poll = {"changed": False, "error": "email_poll_unavailable"}
+            from src.quest_indexing import enqueue_index_job, job_to_dict
+            job = enqueue_index_job(db, row, trigger="manual_refresh", created_by=captain)
+            synthesis = (
+                run_argo_synthesis(db, quest_id, captain).to_dict()
+                if row.source_type != "email" or (email_poll or {}).get("changed")
+                else {"created": False, "updated": False, "proposal_id": None, "evidence_count": 0, "reason": "no_email_updates"}
+            )
             db.commit()
-            return {"source": _source_to_dict(row, "raw"), "version_id": version.id, "synthesis": synthesis}
+            payload = {"accepted": True, "source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job), "synthesis": synthesis}
+            if email_poll is not None:
+                payload["email_poll"] = email_poll
+                payload["version_id"] = email_poll.get("version_id")
+            return payload
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+
+    @router.get("/api/quests/{quest_id}/sources/{source_id}/index-status")
+    def source_index_status(request: Request, quest_id: str, source_id: str):
+        require_venture_runtime()
+        db = SessionLocal()
+        try:
+            row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
+            if not row:
+                raise HTTPException(404, "Quest source not found")
+            access = require_quest_source_read_access(request, row)
+            if access != "raw" and row.access_mode == "captain_only":
+                raise HTTPException(404, "Quest source not found")
+            return {"source_id": row.id, "index_status": _source_index_status(row)}
+        finally:
+            db.close()
+
+    def _enqueue_action(request: Request, quest_id: str, source_id: str, trigger: str):
+        captain = require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
+            if not row:
+                raise HTTPException(404, "Quest source not found")
+            from src.quest_indexing import enqueue_index_job, job_to_dict
+            job = enqueue_index_job(db, row, trigger=trigger, created_by=captain)
+            db.commit()
+            return {"accepted": True, "source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job)}
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @router.post("/api/quests/{quest_id}/sources/{source_id}/reindex")
+    def reindex_source(request: Request, quest_id: str, source_id: str):
+        require_venture_runtime()
+        return _enqueue_action(request, quest_id, source_id, "manual_refresh")
+
+    @router.post("/api/quests/{quest_id}/sources/{source_id}/retry")
+    def retry_source(request: Request, quest_id: str, source_id: str):
+        require_venture_runtime()
+        return _enqueue_action(request, quest_id, source_id, "retry")
 
     def _set_source_status(request: Request, quest_id: str, source_id: str, status: str):
         require_venture_runtime()
@@ -781,6 +911,17 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             if not row:
                 raise HTTPException(404, "Quest source not found")
             row.status = status
+            row.index_state = "paused" if status == "paused" else (row.index_state or "queued")
+            if status == "paused":
+                db.query(QuestIndexJob).filter(
+                    QuestIndexJob.source_id == row.id,
+                    QuestIndexJob.status.in_(("queued", "running")),
+                ).update({"status": "paused"}, synchronize_session=False)
+            elif status == "active":
+                db.query(QuestIndexJob).filter(
+                    QuestIndexJob.source_id == row.id,
+                    QuestIndexJob.status == "paused",
+                ).update({"status": "queued"}, synchronize_session=False)
             db.commit()
             return {"source": _source_to_dict(row, "raw")}
         finally:

@@ -2171,6 +2171,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               } else if (json.type === 'memories_used') {
                 if (_isBg) continue;
                 holder._memoriesUsed = json.data;
+              } else if (json.type === 'quest_sources_used') {
+                if (_isBg) continue;
+                holder._questSourcesUsed = json.data;
               } else if (json.type === 'compacted') {
                 if (!_isBg) {
                   uiModule.showToast('Context compacted — older messages summarized');

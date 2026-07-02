@@ -92,6 +92,9 @@ class ChatContext:
     rag_sources: list
     web_sources: list
     used_memories: list
+    quest_sources_used: list
+    quest_evidence_context: str
+    quest_retrieval_run_id: Optional[str]
     messages: list
     context_length: int
     was_compacted: bool
@@ -679,6 +682,34 @@ async def build_chat_context(
     for transcript in preprocessed.youtube_transcripts:
         preface.append(untrusted_context_message("youtube transcript", transcript))
 
+    quest_sources_used: list = []
+    quest_evidence_context = ""
+    quest_retrieval_run_id = None
+    try:
+        from core.database import QuestBearing
+        from src.runtime_profile import is_venture_runtime
+        if is_venture_runtime():
+            db = SessionLocal()
+            try:
+                is_quest = db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+            finally:
+                db.close()
+            if is_quest and user and not incognito:
+                from src.quest_retrieval import retrieve_quest_evidence
+                qres = retrieve_quest_evidence(
+                    quest_id=session_id,
+                    requester=user,
+                    query=preprocessed.text_for_context or message,
+                    message_id_or_turn_id=None,
+                )
+                if qres.context:
+                    quest_evidence_context = qres.context
+                    quest_sources_used = qres.recall
+                    quest_retrieval_run_id = qres.run_id
+                    preface.append({"role": "system", "content": qres.context})
+    except Exception:
+        logger.warning("Quest evidence retrieval failed for session %s", session_id, exc_info=True)
+
     # Normalize model ID. Prefer cached endpoint models so group chat does not
     # re-hit slow local /models endpoints on every participant turn.
     norm = _normalize_model_id_from_cache(sess) or normalize_model_id(
@@ -723,6 +754,9 @@ async def build_chat_context(
         rag_sources=rag_sources,
         web_sources=web_sources,
         used_memories=used_memories,
+        quest_sources_used=quest_sources_used,
+        quest_evidence_context=quest_evidence_context,
+        quest_retrieval_run_id=quest_retrieval_run_id,
         messages=messages,
         context_length=context_length,
         was_compacted=was_compacted,
@@ -941,6 +975,7 @@ def save_assistant_response(
     rag_sources: list = None,
     research_sources: list = None,
     used_memories: list = None,
+    quest_sources_used: list = None,
     do_research: bool = False,
     tool_events: list = None,
     incognito: bool = False,
@@ -970,6 +1005,8 @@ def save_assistant_response(
         md["research_sources"] = research_sources
     if used_memories:
         md["memories_used"] = used_memories
+    if quest_sources_used:
+        md["quest_sources_used"] = quest_sources_used
     if do_research and not research_sources:
         md["research_clarification"] = True
     if tool_events:

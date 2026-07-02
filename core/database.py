@@ -283,10 +283,13 @@ class QuestSource(TimestampMixin, Base):
     captain_username = Column(String, nullable=False, index=True)
     source_type = Column(String, nullable=False)
     source_mode = Column(String, nullable=False)
+    refresh_strategy = Column(String, nullable=False, default="manual")
     display_name = Column(String, nullable=False)
     access_mode = Column(String, nullable=False, default="captain_only")
     configuration_json = Column(Text, nullable=False, default="{}")
     status = Column(String, nullable=False, default="active", index=True)
+    index_state = Column(String, nullable=False, default="queued", index=True)
+    current_version_id = Column(String, nullable=True, index=True)
     last_refreshed_at = Column(DateTime, nullable=True)
     last_processed_at = Column(DateTime, nullable=True)
 
@@ -321,6 +324,114 @@ class QuestSourceCheckpoint(Base):
     last_error = Column(Text, nullable=True)
 
     source = relationship("QuestSource", backref=backref("checkpoint", uselist=False, cascade="all, delete-orphan"))
+
+
+class QuestIndexJob(TimestampMixin, Base):
+    """Durable Quest evidence indexing job."""
+    __tablename__ = "quest_index_jobs"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(String, ForeignKey("quest_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_version_id = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, default="queued", index=True)
+    trigger = Column(String, nullable=False, default="manual_refresh", index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    priority = Column(Integer, nullable=False, default=100, index=True)
+    requested_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime, nullable=True, index=True)
+    progress_total = Column(Integer, nullable=False, default=0)
+    progress_completed = Column(Integer, nullable=False, default=0)
+    records_discovered = Column(Integer, nullable=False, default=0)
+    records_changed = Column(Integer, nullable=False, default=0)
+    artifacts_created = Column(Integer, nullable=False, default=0)
+    chunks_created = Column(Integer, nullable=False, default=0)
+    chunks_indexed = Column(Integer, nullable=False, default=0)
+    chunks_deduplicated = Column(Integer, nullable=False, default=0)
+    error_code = Column(String, nullable=True)
+    safe_error_message = Column(Text, nullable=True)
+    created_by = Column(String, nullable=True)
+
+    source = relationship("QuestSource", backref=backref("index_jobs", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        Index("ix_quest_index_jobs_claim", "status", "priority", "requested_at"),
+    )
+
+
+class QuestSourceArtifact(Base):
+    """Captured normalized datasource record before vectorization."""
+    __tablename__ = "quest_source_artifacts"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(String, ForeignKey("quest_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_version_id = Column(String, ForeignKey("quest_source_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    artifact_kind = Column(String, nullable=False)
+    external_locator = Column(Text, nullable=False)
+    title = Column(Text, nullable=True)
+    content_hash = Column(String, nullable=False, index=True)
+    captured_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    updated_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    extraction_method = Column(String, nullable=True)
+    extraction_confidence = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="ready", index=True)
+    raw_reference_json = Column(Text, nullable=False, default="{}")
+    normalized_text_path_or_text = Column(Text, nullable=True)
+    visibility_lane = Column(String, nullable=False, default="shared", index=True)
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+
+    source = relationship("QuestSource", backref=backref("artifacts", cascade="all, delete-orphan"))
+    version = relationship("QuestSourceVersion", backref=backref("artifacts", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        Index("ix_quest_artifacts_current", "quest_id", "source_id", "is_current"),
+        UniqueConstraint("source_version_id", "external_locator", "content_hash", name="uq_quest_artifact_version_locator_hash"),
+    )
+
+
+class QuestEvidenceChunk(Base):
+    """Durable Quest evidence chunk provenance."""
+    __tablename__ = "quest_evidence_chunks"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(String, ForeignKey("quest_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_version_id = Column(String, ForeignKey("quest_source_versions.id", ondelete="CASCADE"), nullable=False, index=True)
+    artifact_id = Column(String, ForeignKey("quest_source_artifacts.id", ondelete="CASCADE"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    chroma_document_id = Column(String, nullable=False, unique=True, index=True)
+    content_hash = Column(String, nullable=False, index=True)
+    locator = Column(Text, nullable=False)
+    visibility_lane = Column(String, nullable=False, default="shared", index=True)
+    is_current = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    artifact = relationship("QuestSourceArtifact", backref=backref("chunks", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        Index("ix_quest_chunks_current", "quest_id", "visibility_lane", "is_current"),
+        UniqueConstraint("artifact_id", "chunk_index", name="uq_quest_chunk_artifact_index"),
+    )
+
+
+class QuestRetrievalRun(Base):
+    """Audit record for Quest evidence injected into a model request."""
+    __tablename__ = "quest_retrieval_runs"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String, nullable=False, index=True)
+    message_id_or_turn_id = Column(String, nullable=True, index=True)
+    requester = Column(String, nullable=True, index=True)
+    retrieved_at = Column(DateTime, nullable=False, default=utcnow_naive)
+    query_hash = Column(String, nullable=False, index=True)
+    retrieval_mode = Column(String, nullable=False, default="indexed")
+    source_ids_json = Column(Text, nullable=False, default="[]")
+    chunk_ids_json = Column(Text, nullable=False, default="[]")
+    live_verified_ids_json = Column(Text, nullable=False, default="[]")
 
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
@@ -1915,6 +2026,32 @@ def _migrate_add_assistant_columns():
         logging.getLogger(__name__).warning(f"assistant columns migration: {e}")
 
 
+def _migrate_add_quest_source_index_columns():
+    """Add Venture Quest source indexing columns to existing SQLite installs."""
+    if "sqlite" not in DATABASE_URL:
+        return
+    try:
+        with engine.begin() as conn:
+            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(quest_sources)")).fetchall()}
+            additions = {
+                "refresh_strategy": "TEXT NOT NULL DEFAULT 'manual'",
+                "index_state": "TEXT NOT NULL DEFAULT 'queued'",
+                "current_version_id": "TEXT",
+            }
+            for col, spec in additions.items():
+                if col not in cols:
+                    conn.execute(text(f"ALTER TABLE quest_sources ADD COLUMN {col} {spec}"))
+            conn.execute(text(
+                "UPDATE quest_sources SET refresh_strategy = CASE "
+                "WHEN source_type = 'email' THEN 'scheduled' "
+                "WHEN source_type = 'document' THEN 'event' "
+                "ELSE COALESCE(refresh_strategy, 'manual') END "
+                "WHERE refresh_strategy IS NULL OR refresh_strategy = ''"
+            ))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"quest source index-column migration failed: {e}")
+
+
 
 
 
@@ -2140,6 +2277,7 @@ def init_db():
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
     _migrate_add_assistant_columns()
+    _migrate_add_quest_source_index_columns()
     _migrate_add_email_smtp_security()
     _migrate_seed_email_account()
     _migrate_add_calendar_metadata()

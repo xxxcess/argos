@@ -1570,6 +1570,63 @@ export function createMsgFooter(msgElement) {
     footer.appendChild(pill);
   }
 
+  const questSources = msgElement._questSourcesUsed;
+  if (questSources && questSources.length > 0) {
+    const pill = document.createElement('button');
+    pill.className = 'memory-used-pill quest-recall-pill';
+    pill.type = 'button';
+    const sourceCount = new Set(questSources.map(s => s.source_id || s.source_name).filter(Boolean)).size || questSources.length;
+    pill.textContent = `⌁ Recall · ${sourceCount} source${sourceCount === 1 ? '' : 's'}`;
+    pill.title = 'Quest evidence used for this answer';
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      let detail = pill._openDetail || document.querySelector('.quest-recall-detail');
+      if (detail) {
+        if (typeof detail._dismiss === 'function') detail._dismiss();
+        else { detail.remove(); pill._openDetail = null; }
+        return;
+      }
+      detail = document.createElement('div');
+      detail.className = 'memory-used-detail quest-recall-detail';
+      let closeDetail = () => { detail.remove(); pill._openDetail = null; };
+      questSources.forEach(src => {
+        const row = document.createElement('div');
+        row.className = 'memory-used-row quest-recall-row';
+        const text = document.createElement('span');
+        text.className = 'memory-used-text';
+        const bits = [
+          src.source_name || 'Quest source',
+          src.locator,
+          src.source_version_id ? `version ${src.source_version_id}` : '',
+          src.freshness,
+          src.extraction_method,
+          src.timestamp,
+        ].filter(Boolean);
+        text.textContent = bits.join(' · ') + (src.excerpt ? `\n${src.excerpt}` : '');
+        row.appendChild(text);
+        detail.appendChild(row);
+      });
+      detail.style.visibility = 'hidden';
+      document.body.appendChild(detail);
+      const pillRect = pill.getBoundingClientRect();
+      const detailRect = detail.getBoundingClientRect();
+      const spaceAbove = pillRect.top;
+      const spaceBelow = window.innerHeight - pillRect.bottom;
+      detail.style.top = (spaceAbove >= detailRect.height + 8 || spaceAbove > spaceBelow)
+        ? (pillRect.top - detailRect.height - 8) + 'px'
+        : (pillRect.bottom + 8) + 'px';
+      detail.style.left = pillRect.left + 'px';
+      if (pillRect.left + detailRect.width > window.innerWidth - 8) {
+        detail.style.left = (window.innerWidth - detailRect.width - 8) + 'px';
+      }
+      if (parseFloat(detail.style.left) < 8) detail.style.left = '8px';
+      detail.style.visibility = '';
+      pill._openDetail = detail;
+      closeDetail = bindMenuDismiss(detail, () => { detail.remove(); pill._openDetail = null; }, (ev) => !detail.contains(ev.target) && ev.target !== pill);
+    });
+    footer.appendChild(pill);
+  }
+
   footer.appendChild(actions);
   return footer;
 }
@@ -2283,6 +2340,7 @@ export function addMessage(role, content, modelName, metadata) {
       const firstWrap = lastMsgAi || lastWrap;
       if (firstWrap && firstWrap.classList.contains('msg-ai')) {
         if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;
+        if (metadata?.quest_sources_used?.length) firstWrap._questSourcesUsed = metadata.quest_sources_used;
         firstWrap.appendChild(createMsgFooter(firstWrap));
         if (metadata) displayMetrics(firstWrap, metadata);
       }
@@ -2588,6 +2646,7 @@ export function addMessage(role, content, modelName, metadata) {
       // survives a page refresh (live-stream path sets it via SSE, but
       // history reloads need this assignment).
       if (metadata?.memories_used?.length) wrap._memoriesUsed = metadata.memories_used;
+      if (metadata?.quest_sources_used?.length) wrap._questSourcesUsed = metadata.quest_sources_used;
       wrap.appendChild(createMsgFooter(wrap));
       if (metadata) displayMetrics(wrap, metadata);
     } else {

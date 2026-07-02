@@ -1002,6 +1002,9 @@ def setup_chat_routes(
             if ctx.used_memories:
                 yield f"data: {json.dumps({'type': 'memories_used', 'data': ctx.used_memories})}\n\n"
 
+            if ctx.quest_sources_used:
+                yield f"data: {json.dumps({'type': 'quest_sources_used', 'data': ctx.quest_sources_used})}\n\n"
+
             # Run research as a background task (survives page refresh)
             if effective_do_research:
                 _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
@@ -1288,6 +1291,7 @@ def setup_chat_routes(
                                     rag_sources=ctx.rag_sources,
                                     research_sources=research_sources,
                                     used_memories=ctx.used_memories,
+                                    quest_sources_used=ctx.quest_sources_used,
                                     do_research=effective_do_research,
                                     incognito=incognito,
                                 )
@@ -1424,6 +1428,7 @@ def setup_chat_routes(
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
                                     used_memories=ctx.used_memories,
+                                    quest_sources_used=ctx.quest_sources_used,
                                     incognito=incognito,
                                 )
                                 if _saved_id:

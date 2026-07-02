@@ -1009,6 +1009,13 @@ async def _startup_event():
     app.state._startup_tasks = _startup_tasks
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
+    try:
+        from src.runtime_profile import is_venture_runtime
+        if is_venture_runtime():
+            from src.quest_indexing import start_quest_index_worker
+            start_quest_index_worker(app, concurrency=2)
+    except Exception as _e:
+        logger.warning("Failed to start Quest index worker: %s", _e)
     # Always-on monitor that auto-continues the agent when a background bash
     # job (#!bg) finishes — re-invokes the turn with the job output.
     try:

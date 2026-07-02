@@ -169,7 +169,7 @@ if [ "$MACHINE_ARCH" = "arm64" ] && command -v apfel >/dev/null 2>&1; then
 fi
 
 CHROMA_PID=""
-CHROMA_HOST="${CHROMADB_HOST:-localhost}"
+CHROMA_HOST="${CHROMADB_HOST:-127.0.0.1}"
 CHROMA_PORT="${CHROMADB_PORT:-${ARGOS_DEFAULT_CHROMADB_PORT:-8100}}"
 export CHROMADB_HOST="$CHROMA_HOST"
 export CHROMADB_PORT="$CHROMA_PORT"
@@ -188,6 +188,41 @@ elif [ -x "$CHROMA_BIN" ]; then
     echo "▶ Starting ChromaDB in the background on $CHROMA_BIND:$CHROMA_PORT…"
     nohup "$CHROMA_BIN" run --host "$CHROMA_BIND" --port "$CHROMA_PORT" --path "$ARGOS_DATA_DIR/chroma" >"$CHROMA_LOG" 2>&1 &
     CHROMA_PID=$!
+else
+    echo "✗ ChromaDB executable is missing from the Python environment."
+    echo "  Re-run after dependencies install, or set CHROMADB_HOST/CHROMADB_PORT to an existing ChromaDB."
+    exit 1
+fi
+
+if [ -n "$CHROMA_BIND" ]; then
+    echo "▶ Waiting for ChromaDB on $CHROMA_HOST:$CHROMA_PORT…"
+    CHROMA_READY=0
+    for _ in $(seq 1 60); do
+        if "$VENV_PY" - "$CHROMA_HOST" "$CHROMA_PORT" >/dev/null 2>&1 <<'PY'
+import sys
+host = sys.argv[1]
+port = int(sys.argv[2])
+import chromadb
+chromadb.HttpClient(host=host, port=port).heartbeat()
+PY
+        then
+            CHROMA_READY=1
+            break
+        fi
+        if [ -n "$CHROMA_PID" ] && ! kill -0 "$CHROMA_PID" 2>/dev/null; then
+            echo "✗ ChromaDB exited before it became ready."
+            echo "  Log: ${CHROMA_LOG:-unknown}"
+            exit 1
+        fi
+        sleep 1
+    done
+    if [ "$CHROMA_READY" != "1" ]; then
+        echo "✗ ChromaDB did not become ready at $CHROMA_HOST:$CHROMA_PORT."
+        [ -n "${CHROMA_LOG:-}" ] && echo "  Log: $CHROMA_LOG"
+        echo "  Override with CHROMADB_HOST/CHROMADB_PORT if you run ChromaDB elsewhere."
+        exit 1
+    fi
+    echo "  ✓ ChromaDB ready"
 fi
 
 URL_HOST="$HOST"

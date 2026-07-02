@@ -5,6 +5,7 @@ let caps = null;
 let currentQuestId = null;
 const questSessionIds = new Set();
 const questHistorySignatures = new Map();
+let questSourcePollTimer = null;
 
 const captainOnlySelectors = [
   '#workspace-new-tab', '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
@@ -335,9 +336,20 @@ async function renderRightRail() {
     getJson(`/api/quests/${encodeURIComponent(qid)}/artifacts`),
     caps.can_view_quest_memory ? getJson(`/api/quests/${encodeURIComponent(qid)}/memory`) : Promise.resolve(null),
   ]);
+  const sourceRows = sources?.sources || [];
+  if (sourceRows.some(s => s.index_status?.has_active_job)) {
+    if (!questSourcePollTimer) {
+      questSourcePollTimer = setInterval(() => {
+        if (!document.hidden) renderRightRail().catch(() => {});
+      }, 4000);
+    }
+  } else if (questSourcePollTimer) {
+    clearInterval(questSourcePollTimer);
+    questSourcePollTimer = null;
+  }
   rail.appendChild(currentBearingCard(bearing?.bearing || {}));
   rail.appendChild(crewRoster(roster?.members || []));
-  if (caps.can_manage_sources || (sources?.sources || []).length) rail.appendChild(sourceCard(sources?.sources || [], qid));
+  if (caps.can_manage_sources || sourceRows.length) rail.appendChild(sourceCard(sourceRows, qid));
   if (caps.can_review_artifacts) rail.appendChild(artifactReviewQueue(qid));
   rail.appendChild(artifactShelf(artifacts || { documents: [], gallery: [] }));
   rail.appendChild(argoStatusCard(qid, memory?.memory || []));
@@ -374,11 +386,49 @@ function crewStatusLabel(member) {
 }
 
 function sourceCard(sources, qid) {
+  const counts = sources.reduce((acc, s) => {
+    const st = s.index_status?.index_state || s.index_state || 'not_indexed';
+    if (st === 'ready') acc.ready++;
+    else if (st === 'queued' || st === 'running') acc.indexing++;
+    else if (st === 'failed' || st === 'partial') acc.attention++;
+    return acc;
+  }, { ready: 0, indexing: 0, attention: 0 });
+  const aggregate = `${counts.ready} ready · ${counts.indexing} indexing · ${counts.attention} needs attention`;
+  const statusText = (s) => {
+    const idx = s.index_status || {};
+    const state = idx.index_state || s.index_state || 'not_indexed';
+    const chunks = idx.chunk_count || 0;
+    const job = idx.current_job || {};
+    const safeErr = job.safe_error_message || idx.warning || '';
+    const errCode = job.error_code ? ` (${job.error_code})` : '';
+    if (state === 'running' || state === 'queued') {
+      const total = job.progress_total || 0;
+      const done = job.progress_completed || 0;
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      if (job.error_code && state === 'queued') return `◌ Retrying · ${safeErr || 'Waiting to retry'}${errCode}`;
+      return `◌ Indexing · ${pct}% · ${done} / ${total}`;
+    }
+    if (state === 'ready') return `● Ready · ${chunks} chunks`;
+    if (state === 'failed') return `△ Needs attention · ${safeErr || 'Indexing failed'}${errCode}`;
+    if (state === 'partial') return `△ Partial · ${chunks} chunks`;
+    return `○ Not indexed`;
+  };
+  const action = (label, source, endpoint) => h('button', { class: 'venture-btn', type: 'button', text: label, onclick: async () => {
+    await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(source.id)}/${endpoint}`, { method: 'POST', credentials: 'same-origin' });
+    await renderRightRail();
+  } });
   return h('section', { class: 'venture-card QuestSourceCard' }, [
     h('h3', { text: 'Quest Sources' }),
+    h('div', { class: 'venture-muted', text: aggregate }),
     h('div', { class: 'venture-list' }, sources.map(s => h('div', { class: 'venture-row' }, [
       h('span', { text: s.display_name }),
-      h('span', { class: 'venture-muted', text: s.access_mode }),
+      h('span', { class: 'venture-muted', text: `${s.access_mode} · ${statusText(s)}` }),
+      caps.can_manage_sources ? h('span', { class: 'venture-source-actions' }, [
+        action('Refresh', s, 'refresh'),
+        (s.index_status?.index_state === 'failed') ? action('Retry', s, 'retry') : null,
+        action('Reindex', s, 'reindex'),
+        s.status === 'paused' ? action('Resume', s, 'resume') : action('Pause', s, 'pause'),
+      ]) : null,
     ]))),
     caps.can_manage_sources ? h('button', { class: 'venture-btn', type: 'button', text: 'Refresh Sources', onclick: async () => {
       for (const s of sources) await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(s.id)}/refresh`, { method: 'POST', credentials: 'same-origin' });
@@ -500,6 +550,7 @@ function selectedCheckboxValues(root, name) {
 function sourceDisplayName(type, config, emailAccountsById) {
   if (type === 'website') return config.urls?.length === 1 ? config.urls[0] : 'Website evidence';
   if (type === 'file') return config.files?.length === 1 ? config.files[0].name : 'Selected files';
+  if (type === 'youtube') return config.video_urls?.length === 1 ? config.video_urls[0] : 'YouTube evidence';
   if (type === 'email') {
     const names = (config.account_ids || [config.account_id])
       .map(id => emailAccountsById.get(id)?.name || emailAccountsById.get(id)?.from_address || id)
@@ -509,7 +560,16 @@ function sourceDisplayName(type, config, emailAccountsById) {
   return 'Quest Source';
 }
 
-function buildSourcePayload(modal, emailAccountsById) {
+async function uploadQuestFiles(files) {
+  const form = new FormData();
+  files.forEach(file => form.append('files', file));
+  const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', credentials: 'same-origin', body: form });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'File upload failed.');
+  const data = await res.json();
+  return data.files || [];
+}
+
+async function buildSourcePayload(modal, emailAccountsById) {
   const type = modal.querySelector('[name="source_type"]')?.value || 'website';
   if (type === 'website') {
     const urls = String(modal.querySelector('[name="source_urls"]')?.value || '')
@@ -523,17 +583,31 @@ function buildSourcePayload(modal, emailAccountsById) {
   if (type === 'file') {
     const files = Array.from(modal.querySelector('[name="source_files"]')?.files || []);
     if (!files.length) throw new Error('Select at least one file.');
-    const fileRefs = files.map(file => ({
+    const uploaded = await uploadQuestFiles(files);
+    const fileRefs = uploaded.map(file => ({
+      upload_id: file.id,
       name: file.name,
       size: file.size,
-      type: file.type || 'application/octet-stream',
-      last_modified: file.lastModified || null,
+      type: file.mime || 'application/octet-stream',
+      hash: file.hash,
+      uploaded_at: file.uploaded_at,
     }));
     const config = {
       files: fileRefs,
+      upload_ids: fileRefs.map(file => file.upload_id),
+      upload_id: fileRefs[0]?.upload_id,
       references: fileRefs.map(file => file.name),
       summary: fileRefs.map(file => file.name).join(', '),
     };
+    return { type, config, extraSources: [] };
+  }
+  if (type === 'youtube') {
+    const urls = String(modal.querySelector('[name="youtube_urls"]')?.value || '')
+      .split(/\n+/)
+      .map(v => v.trim())
+      .filter(Boolean);
+    if (!urls.length) throw new Error('Add at least one YouTube URL.');
+    const config = { video_urls: urls, include_description: true, include_chapters: true, allow_generated_captions: false, summary: urls.join('\n') };
     return { type, config, extraSources: [] };
   }
   if (type === 'email') {
@@ -550,6 +624,7 @@ function buildSourcePayload(modal, emailAccountsById) {
       extraSources: accountIds.slice(1).map(id => ({
         source_type: 'email',
         source_mode: 'dynamic',
+        refresh_strategy: 'scheduled',
         access_mode: 'captain_only',
         display_name: sourceDisplayName('email', { account_id: id }, emailAccountsById),
         configuration: baseConfig(id),
@@ -608,14 +683,15 @@ async function createQuestFromWizard(modal, status, emailAccountsById) {
   const goal = String(modal.querySelector('[name="exploration_goal"]')?.value || '').trim();
   if (!title) throw new Error('Quest title is required.');
   if (!goal) throw new Error('Goal is required.');
-  const { type, config, extraSources } = buildSourcePayload(modal, emailAccountsById);
+  const { type, config, extraSources } = await buildSourcePayload(modal, emailAccountsById);
   const displayName = sourceDisplayName(type, config, emailAccountsById);
   const payload = {
     title,
     exploration_goal: goal,
-    source: {
-      source_type: type,
-      source_mode: type === 'email' ? 'dynamic' : 'static',
+      source: {
+        source_type: type,
+      source_mode: (type === 'email') ? 'dynamic' : 'static',
+      refresh_strategy: type === 'email' ? 'scheduled' : (type === 'document' ? 'event' : 'manual'),
       access_mode: type === 'email' ? 'captain_only' : 'shared_read',
       display_name: displayName,
       configuration: config,
@@ -683,6 +759,7 @@ function openSessionWizard() {
             <option value="website">Website</option>
             <option value="file">File</option>
             <option value="email">Email</option>
+            <option value="youtube">YouTube</option>
           </select>
         </div>
         <div class="venture-full-span">
@@ -702,6 +779,10 @@ function openSessionWizard() {
       <div class="venture-source-panel" data-source-panel="email" hidden>
         <label>Configured emails</label>
         <div class="venture-check-list" data-email-list><div class="venture-muted">Loading email accounts...</div></div>
+      </div>
+      <div class="venture-source-panel" data-source-panel="youtube" hidden>
+        <label>YouTube URLs</label>
+        <textarea name="youtube_urls" placeholder="https://www.youtube.com/watch?v=..."></textarea>
       </div>
       <label>Shipmates</label>
       <div class="venture-check-list" data-shipmate-list><div class="venture-muted">Loading regular users...</div></div>

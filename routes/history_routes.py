@@ -21,6 +21,23 @@ from routes.session_routes import (
 logger = logging.getLogger(__name__)
 
 
+def _visible_history_entry(request: Request, session_id: str, entry: dict) -> bool:
+    meta = entry.get("metadata") or {}
+    if meta.get("hidden"):
+        return False
+    if meta.get("event_type") == "quest_indexing" and meta.get("visibility") == "captain_private":
+        try:
+            from src.runtime_profile import is_venture_runtime
+            if not is_venture_runtime():
+                return True
+            from src.auth_helpers import effective_user
+            from src.venture_auth import get_quest_role
+            return get_quest_role(effective_user(request), session_id) == "captain"
+        except Exception:
+            return False
+    return True
+
+
 def _merge_continue_rows_to_delete(db_messages, db1, db2):
     """DB rows to delete when merging the last two assistant messages.
 
@@ -56,21 +73,21 @@ def setup_history_routes(session_manager) -> APIRouter:
         for msg in session.history:
             if isinstance(msg, ChatMessage):
                 # Skip hidden messages (e.g. compaction summaries for AI context)
-                if msg.metadata and msg.metadata.get("hidden"):
-                    continue
                 entry = {"role": msg.role, "content": msg.content}
                 if msg.metadata:
                     entry["metadata"] = msg.metadata
+                if not _visible_history_entry(request, session_id, entry):
+                    continue
                 history_dict.append(entry)
             elif isinstance(msg, dict):
-                if msg.get("metadata", {}).get("hidden"):
-                    continue
                 entry = {
                     "role": msg.get("role", ""),
                     "content": msg.get("content", ""),
                 }
                 if msg.get("metadata"):
                     entry["metadata"] = msg["metadata"]
+                if not _visible_history_entry(request, session_id, entry):
+                    continue
                 history_dict.append(entry)
 
         # Fallback: load from DB if in-memory is empty
@@ -108,7 +125,7 @@ def setup_history_routes(session_manager) -> APIRouter:
                 # Response excludes hidden messages, matching the in-memory path.
                 history_dict = [
                     m for m in db_history
-                    if not (m.get("metadata") or {}).get("hidden")
+                    if _visible_history_entry(request, session_id, m)
                 ]
             except Exception as e:
                 logger.error(f"DB fallback failed for {session_id}: {e}")
