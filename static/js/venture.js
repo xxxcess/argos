@@ -33,7 +33,7 @@ let observerInstalled = false;
 let refreshQueued = false;
 
 function selectedQuestId() {
-  if (document.body.classList.contains('workspace-home-active')) return '';
+  if (document.body?.classList.contains('workspace-home-active')) return '';
   const sessionId = window.sessionModule?.getCurrentSessionId?.();
   return sessionId ? String(sessionId) : '';
 }
@@ -204,7 +204,7 @@ function queueLiveRefresh() {
 }
 
 function installLivePanelObserver() {
-  if (observerInstalled) return;
+  if (observerInstalled || !document.body) return;
   observerInstalled = true;
   const observer = new MutationObserver(mutations => {
     const shouldRefresh = mutations.some(mutation => Array.from(mutation.addedNodes).some(node => {
@@ -225,7 +225,12 @@ function installLivePanelObserver() {
   document.addEventListener('odysseus:workspace-tab-activated', () => queueLiveRefresh());
 }
 
-installLivePanelObserver();
-queueLiveRefresh();
+function startLivePanelUpdates() {
+  installLivePanelObserver();
+  queueLiveRefresh();
+}
+
+if (document.body) startLivePanelUpdates();
+else document.addEventListener('DOMContentLoaded', startLivePanelUpdates, { once: true });
 
 export default legacy;
