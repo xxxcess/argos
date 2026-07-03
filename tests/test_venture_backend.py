@@ -1,5 +1,6 @@
-import tempfile
 import asyncio
+import json
+import tempfile
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -578,6 +579,95 @@ def test_artifact_memory_synthesis_noop_preserves_publication_without_cited_clai
         job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.id == job_id).one()
         assert job.status == "completed"
         assert "No new durable memory" in job.result_json
+    finally:
+        db.close()
+
+
+def test_artifact_memory_synthesis_rejects_generic_inference_and_reference_fragments(monkeypatch):
+    client, SessionLocal, _app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    proposal = client.post(
+        f"/api/quests/{quest_id}/artifact-proposals",
+        json={"title": "PDF Analysis", "summary": "Reference only.", "evidence_refs": []},
+    ).json()["proposal"]
+    client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal['id']}/publish")
+    db = SessionLocal()
+    try:
+        prop = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.id == proposal["id"]).one()
+        prop.synthesis_json = json.dumps({
+            "memory_candidates": [
+                {
+                    "title": "Inference: this evidence may help refine the Quest bearing",
+                    "content": "Inference: this evidence may help refine the Quest bearing, but Captain review is required.",
+                    "category": "finding",
+                    "confidence": "medium",
+                    "citations": ["A1"],
+                },
+                {
+                    "title": "(2024); Moshkov et al. (2025)",
+                    "content": "(2024); Moshkov et al. (2025)",
+                    "category": "finding",
+                    "confidence": "high",
+                    "citations": ["S1"],
+                },
+            ]
+        })
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.artifact_proposal_id == proposal["id"]).one()
+        job_id = job.id
+        job.status = "queued"
+        db.commit()
+    finally:
+        db.close()
+
+    from src.venture_synthesis import process_synthesis_job
+    asyncio.run(process_synthesis_job(job_id))
+
+    db = SessionLocal()
+    try:
+        assert db.query(QuestMemoryEntry).filter(QuestMemoryEntry.session_id == quest_id, QuestMemoryEntry.artifact_id == proposal["id"]).count() == 0
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.id == job_id).one()
+        assert "No new durable memory" in job.result_json
+    finally:
+        db.close()
+
+
+def test_artifact_memory_synthesis_keeps_observation_with_citation(monkeypatch):
+    client, SessionLocal, _app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    proposal = client.post(
+        f"/api/quests/{quest_id}/artifact-proposals",
+        json={"title": "PDF Analysis", "summary": "Reference only.", "evidence_refs": []},
+    ).json()["proposal"]
+    client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal['id']}/publish")
+    db = SessionLocal()
+    try:
+        prop = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.id == proposal["id"]).one()
+        prop.synthesis_json = json.dumps({
+            "memory_candidates": [
+                {
+                    "title": "The artifact identifies model evaluation drift",
+                    "content": "The artifact identifies model evaluation drift as a recurring operational risk for review workflows.",
+                    "category": "risk",
+                    "confidence": "high",
+                    "citations": ["S1"],
+                }
+            ]
+        })
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.artifact_proposal_id == proposal["id"]).one()
+        job_id = job.id
+        job.status = "queued"
+        db.commit()
+    finally:
+        db.close()
+
+    from src.venture_synthesis import process_synthesis_job
+    asyncio.run(process_synthesis_job(job_id))
+
+    db = SessionLocal()
+    try:
+        memory = db.query(QuestMemoryEntry).filter(QuestMemoryEntry.session_id == quest_id, QuestMemoryEntry.artifact_id == proposal["id"]).one()
+        assert "model evaluation drift" in memory.content
+        assert "S1" in memory.provenance_json
     finally:
         db.close()
 

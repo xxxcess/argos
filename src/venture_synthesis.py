@@ -692,9 +692,9 @@ def _process_artifact_memory_synthesis(db, job: QuestSynthesisJob) -> dict[str, 
         job.safe_error_message = "Memory synthesis could not find the published Artifact."
         return {"changed_memory_ids": [], "reason": "artifact_not_published"}
     synth = _loads(prop.synthesis_json, {})
-    candidates = synth.get("memory_candidates") if isinstance(synth, dict) else []
-    if not candidates:
-        candidates = _extract_artifact_key_point_candidates(prop)
+    candidates = _extract_artifact_key_point_candidates(prop)
+    if not candidates and isinstance(synth, dict):
+        candidates = _valid_artifact_memory_candidates_from_synthesis(synth, prop)
     changed = []
     source_versions = _loads(prop.source_version_refs_json, [])
     evidence_chunks = _loads(prop.evidence_chunk_refs_json, [])
@@ -797,13 +797,17 @@ def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[
 
     candidates = []
     active_section = ""
+    top_section = ""
     section_claims: list[tuple[str, str]] = []
     for raw in content.splitlines():
         line = raw.strip()
         if not line:
             continue
         if line.startswith("#"):
+            level = len(line) - len(line.lstrip("#"))
             active_section = line.lstrip("#").strip().lower()
+            if level <= 2:
+                top_section = active_section
             continue
         if line.startswith(">") or line.startswith("|") or line.startswith("- **["):
             continue
@@ -812,8 +816,10 @@ def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[
         if not _is_recall_worthy_artifact_claim(claim):
             continue
         if not citations:
-            if active_section in {"what changed", "why this matters", "short version", "summary", "decision recorded"}:
+            if top_section in {"what changed", "short version", "summary", "decision recorded"}:
                 section_claims.append((active_section, claim))
+            continue
+        if top_section and top_section not in {"what changed", "evidence supporting this milestone", "decision recorded"}:
             continue
         category = "finding"
         if "decision" in active_section or claim.lower().startswith(("decided", "decision")):
@@ -870,10 +876,42 @@ def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[
     return candidates
 
 
+def _valid_artifact_memory_candidates_from_synthesis(synth: dict[str, Any], prop: QuestArtifactProposal) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for raw in (synth.get("memory_candidates") or [])[:MAX_MEMORY_CANDIDATES]:
+        if not isinstance(raw, dict):
+            continue
+        content = str(raw.get("content") or "").strip()
+        if not _is_recall_worthy_artifact_claim(content):
+            continue
+        citations = [str(c) for c in (raw.get("citations") or []) if str(c).strip()]
+        evidence = raw.get("evidence") if isinstance(raw.get("evidence"), list) else []
+        if not citations and not evidence:
+            continue
+        category = str(raw.get("category") or "finding")
+        if category not in {"finding", "decision", "risk", "open_question", "constraint", "next_step", "contradiction"}:
+            category = "finding"
+        candidates.append({
+            "title": str(raw.get("title") or content)[:96].rstrip("."),
+            "content": content[:500],
+            "category": category,
+            "confidence": raw.get("confidence") if raw.get("confidence") in {"low", "medium", "high"} else "medium",
+            "citations": citations,
+            "evidence": evidence or [{
+                "id": citation,
+                "label": f"{prop.title} - cited Artifact evidence",
+                "locator": "",
+                "supports": content,
+            } for citation in citations],
+        })
+    return candidates
+
+
 def _is_recall_worthy_artifact_claim(claim: str) -> bool:
     text = re.sub(r"\s+", " ", claim or "").strip()
     lower = text.lower()
     boilerplate = (
+        "this evidence may help refine the quest bearing",
         "missing quotes, locators, timestamps, and urls",
         "review the cited evidence",
         "pending evidence review",
@@ -881,6 +919,10 @@ def _is_recall_worthy_artifact_claim(claim: str) -> bool:
         "intentionally not fabricated",
     )
     if any(marker in lower for marker in boilerplate):
+        return False
+    if re.search(r"\bet\s+al\.?", lower) or re.search(r"\b(?:doi|isbn|arxiv)\b", lower):
+        return False
+    if re.fullmatch(r"[\(\)\[\]\w\s,.;:&-]*\b(?:19|20)\d{2}\b[\(\)\[\]\w\s,.;:&-]*", text) and not re.search(r"\b(is|are|was|were|shows|indicates|increased|decreased|risk|decision|must|should|needs?)\b", lower):
         return False
     if len(text) < 32:
         return False
@@ -892,11 +934,11 @@ def _is_recall_worthy_artifact_claim(claim: str) -> bool:
         return False
     useful_terms = {
         "is", "are", "was", "were", "will", "should", "must", "needs", "need",
-        "shows", "show", "found", "indicates", "suggests", "increased", "decreased",
+        "shows", "show", "found", "finds", "identifies", "identified", "indicates", "suggests", "increased", "decreased",
         "risk", "decision", "constraint", "priority", "because", "therefore", "works",
         "changes", "supports", "recommends",
     }
-    return any(term in lower.split() for term in useful_terms) or any(term in lower for term in ("risk", "decision", "because", "therefore", "increased", "decreased"))
+    return any(term in lower.split() for term in useful_terms) or any(term in lower for term in ("risk", "decision", "because", "therefore", "increased", "decreased", "identifies"))
 
 
 def _claim_next_job() -> str | None:
