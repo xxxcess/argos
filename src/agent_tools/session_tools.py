@@ -88,19 +88,32 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
         from core.database import SessionLocal, Session as DbSession
         from datetime import datetime, timezone
 
-        # Pull every session's last_accessed from the DB so we can sort
-        # by recency. In-memory sessions hold name + model + msg_count;
-        # the DB row holds the timestamps.
-        db = SessionLocal()
-        try:
-            db_rows = {r.id: r for r in db.query(DbSession).all()}
-        finally:
-            db.close()
-
         # SECURITY: scope to the caller's sessions. Passing None returned
         # every user's sessions, which the agent tool then exposed via the
         # "list my chats" reply.
         sessions = _session_manager.get_sessions_for_user(owner)
+        candidate_ids = list(sessions.keys())
+
+        # Pull timestamps only for visible candidate sessions. This avoids
+        # scanning every user's sessions on large installs while keeping DB
+        # timestamps authoritative for sorting.
+        db_rows = {}
+        if candidate_ids:
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(
+                        DbSession.id,
+                        DbSession.last_accessed,
+                        DbSession.updated_at,
+                        DbSession.created_at,
+                    )
+                    .filter(DbSession.id.in_(candidate_ids))
+                    .all()
+                )
+                db_rows = {r.id: r for r in rows}
+            finally:
+                db.close()
         rows = []
         for sid, sess in sessions.items():
             if keyword and keyword not in (sess.name or "").lower():

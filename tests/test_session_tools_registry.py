@@ -9,10 +9,14 @@ TOOL_HANDLERS, (2) the moved logic runs and threads owner/session from ctx
 legacy dispatch_ai_tool elif.
 """
 import asyncio
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import src.ai_interaction as ai_interaction
+import core.database as core_database
 import src.database as database
+from core.models import Session
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools import session_tools as st
 
@@ -135,6 +139,69 @@ def test_no_session_manager_is_handled(monkeypatch):
     res = asyncio.run(st.ListSessionsTool().execute("", {"owner": "bob"}))
     assert isinstance(res, dict)
     assert "error" in res or "results" in res
+
+
+def test_list_sessions_queries_only_visible_session_ids(monkeypatch):
+    class FakeColumn:
+        def __init__(self, name):
+            self.name = name
+
+        def in_(self, values):
+            return ("in", self.name, tuple(values))
+
+    class FakeDbSession:
+        id = FakeColumn("id")
+        last_accessed = FakeColumn("last_accessed")
+        updated_at = FakeColumn("updated_at")
+        created_at = FakeColumn("created_at")
+
+    class FakeQuery:
+        def __init__(self):
+            self.filter_args = []
+
+        def filter(self, *args):
+            self.filter_args.extend(args)
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id="visible",
+                    last_accessed=datetime(2026, 7, 3, 12, 0, 0),
+                    updated_at=None,
+                    created_at=None,
+                )
+            ]
+
+    class FakeDB:
+        def __init__(self):
+            self.query_obj = FakeQuery()
+
+        def query(self, *cols):
+            seen["query_cols"] = cols
+            return self.query_obj
+
+        def close(self):
+            seen["closed"] = True
+
+    class FakeMgr:
+        def get_sessions_for_user(self, owner):
+            seen["owner"] = owner
+            return {
+                "visible": Session(id="visible", name="Visible", endpoint_url="http://ep", model="m", owner=owner),
+            }
+
+    seen = {}
+    fake_db = FakeDB()
+    monkeypatch.setattr(core_database, "Session", FakeDbSession, raising=False)
+    monkeypatch.setattr(core_database, "SessionLocal", lambda: fake_db, raising=False)
+    monkeypatch.setattr(ai_interaction, "_session_manager", FakeMgr())
+
+    res = asyncio.run(st.list_sessions("", owner="alice"))
+
+    assert seen["owner"] == "alice"
+    assert fake_db.query_obj.filter_args == [("in", "id", ("visible",))]
+    assert "Visible" in res["results"]
 
 
 def test_dispatched_via_registry_not_dispatch_ai_tool():

@@ -192,3 +192,37 @@ class TestSessionIsolation:
         retrieved = sm.get_session("s1")
         assert len(retrieved.history) == 1
         assert retrieved.history[0].content == "hi"
+
+    def test_get_session_combines_cached_metadata_sync_and_touch(self, sm, monkeypatch):
+        """Cached get_session should not open a second DB transaction just to touch."""
+        s = Session(id="s1", name="Test", endpoint_url="http://ep", model="model")
+        s.add_message(ChatMessage("user", "hi"))
+        sm.sessions["s1"] = s
+        seen = {}
+
+        def fake_sync(session_id, touch=False):
+            seen["session_id"] = session_id
+            seen["touch"] = touch
+            return True
+
+        monkeypatch.setattr(sm, "sync_session_metadata", fake_sync)
+        monkeypatch.setattr(sm, "_touch_session", lambda _sid: (_ for _ in ()).throw(AssertionError("_touch_session should not be called")))
+
+        assert sm.get_session("s1") is s
+        assert seen == {"session_id": "s1", "touch": True}
+
+    def test_get_session_fresh_load_touches_during_load(self, sm, monkeypatch):
+        """Fresh DB loads should touch in the load transaction and skip resync."""
+        seen = {}
+
+        def fake_load(session_id, touch=False):
+            seen["session_id"] = session_id
+            seen["touch"] = touch
+            sm.sessions[session_id] = Session(id=session_id, name="Loaded", endpoint_url="http://ep", model="model")
+
+        monkeypatch.setattr(sm, "_load_session_from_db", fake_load)
+        monkeypatch.setattr(sm, "sync_session_metadata", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sync should not be called after fresh load")))
+        monkeypatch.setattr(sm, "_touch_session", lambda _sid: (_ for _ in ()).throw(AssertionError("_touch_session should not be called")))
+
+        assert sm.get_session("fresh").id == "fresh"
+        assert seen == {"session_id": "fresh", "touch": True}

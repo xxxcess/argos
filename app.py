@@ -805,14 +805,34 @@ app.include_router(setup_companion_routes())
 
 # ========= ROUTES (kept in app.py) =========
 
+_HTML_TEMPLATE_CACHE: dict[str, tuple[int, int, str]] = {}
+
+
+def _read_html_template(file_path: str) -> str:
+    """Read and cache raw HTML templates by mtime/size.
+
+    The SPA routes all serve the same 200KB+ index template. Cache only the raw
+    template so per-request CSP nonce and runtime branding remain fresh.
+    """
+
+    st = os.stat(file_path)
+    key = os.path.abspath(file_path)
+    cached = _HTML_TEMPLATE_CACHE.get(key)
+    stamp = (st.st_mtime_ns, st.st_size)
+    if cached and cached[0] == stamp[0] and cached[1] == stamp[1]:
+        return cached[2]
+    with open(file_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    _HTML_TEMPLATE_CACHE[key] = (stamp[0], stamp[1], html)
+    return html
+
 def _serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
     """Read an HTML file and inject the CSP nonce into inline <script> tags."""
     import json
 
     from src.runtime_profile import is_venture_runtime, runtime_summary
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        html = f.read()
+    html = _read_html_template(file_path)
     nonce = getattr(request.state, "csp_nonce", "")
     html = html.replace("{{CSP_NONCE}}", nonce)
     summary = runtime_summary()

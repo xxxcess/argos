@@ -366,25 +366,33 @@ class SessionManager:
         Sessions seeded by `load_sessions` start with empty history. The
         first read here hydrates them with the message rows.
         """
+        loaded_from_db = False
         if session_id not in self.sessions:
-            self._load_session_from_db(session_id)
+            self._load_session_from_db(session_id, touch=True)
+            loaded_from_db = True
         else:
             cached = self.sessions[session_id]
             # Lazy hydrate: metadata-only entries get their messages on first read.
             if not cached.history and getattr(cached, "message_count", 0) > 0:
-                self._load_session_from_db(session_id)
+                self._load_session_from_db(session_id, touch=True)
+                loaded_from_db = True
 
         # Keep model/endpoint metadata fresh. Endpoint deletion can clear the
         # DB row while a session object is still cached in RAM.
-        self.sync_session_metadata(session_id)
-
-        # Update last_accessed
-        self._touch_session(session_id)
+        # For freshly loaded sessions, _load_session_from_db already read the
+        # authoritative row and touched it in the same DB transaction. Cached
+        # sessions still need one combined metadata refresh + touch.
+        if not loaded_from_db:
+            self.sync_session_metadata(session_id, touch=True)
 
         return self.sessions[session_id]
 
-    def sync_session_metadata(self, session_id: str) -> bool:
-        """Refresh non-message session fields from the DB into the cached object."""
+    def sync_session_metadata(self, session_id: str, touch: bool = False) -> bool:
+        """Refresh non-message session fields from the DB into the cached object.
+
+        When ``touch`` is true, update ``last_accessed`` in the same query/commit
+        instead of opening a second DB session for _touch_session().
+        """
         session = self.sessions.get(session_id)
         if session is None:
             return False
@@ -393,6 +401,10 @@ class SessionManager:
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
             if db_session is None:
                 return False
+            now = None
+            if touch:
+                now = datetime.now(timezone.utc)
+                db_session.last_accessed = now
             headers = db_session.headers
             if isinstance(headers, str):
                 try:
@@ -408,14 +420,18 @@ class SessionManager:
             session.owner = getattr(db_session, "owner", None)
             session.is_important = getattr(db_session, "is_important", False) or False
             session.message_count = getattr(db_session, "message_count", session.message_count) or 0
+            if touch:
+                db.commit()
             return True
         except Exception as e:
             logger.error(f"Error syncing session metadata {session_id}: {e}")
+            if touch:
+                db.rollback()
             return False
         finally:
             db.close()
 
-    def _load_session_from_db(self, session_id: str):
+    def _load_session_from_db(self, session_id: str, touch: bool = False):
         """Hydrate a single session (with messages) from the database."""
         db = SessionLocal()
         try:
@@ -433,11 +449,16 @@ class SessionManager:
                 if meta is None:
                     raise KeyError(f"Session {session_id} could not be loaded")
                 self.sessions[session_id] = meta
+            if touch:
+                db_session.last_accessed = datetime.now(timezone.utc)
+                db.commit()
 
         except KeyError:
             raise
         except Exception as e:
             logger.error(f"Error loading session {session_id}: {e}")
+            if touch:
+                db.rollback()
             raise
         finally:
             db.close()
