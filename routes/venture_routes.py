@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
@@ -92,6 +92,18 @@ def _timeline_meta(event_type: str, *, title: str | None = None, event_id: str |
         **fields,
     }
     return _json_dumps(payload)
+
+
+def _run_synthesis_job_background(job_id: str | None) -> None:
+    if not job_id:
+        return
+    try:
+        import asyncio
+        from src.venture_synthesis import process_synthesis_job
+        asyncio.run(process_synthesis_job(job_id))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Quest synthesis background trigger failed for %s", job_id, exc_info=True)
 
 
 def _user_is_admin(request: Request, username: str) -> bool:
@@ -1175,7 +1187,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             db.close()
 
     @router.post("/api/quests/{quest_id}/artifact-proposals/{proposal_id}/publish")
-    def publish_artifact_proposal(request: Request, quest_id: str, proposal_id: str):
+    def publish_artifact_proposal(request: Request, quest_id: str, proposal_id: str, background_tasks: BackgroundTasks):
         require_venture_runtime()
         captain = require_quest_captain(request, quest_id)
         db = SessionLocal()
@@ -1197,6 +1209,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             row.reviewed_at = row.published_at = utcnow_naive()
             publish_event_id = f"artifact_published:{doc.id}"
             db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Artifact published: {row.title}", meta_data=_timeline_meta("artifact_published", title="Artifact published", event_id=publish_event_id, proposal_id=row.id, document_id=doc.id, actor=captain, subject=row.title)))
+            memory_job_id = None
             existing_memory_job = db.query(QuestSynthesisJob).filter(
                 QuestSynthesisJob.quest_id == quest_id,
                 QuestSynthesisJob.trigger == "artifact_revision",
@@ -1218,6 +1231,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                     }),
                 )
                 db.add(memory_job)
+                memory_job_id = memory_job.id
                 db.add(ChatMessage(
                     id=uuid.uuid4().hex,
                     session_id=quest_id,
@@ -1236,6 +1250,8 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                         "trigger_event_id": publish_event_id,
                     }),
                 ))
+            elif existing_memory_job.status in {"queued", "running"}:
+                memory_job_id = existing_memory_job.id
             synth = _json_loads(row.synthesis_json, {})
             for candidate in (synth.get("memory_candidates") or [])[:3]:
                 category = candidate.get("category")
@@ -1268,6 +1284,8 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                 _notify(db, member.username, f"artifact-published:{proposal_id}:{member.username}", category="inbox", state="unread", title=f"Captain {captain} published '{row.title}'", message=f"Captain {captain} published '{row.title}' to {quest.name if quest else 'the Quest'}.", resource_type="quest_artifact", resource_id=doc.id, actions=[])
             _notify(db, captain, f"artifact-proposal:{row.id}", state="resolved", title="Artifact Draft published", message=f"Published '{row.title}' to the Quest.", actions=[])
             db.commit()
+            if memory_job_id:
+                background_tasks.add_task(_run_synthesis_job_background, memory_job_id)
             return {"proposal": _proposal_to_dict(row), "document_id": doc.id}
         except Exception:
             db.rollback()

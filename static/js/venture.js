@@ -115,6 +115,7 @@ function installStyles() {
     body.argos-venture.venture-quest-no-voice #voice-recorder-btn,
     body.argos-venture.venture-quest-no-voice .tts-mode-option,
     body.argos-venture.venture-quest-no-stt #voice-recorder-btn { display:none!important; }
+    body.argos-venture.venture-quest-active.mission-dashboard-visible .mission-control { display:none!important; }
     .venture-mode-indicator { display:inline-flex; align-items:center; height:24px; padding:0 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; font-weight:700; opacity:.82; pointer-events:none; }
     .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); min-width:0; max-width:100%; box-sizing:border-box; overflow:hidden; overflow-wrap:anywhere; }
     .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; overflow-wrap:anywhere; }
@@ -313,6 +314,13 @@ async function enforceQuestSessionView(sessionId) {
   window.sessionControlModule?.viewFullConversation?.(sessionId);
   await renderRightRail();
   return true;
+}
+
+function forceQuestFullConversation(sessionId) {
+  if (!caps?.is_venture || !sessionId || !questSessionIds.has(String(sessionId))) return;
+  window.sessionControlModule?.viewFullConversation?.(sessionId);
+  const history = document.getElementById('chat-history');
+  if (history) history.hidden = false;
 }
 
 function selectedQuestId() {
@@ -1075,16 +1083,22 @@ async function initVenture() {
   syncActiveQuestHistory().catch(() => {});
   window.addEventListener('hashchange', () => {
     closeQuestDocumentPanelForSessionChange(selectedQuestId(), currentQuestId);
-    loadQuest(selectedQuestId());
+    const qid = selectedQuestId();
+    forceQuestFullConversation(qid);
+    loadQuest(qid);
   });
   document.addEventListener('odysseus:session-selected', e => {
     const nextId = e.detail?.sessionId || e.detail?.id || selectedQuestId();
     closeQuestDocumentPanelForSessionChange(nextId, e.detail?.previousSessionId || currentQuestId);
+    forceQuestFullConversation(nextId);
+    setTimeout(() => forceQuestFullConversation(nextId), 0);
     loadQuest(nextId);
   });
   window.addEventListener('odysseus:session-selected', e => {
     const nextId = e.detail?.sessionId || e.detail?.id || selectedQuestId();
     closeQuestDocumentPanelForSessionChange(nextId, e.detail?.previousSessionId || currentQuestId);
+    forceQuestFullConversation(nextId);
+    setTimeout(() => forceQuestFullConversation(nextId), 0);
     loadQuest(nextId);
   });
   document.addEventListener('odysseus:new-chat-shown', () => {

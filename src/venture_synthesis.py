@@ -683,7 +683,7 @@ async def process_synthesis_job(job_id: str) -> None:
 def _process_artifact_memory_synthesis(db, job: QuestSynthesisJob) -> dict[str, Any]:
     prop = db.query(QuestArtifactProposal).filter(
         QuestArtifactProposal.id == job.artifact_proposal_id,
-        QuestArtifactProposal.quest_id == job.quest_id if hasattr(QuestArtifactProposal, "quest_id") else QuestArtifactProposal.session_id == job.quest_id,
+        QuestArtifactProposal.session_id == job.quest_id,
     ).first()
     if not prop or prop.status != "published":
         job.status = "failed"
@@ -693,6 +693,8 @@ def _process_artifact_memory_synthesis(db, job: QuestSynthesisJob) -> dict[str, 
         return {"changed_memory_ids": [], "reason": "artifact_not_published"}
     synth = _loads(prop.synthesis_json, {})
     candidates = synth.get("memory_candidates") if isinstance(synth, dict) else []
+    if not candidates:
+        candidates = _extract_artifact_key_point_candidates(prop)
     changed = []
     source_versions = _loads(prop.source_version_refs_json, [])
     evidence_chunks = _loads(prop.evidence_chunk_refs_json, [])
@@ -723,7 +725,13 @@ def _process_artifact_memory_synthesis(db, job: QuestSynthesisJob) -> dict[str, 
             title=title,
             content=content,
             confidence=candidate.get("confidence") if candidate.get("confidence") in {"low", "medium", "high"} else "medium",
-            provenance_json=_dumps({"artifact_proposal_id": prop.id, "citations": candidate.get("citations") or [], "trigger_job_id": job.id}),
+            provenance_json=_dumps({
+                "artifact_proposal_id": prop.id,
+                "document_id": prop.document_id,
+                "citations": candidate.get("citations") or [],
+                "evidence": candidate.get("evidence") or [],
+                "trigger_job_id": job.id,
+            }),
             source_version_refs_json=_dumps(source_versions),
             evidence_chunk_refs_json=_dumps(evidence_chunks),
             artifact_id=prop.id,
@@ -761,6 +769,79 @@ def _process_artifact_memory_synthesis(db, job: QuestSynthesisJob) -> dict[str, 
         }),
     ))
     return {"changed_memory_ids": changed, "safe_summary": summary}
+
+
+def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[dict[str, Any]]:
+    doc = getattr(prop, "document", None)
+    content = (getattr(doc, "current_content", None) or "").strip()
+    if not content:
+        return []
+    evidence_labels: dict[str, dict[str, str]] = {}
+    in_index = False
+    for raw in content.splitlines():
+        line = raw.strip()
+        if line.lower().startswith("## evidence index"):
+            in_index = True
+            continue
+        if in_index and line.startswith("## "):
+            in_index = False
+        if not in_index or not line.startswith("|") or line.startswith("|---") or " ID " in line:
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) >= 4:
+            evidence_labels[cells[0]] = {
+                "label": cells[1],
+                "locator": cells[2],
+                "supports": cells[3],
+            }
+
+    candidates = []
+    active_section = ""
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            active_section = line.lstrip("#").strip().lower()
+            continue
+        if line.startswith(">") or line.startswith("|") or line.startswith("- **["):
+            continue
+        citations = re.findall(r"\[(E\d+|S\d+|D\d+)\]", line)
+        if not citations:
+            continue
+        claim = re.sub(r"\s*\[(?:E\d+|S\d+|D\d+)\]", "", line).strip(" -")
+        if len(claim) < 24:
+            continue
+        category = "finding"
+        if "decision" in active_section or claim.lower().startswith(("decided", "decision")):
+            category = "decision"
+        elif "risk" in active_section or "risk" in claim.lower():
+            category = "risk"
+        elif "question" in active_section or claim.endswith("?"):
+            category = "open_question"
+        elif "recommended next bearing" in active_section or "next bearing" in active_section:
+            category = "next_step"
+        evidence = []
+        for citation in citations:
+            info = evidence_labels.get(citation, {})
+            evidence.append({
+                "id": citation,
+                "label": info.get("label") or citation,
+                "locator": info.get("locator") or "",
+                "supports": info.get("supports") or claim,
+            })
+        title = claim[:96].rstrip(".")
+        candidates.append({
+            "title": title,
+            "content": claim,
+            "category": category,
+            "confidence": "high" if evidence else "medium",
+            "citations": citations,
+            "evidence": evidence,
+        })
+        if len(candidates) >= MAX_MEMORY_CANDIDATES:
+            break
+    return candidates
 
 
 def _claim_next_job() -> str | None:

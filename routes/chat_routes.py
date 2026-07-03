@@ -5,6 +5,7 @@ import json
 import os
 import time
 import logging
+import uuid
 from datetime import datetime
 from typing import Dict, Any, AsyncGenerator, List, Optional
 
@@ -141,6 +142,108 @@ def _normalize_venture_quest_turn(request: Request, session_id: str) -> dict:
             "allowlist": set(),
         }
     return {"is_quest": False, "role": None, "chat_mode": None, "allow_tools": None, "allowlist": set()}
+
+
+def _classify_shipmate_contribution(message: str) -> dict:
+    text = str(message or "").strip()
+    lower = text.lower()
+    if "?" in text or lower.startswith(("what ", "why ", "how ", "when ", "where ", "who ", "should ", "can ")):
+        kind = "question"
+        title = "Shipmate question"
+        options = [
+            {"label": "Answer with Argo", "description": "Have Argo answer in the Voyage using available Quest context."},
+            {"label": "Ask for clarification", "description": "Ask the Shipmate for a narrower or more specific follow-up."},
+            {"label": "Record as open question", "description": "Add it to Quest context without answering yet."},
+        ]
+    elif any(word in lower for word in ("clarify", "correction", "actually", "i meant", "to clarify")):
+        kind = "clarification"
+        title = "Shipmate clarification"
+        options = [
+            {"label": "Incorporate clarification", "description": "Use this to update the current Quest direction."},
+            {"label": "Ask Captain to decide", "description": "Pause for a Captain decision before acting."},
+            {"label": "Record only", "description": "Keep the note in the Voyage Log without action."},
+        ]
+    else:
+        kind = "contribution"
+        title = "Shipmate contribution"
+        options = [
+            {"label": "Use in next response", "description": "Let Argo incorporate this contribution in the next Captain-led turn."},
+            {"label": "Save to memory", "description": "Treat it as a candidate durable Quest memory after Captain review."},
+            {"label": "No action", "description": "Leave it as a Voyage Log note."},
+        ]
+    return {"kind": kind, "title": title, "options": options}
+
+
+def _record_shipmate_quest_turn(request: Request, session_manager, session_id: str, message: str) -> dict:
+    user = effective_user(request)
+    role = get_quest_role(user, session_id)
+    if role != "shipmate":
+        raise HTTPException(403, "Only Shipmates can use this Quest contribution path")
+    contribution = _classify_shipmate_contribution(message)
+    sess = session_manager.get_session(session_id)
+    session_manager.add_message(session_id, ChatMessage("user", message, metadata={
+        "venture_quest": True,
+        "author_type": "human",
+        "author_username": user,
+        "author_display_name": user,
+        "author_role_at_send": "shipmate",
+    }))
+    db = SessionLocal()
+    try:
+        quest = db.query(DBSession).filter(DBSession.id == session_id).first()
+        captain = quest.owner if quest else None
+        event_id = f"shipmate-turn:{uuid.uuid4().hex}"
+        db.add(DBChatMessage(
+            id=f"{event_id}:event",
+            session_id=session_id,
+            role="system",
+            content=f"{user} added a {contribution['kind']} for Captain review.",
+            meta_data=json.dumps({
+                "event_type": "shipmate_contribution",
+                "presentation": "timeline_event",
+                "event_id": event_id,
+                "title": contribution["title"],
+                "actor": user,
+                "subject": (message or "")[:160],
+                "classification": contribution["kind"],
+            }, sort_keys=True),
+        ))
+        if captain:
+            from core.database import UserNotification
+            existing = db.query(UserNotification).filter(UserNotification.deterministic_key == event_id).first()
+            if existing is None:
+                db.add(UserNotification(
+                    id=f"{event_id}:notification",
+                    user_id=captain,
+                    owner=captain,
+                    deterministic_key=event_id,
+                    category="inbox",
+                    severity="info",
+                    state="action_required",
+                    title=contribution["title"],
+                    message=f"{user}: {(message or '')[:500]}",
+                    resource_type="quest_shipmate_contribution",
+                    resource_id=session_id,
+                    actions_json=json.dumps(contribution["options"], sort_keys=True),
+                ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    return {
+        "status": "recorded",
+        "session_id": session_id,
+        "classification": contribution["kind"],
+        "captain_actions": contribution["options"],
+        "message_count": getattr(sess, "message_count", None),
+    }
+
+
+async def _shipmate_recorded_stream(payload: dict) -> AsyncGenerator[str, None]:
+    yield f"data: {json.dumps({'type': 'shipmate_message_recorded', 'data': payload})}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -459,6 +562,8 @@ def setup_chat_routes(
             att_ids = []
             use_web = False
             use_research = False
+            if venture_turn["role"] == "shipmate":
+                return {"response": json.dumps(_record_shipmate_quest_turn(request, session_manager, session, message))}
 
         try:
             sess = session_manager.get_session(session)
@@ -728,6 +833,9 @@ def setup_chat_routes(
                 incognito = False
                 allow_bash = None
                 allow_web_search = None
+                if venture_turn["role"] == "shipmate":
+                    payload = _record_shipmate_quest_turn(request, session_manager, session, message)
+                    return StreamingResponse(_shipmate_recorded_stream(payload), media_type="text/event-stream")
             sess = session_manager.get_session(session)
             owner = effective_user(request)
             if _clear_orphaned_session_endpoint(sess, owner=owner):

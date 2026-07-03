@@ -391,6 +391,32 @@ def test_quest_human_message_persists_author_role_at_send(monkeypatch):
     assert meta["venture_quest"] is True
 
 
+def test_shipmate_quest_message_records_without_model_endpoint(monkeypatch):
+    client, SessionLocal, app, sm, *_ = _client(monkeypatch)
+    import routes.chat_routes as cr
+    monkeypatch.setattr(cr, "SessionLocal", SessionLocal)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invite = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
+    app.state.test_user = "mara"
+    client.post(f"/api/quest-invitations/{invite}/accept")
+    result = cr._record_shipmate_quest_turn(
+        type("Req", (), {"state": type("State", (), {"current_user": "mara"})(), "app": app})(),
+        sm,
+        quest_id,
+        "Can Argo clarify the risk evidence?",
+    )
+    assert result["status"] == "recorded"
+    assert result["classification"] == "question"
+    db = SessionLocal()
+    try:
+        msg = db.query(ChatMessage).filter(ChatMessage.session_id == quest_id, ChatMessage.role == "user").order_by(ChatMessage.timestamp.desc()).first()
+        assert "author_role_at_send" in msg.meta_data
+        notice = db.query(UserNotification).filter(UserNotification.user_id == "ada", UserNotification.resource_type == "quest_shipmate_contribution").one()
+        assert "Answer with Argo" in notice.actions_json
+    finally:
+        db.close()
+
+
 def test_venture_tool_policy_allowlist_blocks_generic_and_mcp_tools():
     from src.tool_policy import VENTURE_QUEST_ALLOWED_TOOLS, build_effective_tool_policy
 
@@ -465,12 +491,46 @@ def test_artifact_draft_private_until_publish_without_generic_shared_memory(monk
     assert [d["id"] for d in docs] == [doc_id]
 
 
-def test_artifact_memory_synthesis_noop_preserves_publication(monkeypatch):
+def test_artifact_memory_synthesis_extracts_cited_key_points(monkeypatch):
     client, SessionLocal, _app, *_ = _client(monkeypatch)
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
     proposal = client.post(
         f"/api/quests/{quest_id}/artifact-proposals",
-        json={"title": "No New Memory", "summary": "Reference only.", "evidence_refs": ["source:v1"]},
+        json={"title": "Regional Risk", "summary": "Northeast rollout risk increased.", "evidence_refs": ["FY2026 Market Outlook.pdf - p. 18"]},
+    ).json()["proposal"]
+    client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal['id']}/publish")
+    db = SessionLocal()
+    try:
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.artifact_proposal_id == proposal["id"]).one()
+        job_id = job.id
+        doc_id = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.id == proposal["id"]).one().document_id
+    finally:
+        db.close()
+
+    from src.venture_synthesis import process_synthesis_job
+    asyncio.run(process_synthesis_job(job_id))
+
+    db = SessionLocal()
+    try:
+        assert db.query(Document).filter(Document.id == doc_id).one().is_active is True
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.id == job_id).one()
+        assert job.status == "completed"
+        memory = db.query(QuestMemoryEntry).filter(QuestMemoryEntry.session_id == quest_id, QuestMemoryEntry.artifact_id == proposal["id"]).all()
+        assert len(memory) == 1
+        assert memory[0].state == "confirmed"
+        assert memory[0].visibility == "quest_shared"
+        assert "Northeast rollout risk increased" in memory[0].content
+        assert "E1" in memory[0].provenance_json
+    finally:
+        db.close()
+
+
+def test_artifact_memory_synthesis_noop_preserves_publication_without_cited_claims(monkeypatch):
+    client, SessionLocal, _app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    proposal = client.post(
+        f"/api/quests/{quest_id}/artifact-proposals",
+        json={"title": "No New Memory", "summary": "Reference only.", "evidence_refs": []},
     ).json()["proposal"]
     client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal['id']}/publish")
     db = SessionLocal()
