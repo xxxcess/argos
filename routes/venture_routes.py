@@ -106,6 +106,44 @@ def _run_synthesis_job_background(job_id: str | None) -> None:
         logging.getLogger(__name__).warning("Quest synthesis background trigger failed for %s", job_id, exc_info=True)
 
 
+def _artifact_copy_id(proposal_id: str, username: str) -> str:
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"argos-venture-artifact-copy:{proposal_id}:{username}").hex
+
+
+def _ensure_member_artifact_copies(db, *, quest_id: str, proposal: QuestArtifactProposal, source_doc: Document) -> list[str]:
+    copied_for: list[str] = []
+    members = db.query(QuestMember).filter(QuestMember.session_id == quest_id).all()
+    for member in members:
+        if not member.username or member.username == source_doc.owner:
+            continue
+        copy_id = _artifact_copy_id(proposal.id, member.username)
+        existing = db.query(Document).filter(Document.id == copy_id).first()
+        if existing:
+            existing.session_id = quest_id
+            existing.title = source_doc.title
+            existing.language = source_doc.language
+            existing.current_content = source_doc.current_content
+            existing.version_count = source_doc.version_count
+            existing.is_active = True
+            existing.archived = False
+            existing.owner = member.username
+            existing.updated_at = utcnow_naive()
+        else:
+            db.add(Document(
+                id=copy_id,
+                session_id=quest_id,
+                title=source_doc.title,
+                language=source_doc.language,
+                current_content=source_doc.current_content,
+                version_count=source_doc.version_count,
+                is_active=True,
+                archived=False,
+                owner=member.username,
+            ))
+        copied_for.append(member.username)
+    return copied_for
+
+
 def _user_is_admin(request: Request, username: str) -> bool:
     if not username:
         return True
@@ -290,6 +328,9 @@ def _proposal_to_dict(row: QuestArtifactProposal, include_document: bool = False
 
 
 def _memory_to_dict(row: QuestMemoryEntry) -> dict:
+    provenance = _json_loads(row.provenance_json, {})
+    evidence = provenance.get("evidence") if isinstance(provenance, dict) else []
+    citations = provenance.get("citations") if isinstance(provenance, dict) else []
     return {
         "id": row.id,
         "session_id": row.session_id,
@@ -299,7 +340,9 @@ def _memory_to_dict(row: QuestMemoryEntry) -> dict:
         "title": row.title,
         "content": row.content,
         "confidence": row.confidence,
-        "provenance": _json_loads(row.provenance_json, {}),
+        "provenance": provenance,
+        "evidence": evidence if isinstance(evidence, list) else [],
+        "citations": citations if isinstance(citations, list) else [],
         "source_version_refs": _json_loads(row.source_version_refs_json, []),
         "origin_event_ids": _json_loads(row.origin_event_ids_json, []),
         "artifact_id": row.artifact_id,
@@ -1196,6 +1239,11 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             if not row:
                 raise HTTPException(404, "Artifact proposal not found")
             if row.status == "published":
+                if row.document_id:
+                    doc = db.query(Document).filter(Document.id == row.document_id).first()
+                    if doc:
+                        _ensure_member_artifact_copies(db, quest_id=quest_id, proposal=row, source_doc=doc)
+                        db.commit()
                 return {"proposal": _proposal_to_dict(row), "already_published": True}
             if row.status != "pending_review":
                 raise HTTPException(409, "Artifact proposal is not pending review")
@@ -1207,8 +1255,9 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             row.status = "published"
             row.visibility = "quest_shared"
             row.reviewed_at = row.published_at = utcnow_naive()
+            copied_for = _ensure_member_artifact_copies(db, quest_id=quest_id, proposal=row, source_doc=doc)
             publish_event_id = f"artifact_published:{doc.id}"
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Artifact published: {row.title}", meta_data=_timeline_meta("artifact_published", title="Artifact published", event_id=publish_event_id, proposal_id=row.id, document_id=doc.id, actor=captain, subject=row.title)))
+            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Artifact published: {row.title}", meta_data=_timeline_meta("artifact_published", title="Artifact published", event_id=publish_event_id, proposal_id=row.id, document_id=doc.id, actor=captain, subject=row.title, copied_for=copied_for)))
             memory_job_id = None
             existing_memory_job = db.query(QuestSynthesisJob).filter(
                 QuestSynthesisJob.quest_id == quest_id,
@@ -1344,10 +1393,15 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
     @router.get("/api/quests/{quest_id}/artifacts")
     def list_artifacts(request: Request, quest_id: str):
         require_venture_runtime()
-        require_quest_member(request, quest_id)
+        user = require_quest_member(request, quest_id)
+        role = get_quest_role(user, quest_id)
         db = SessionLocal()
         try:
-            docs = db.query(Document).filter(Document.session_id == quest_id, Document.archived == False).all()
+            docs_q = db.query(Document).filter(Document.session_id == quest_id, Document.archived == False, Document.is_active == True)
+            docs_q = docs_q.filter(Document.owner == user) if role != "captain" else docs_q.filter(Document.owner == user)
+            docs = docs_q.all()
+            if role != "captain" and not docs:
+                docs = db.query(Document).filter(Document.session_id == quest_id, Document.archived == False, Document.is_active == True).all()
             images = db.query(GalleryImage).filter(GalleryImage.session_id == quest_id, GalleryImage.is_active == True).all()
             return {
                 "documents": [{"id": d.id, "title": d.title, "language": d.language, "updated_at": d.updated_at.isoformat() + "Z" if d.updated_at else None} for d in docs],

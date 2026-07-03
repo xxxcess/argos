@@ -274,9 +274,26 @@ def retrieve_quest_memories(
         ]
         used = []
         for idx, row in enumerate(selected, 1):
+            provenance = json.loads(row.provenance_json or "{}") if row.provenance_json else {}
+            provenance = provenance if isinstance(provenance, dict) else {}
             evidence_refs = json.loads(row.evidence_chunk_refs_json or "[]") if row.evidence_chunk_refs_json else []
+            evidence_items = provenance.get("evidence") if isinstance(provenance.get("evidence"), list) else []
+            citations = provenance.get("citations") if isinstance(provenance.get("citations"), list) else []
             evidence_note = ""
-            if evidence_refs:
+            if evidence_items:
+                evidence_bits = []
+                for item in evidence_items[:3]:
+                    if isinstance(item, dict):
+                        label = item.get("label") or item.get("source") or item.get("id") or ""
+                        locator = item.get("locator") or item.get("location") or ""
+                        cite_id = f"[{item.get('id')}]" if item.get("id") else ""
+                        evidence_bits.append(" ".join(str(part) for part in (cite_id, label, locator) if part))
+                    else:
+                        evidence_bits.append(str(item))
+                evidence_note = f"\n  Evidence: {', '.join(evidence_bits)}."
+            elif citations:
+                evidence_note = f"\n  Evidence: {', '.join(f'[{c}]' for c in citations[:5])}."
+            elif evidence_refs:
                 evidence_note = f"\n  Evidence: {', '.join(str(x) for x in evidence_refs[:3])}."
             elif row.artifact_id:
                 evidence_note = f"\n  Evidence: Artifact {row.artifact_id}."
@@ -292,6 +309,8 @@ def retrieve_quest_memories(
                 "artifact_id": row.artifact_id,
                 "artifact_revision_number": row.artifact_revision_number,
                 "evidence_chunk_refs": evidence_refs,
+                "evidence": evidence_items,
+                "citations": citations,
             })
         lines.extend([
             "",

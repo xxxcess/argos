@@ -441,7 +441,15 @@ def test_venture_tool_policy_allowlist_blocks_generic_and_mcp_tools():
 
 
 def test_artifact_draft_private_until_publish_without_generic_shared_memory(monkeypatch):
-    client, SessionLocal, app, *_ = _client(monkeypatch)
+    client, SessionLocal, app, sm, *_ = _client(monkeypatch)
+    from routes.document_routes import setup_document_routes
+    import routes.document_routes as dr
+    import routes.document_helpers as dh
+
+    monkeypatch.setattr(dr, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(dh, "SessionLocal", SessionLocal, raising=False)
+    app.include_router(setup_document_routes(sm))
+
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
     invitation_id = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
     app.state.test_user = "mara"
@@ -469,7 +477,17 @@ def test_artifact_draft_private_until_publish_without_generic_shared_memory(monk
 
     db = SessionLocal()
     try:
-        assert db.query(Document).filter(Document.id == doc_id).one().session_id == quest_id
+        original_doc = db.query(Document).filter(Document.id == doc_id).one()
+        assert original_doc.session_id == quest_id
+        assert original_doc.owner == "ada"
+        shipmate_copy = db.query(Document).filter(
+            Document.session_id == quest_id,
+            Document.owner == "mara",
+            Document.is_active == True,
+        ).one()
+        assert shipmate_copy.id != doc_id
+        assert shipmate_copy.title == original_doc.title
+        assert shipmate_copy.current_content == original_doc.current_content
         assert db.query(QuestArtifactProposal).filter(QuestArtifactProposal.id == proposal_id).one().status == "published"
         assert db.query(QuestMemoryEntry).filter(
             QuestMemoryEntry.session_id == quest_id,
@@ -488,7 +506,13 @@ def test_artifact_draft_private_until_publish_without_generic_shared_memory(monk
 
     app.state.test_user = "mara"
     docs = client.get(f"/api/quests/{quest_id}/artifacts").json()["documents"]
-    assert [d["id"] for d in docs] == [doc_id]
+    assert len(docs) == 1
+    assert docs[0]["id"] != doc_id
+    copy_id = docs[0]["id"]
+    assert client.get(f"/api/document/{copy_id}").status_code == 200
+    assert client.get(f"/api/document/{doc_id}").status_code == 200
+    library_docs = client.get("/api/documents/library").json()["documents"]
+    assert copy_id in {d["id"] for d in library_docs}
 
 
 def test_artifact_memory_synthesis_extracts_cited_key_points(monkeypatch):
@@ -523,6 +547,10 @@ def test_artifact_memory_synthesis_extracts_cited_key_points(monkeypatch):
         assert "E1" in memory[0].provenance_json
     finally:
         db.close()
+    api_memory = client.get(f"/api/quests/{quest_id}/memory").json()["memory"]
+    assert len(api_memory) == 1
+    assert api_memory[0]["evidence"][0]["id"] == "E1"
+    assert "FY2026 Market Outlook.pdf" in api_memory[0]["evidence"][0]["label"]
 
 
 def test_artifact_memory_synthesis_noop_preserves_publication_without_cited_claims(monkeypatch):

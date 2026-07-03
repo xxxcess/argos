@@ -697,12 +697,14 @@ async function openVoyageMemory(qid) {
     list.appendChild(h('div', { class: 'venture-muted', text: 'No Voyage Memory entries yet.' }));
   } else {
     entries.forEach(entry => {
+      const citationText = voyageMemoryCitationText(entry);
       list.appendChild(h('article', { class: 'venture-memory-entry' }, [
         h('div', { class: 'venture-memory-entry-head' }, [
           h('div', { class: 'venture-memory-title', text: entry.title || 'Untitled memory' }),
           h('div', { class: 'venture-memory-meta', text: [entry.category, entry.state, entry.visibility, entry.confidence].filter(Boolean).join(' · ') }),
         ]),
         h('div', { class: 'venture-memory-content', text: entry.content || '' }),
+        citationText ? h('div', { class: 'venture-memory-meta', text: `Evidence: ${citationText}` }) : null,
         entry.pinned ? h('div', { class: 'venture-memory-meta', text: 'Pinned' }) : null,
       ]));
     });
@@ -714,6 +716,23 @@ async function openVoyageMemory(qid) {
   backdrop.addEventListener('click', () => { modal.remove(); backdrop.remove(); });
   document.body.appendChild(backdrop);
   document.body.appendChild(modal);
+}
+
+function voyageMemoryCitationText(entry) {
+  const evidence = Array.isArray(entry?.evidence) ? entry.evidence : [];
+  if (evidence.length) {
+    return evidence.slice(0, 4).map(item => {
+      if (!item || typeof item !== 'object') return String(item || '');
+      const label = item.label || item.source || item.specific_source || item.id || '';
+      const locator = item.locator || item.location || '';
+      const id = item.id ? `[${item.id}]` : '';
+      return [id, label, locator].filter(Boolean).join(' ');
+    }).filter(Boolean).join(' · ');
+  }
+  const citations = Array.isArray(entry?.citations) ? entry.citations : [];
+  if (citations.length) return citations.slice(0, 6).map(c => `[${c}]`).join(' · ');
+  const refs = Array.isArray(entry?.evidence_chunk_refs) ? entry.evidence_chunk_refs : [];
+  return refs.slice(0, 4).map(ref => String(ref || '')).filter(Boolean).join(' · ');
 }
 
 function closeVentureModal(modal, backdrop) {

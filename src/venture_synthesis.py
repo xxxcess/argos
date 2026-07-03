@@ -797,6 +797,7 @@ def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[
 
     candidates = []
     active_section = ""
+    section_claims: list[tuple[str, str]] = []
     for raw in content.splitlines():
         line = raw.strip()
         if not line:
@@ -807,10 +808,12 @@ def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[
         if line.startswith(">") or line.startswith("|") or line.startswith("- **["):
             continue
         citations = re.findall(r"\[(E\d+|S\d+|D\d+)\]", line)
-        if not citations:
+        claim = re.sub(r"\s*\[(?:E\d+|S\d+|D\d+)\]", "", line).strip(" -*")
+        if not _is_recall_worthy_artifact_claim(claim):
             continue
-        claim = re.sub(r"\s*\[(?:E\d+|S\d+|D\d+)\]", "", line).strip(" -")
-        if len(claim) < 24:
+        if not citations:
+            if active_section in {"what changed", "why this matters", "short version", "summary", "decision recorded"}:
+                section_claims.append((active_section, claim))
             continue
         category = "finding"
         if "decision" in active_section or claim.lower().startswith(("decided", "decision")):
@@ -841,7 +844,59 @@ def _extract_artifact_key_point_candidates(prop: QuestArtifactProposal) -> list[
         })
         if len(candidates) >= MAX_MEMORY_CANDIDATES:
             break
+    if len(candidates) < MAX_MEMORY_CANDIDATES:
+        existing_claims = {re.sub(r"\W+", " ", str(item.get("content") or "")).strip().lower() for item in candidates}
+        for section, claim in section_claims:
+            normalized_claim = re.sub(r"\W+", " ", claim).strip().lower()
+            if normalized_claim in existing_claims:
+                continue
+            evidence_id = f"A{len(candidates) + 1}"
+            category = "next_step" if "recommended next bearing" in section else ("decision" if "decision" in section else "finding")
+            candidates.append({
+                "title": claim[:96].rstrip("."),
+                "content": claim,
+                "category": category,
+                "confidence": "medium",
+                "citations": [evidence_id],
+                "evidence": [{
+                    "id": evidence_id,
+                    "label": f"{prop.title} - {section.title()}",
+                    "locator": section.title(),
+                    "supports": claim,
+                }],
+            })
+            if len(candidates) >= MAX_MEMORY_CANDIDATES:
+                break
     return candidates
+
+
+def _is_recall_worthy_artifact_claim(claim: str) -> bool:
+    text = re.sub(r"\s+", " ", claim or "").strip()
+    lower = text.lower()
+    boilerplate = (
+        "missing quotes, locators, timestamps, and urls",
+        "review the cited evidence",
+        "pending evidence review",
+        "pending captain review",
+        "intentionally not fabricated",
+    )
+    if any(marker in lower for marker in boilerplate):
+        return False
+    if len(text) < 32:
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'-]*", text)
+    if len(words) < 6 and not any(term in lower for term in ("risk", "increased", "decreased", "decision", "must", "should", "needs")):
+        return False
+    citation_noise = re.sub(r"[\s,;().&-]+", "", text)
+    if citation_noise and sum(ch.isdigit() for ch in citation_noise) >= max(2, len(citation_noise) // 3):
+        return False
+    useful_terms = {
+        "is", "are", "was", "were", "will", "should", "must", "needs", "need",
+        "shows", "show", "found", "indicates", "suggests", "increased", "decreased",
+        "risk", "decision", "constraint", "priority", "because", "therefore", "works",
+        "changes", "supports", "recommends",
+    }
+    return any(term in lower.split() for term in useful_terms) or any(term in lower for term in ("risk", "decision", "because", "therefore", "increased", "decreased"))
 
 
 def _claim_next_job() -> str | None:
