@@ -122,6 +122,7 @@ def _source_to_dict(db, row: _legacy.QuestSource, access: str | None = None) -> 
         config = {"summary": config.get("summary", "") if isinstance(config, dict) else ""}
     elif access is None:
         config = {}
+    index_status = _source_index_status(db, row)
     return {
         "id": row.id,
         "session_id": row.session_id,
@@ -132,8 +133,8 @@ def _source_to_dict(db, row: _legacy.QuestSource, access: str | None = None) -> 
         "access_mode": row.access_mode,
         "configuration": config,
         "status": row.status,
-        "index_state": _source_index_status(db, row).get("index_state"),
-        "index_status": _source_index_status(db, row),
+        "index_state": index_status.get("index_state"),
+        "index_status": index_status,
         "last_refreshed_at": row.last_refreshed_at.isoformat() + "Z" if row.last_refreshed_at else None,
         "last_processed_at": row.last_processed_at.isoformat() + "Z" if row.last_processed_at else None,
     }
