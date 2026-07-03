@@ -81,7 +81,7 @@ def _payload():
         "key_points": [
             {
                 "title": "Durable completion controls queue progression",
-                "revelation": "Later selections can remain queued when scheduling checks active work before the completed state is durably flushed.",
+                "revelation": "Later selections can remain queued when scheduling checks active work before the completed state is flushed.",
                 "category": "finding",
                 "confidence": "high",
                 "citations": ["C3", "S1"],
