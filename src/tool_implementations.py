@@ -4317,3 +4317,159 @@ async def do_vault_unlock(content: str, owner: Optional[str] = None) -> Dict:
         pass
 
     return {"output": "Vault unlocked. Session saved.", "exit_code": 0}
+
+
+async def do_manage_quest(content: str, owner: Optional[str] = None, session_id: Optional[str] = None) -> Dict:
+    """Scoped Venture Quest management tool for Captain agent turns only."""
+
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+    action = str(args.get("action") or "").strip()
+    quest_id = str(args.get("quest_id") or session_id or "").strip()
+    if action not in {
+        "status",
+        "list_sources",
+        "inspect_source",
+        "refresh_source",
+        "reindex_source",
+        "list_artifacts",
+        "open_artifact",
+        "request_synthesis",
+        "list_memory",
+    }:
+        return {"error": "Unsupported manage_quest action", "exit_code": 1}
+    if not quest_id:
+        return {"error": "manage_quest requires an active Quest session", "exit_code": 1}
+
+    from core.database import (
+        ChatMessage,
+        Document,
+        QuestArtifactProposal,
+        QuestBearing,
+        QuestEvidenceChunk,
+        QuestIndexJob,
+        QuestMemoryEntry,
+        QuestSource,
+        Session as DbSession,
+        SessionLocal,
+    )
+    from src.venture_auth import get_quest_role
+
+    role = get_quest_role(owner, quest_id)
+    if role != "captain":
+        return {"error": "manage_quest requires Captain membership in the active Quest.", "exit_code": 1}
+
+    def _load(value, fallback):
+        try:
+            parsed = json.loads(value or "")
+            return parsed if parsed is not None else fallback
+        except Exception:
+            return fallback
+
+    db = SessionLocal()
+    try:
+        quest = db.query(DbSession).filter(DbSession.id == quest_id).first()
+        bearing = db.query(QuestBearing).filter(QuestBearing.session_id == quest_id).first()
+        if not quest or not bearing:
+            return {"error": "Quest not found", "exit_code": 1}
+
+        if action == "status":
+            sources = db.query(QuestSource).filter(QuestSource.session_id == quest_id, QuestSource.status != "archived").all()
+            jobs = db.query(QuestIndexJob).filter(QuestIndexJob.quest_id == quest_id, QuestIndexJob.status.in_(("queued", "running"))).count()
+            output = [
+                f"Quest: {quest.name}",
+                f"Current bearing: {bearing.next_bearing or bearing.exploration_goal or '(not set)'}",
+                f"Sources: {len(sources)}",
+                f"Active indexing jobs: {jobs}",
+            ]
+            return {"output": "\n".join(output), "exit_code": 0}
+
+        if action == "list_sources":
+            rows = db.query(QuestSource).filter(QuestSource.session_id == quest_id, QuestSource.status != "archived").all()
+            lines = [
+                f"- {s.display_name} ({s.source_type}, {s.source_mode}, {s.access_mode}) status={s.status} index={s.index_state} id={s.id[:8]}"
+                for s in rows
+            ]
+            return {"output": "\n".join(lines) or "No Quest sources.", "exit_code": 0}
+
+        if action in {"inspect_source", "refresh_source", "reindex_source"}:
+            source_id = str(args.get("source_id") or "").strip()
+            source = db.query(QuestSource).filter(QuestSource.session_id == quest_id, QuestSource.id == source_id).first()
+            if not source:
+                return {"error": "Quest source not found", "exit_code": 1}
+            if action == "inspect_source":
+                chunks = db.query(QuestEvidenceChunk).filter(QuestEvidenceChunk.source_id == source.id, QuestEvidenceChunk.is_current == True).count()  # noqa: E712
+                return {
+                    "output": (
+                        f"Source: {source.display_name}\n"
+                        f"Type: {source.source_type}\nMode: {source.source_mode}\n"
+                        f"Access: {source.access_mode}\nStatus: {source.status}\n"
+                        f"Index state: {source.index_state}\nCurrent evidence chunks: {chunks}"
+                    ),
+                    "exit_code": 0,
+                }
+            from src.quest_indexing import enqueue_index_job, job_to_dict
+            trigger = "manual_refresh" if action == "refresh_source" else "retry"
+            job = enqueue_index_job(db, source, trigger=trigger, created_by=owner)
+            db.commit()
+            return {"output": f"Queued {action.replace('_', ' ')} for {source.display_name}.", "index_job": job_to_dict(job), "exit_code": 0}
+
+        if action == "list_artifacts":
+            docs = db.query(Document).filter(Document.session_id == quest_id, Document.archived == False).all()  # noqa: E712
+            proposals = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.session_id == quest_id).order_by(QuestArtifactProposal.created_at.desc()).limit(20).all()
+            lines = [f"- Published: {d.title} id={d.id[:8]}" for d in docs]
+            lines += [f"- Draft {p.status}: {p.title} rev={p.revision_number} id={p.id[:8]}" for p in proposals]
+            return {"output": "\n".join(lines) or "No Quest artifacts.", "exit_code": 0}
+
+        if action == "open_artifact":
+            artifact_id = str(args.get("artifact_id") or args.get("proposal_id") or "").strip()
+            prop = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.session_id == quest_id, QuestArtifactProposal.id == artifact_id).first()
+            doc = db.query(Document).filter(Document.session_id == quest_id, Document.id == artifact_id).first()
+            if prop and prop.document:
+                return {"output": prop.document.current_content, "artifact": {"title": prop.title, "status": prop.status, "revision_number": prop.revision_number}, "exit_code": 0}
+            if doc:
+                return {"output": doc.current_content, "artifact": {"title": doc.title, "status": "published"}, "exit_code": 0}
+            return {"error": "Artifact not found", "exit_code": 1}
+
+        if action == "request_synthesis":
+            from src.venture_synthesis import enqueue_synthesis_job, synthesis_job_to_dict
+            user_msg = (
+                db.query(ChatMessage)
+                .filter(ChatMessage.session_id == quest_id, ChatMessage.role == "user")
+                .order_by(ChatMessage.timestamp.desc())
+                .first()
+            )
+            assistant_msg = (
+                db.query(ChatMessage)
+                .filter(ChatMessage.session_id == quest_id, ChatMessage.role == "assistant")
+                .order_by(ChatMessage.timestamp.desc())
+                .first()
+            )
+            job = enqueue_synthesis_job(
+                db,
+                quest_id=quest_id,
+                trigger="captain_requested",
+                created_by=owner,
+                triggering_user_message_id=user_msg.id if user_msg else None,
+                triggering_assistant_message_id=assistant_msg.id if assistant_msg else None,
+                retrieval_run_id=args.get("retrieval_run_id"),
+            )
+            db.commit()
+            return {"output": "Queued Captain-requested Quest synthesis.", "synthesis_job": synthesis_job_to_dict(job), "exit_code": 0}
+
+        if action == "list_memory":
+            rows = db.query(QuestMemoryEntry).filter(
+                QuestMemoryEntry.session_id == quest_id,
+                QuestMemoryEntry.state != "retired",
+            ).order_by(QuestMemoryEntry.updated_at.desc()).limit(20).all()
+            lines = [
+                f"- {m.title} [{m.category}, {m.state}, {m.visibility}, {m.confidence}] rev={m.artifact_revision_number or '-'}"
+                for m in rows
+            ]
+            return {"output": "\n".join(lines) or "No Voyage Memory.", "exit_code": 0}
+    finally:
+        db.close()
+
+    return {"error": "Unsupported manage_quest action", "exit_code": 1}

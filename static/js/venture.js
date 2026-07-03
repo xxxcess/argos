@@ -3,6 +3,7 @@
 const API_BASE = window.API_BASE || '';
 let caps = null;
 let currentQuestId = null;
+let currentQuestCapabilities = null;
 const questSessionIds = new Set();
 const questHistorySignatures = new Map();
 let questSourcePollTimer = null;
@@ -95,6 +96,24 @@ function installStyles() {
     body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-palette { display:none!important; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title { font-size:0; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title::after { content:"Recent Chats and Quests"; font-size:16px; }
+    body.argos-venture.venture-quest-active #mode-chat-btn,
+    body.argos-venture.venture-quest-active #mode-agent-btn,
+    body.argos-venture.venture-quest-active [data-mode-tool],
+    body.argos-venture.venture-quest-active #bash-toggle-btn,
+    body.argos-venture.venture-quest-active #overflow-workspace-btn,
+    body.argos-venture.venture-quest-active #overflow-preset-btn,
+    body.argos-venture.venture-quest-active #model-picker-btn,
+    body.argos-venture.venture-quest-active #workspace-indicator-btn,
+    body.argos-venture.venture-quest-active #overflow-attach-btn { display:none!important; }
+    body.argos-venture.venture-quest-active.venture-shipmate #web-toggle-btn,
+    body.argos-venture.venture-quest-active.venture-shipmate #research-toggle-btn,
+    body.argos-venture.venture-quest-active.venture-shipmate #overflow-rag-btn,
+    body.argos-venture.venture-quest-active.venture-shipmate #overflow-doc-btn { display:none!important; }
+    body.argos-venture.venture-quest-no-voice #overflow-tts-btn,
+    body.argos-venture.venture-quest-no-voice #voice-recorder-btn,
+    body.argos-venture.venture-quest-no-voice .tts-mode-option,
+    body.argos-venture.venture-quest-no-stt #voice-recorder-btn { display:none!important; }
+    .venture-mode-indicator { display:inline-flex; align-items:center; height:24px; padding:0 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; font-weight:700; opacity:.82; pointer-events:none; }
     .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); min-width:0; max-width:100%; box-sizing:border-box; overflow:hidden; overflow-wrap:anywhere; }
     .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; overflow-wrap:anywhere; }
     .venture-card p, .venture-card div, .venture-card span { min-width:0; overflow-wrap:anywhere; }
@@ -228,10 +247,11 @@ function installShipmateCaptureGuards() {
     }
   }, true);
   document.addEventListener('submit', e => {
-    if (!isShipmate()) return;
     const form = e.target;
     if (!form || form.id !== 'chat-form') return;
-    ['attachments', 'use_web', 'use_research', 'allow_bash', 'allow_web_search', 'use_rag', 'workspace', 'preset_id', 'mode'].forEach(name => {
+    const sid = selectedQuestId();
+    if (!isShipmate() && (!sid || !questSessionIds.has(String(sid)))) return;
+    ['attachments', 'use_web', 'use_research', 'allow_bash', 'allow_web_search', 'use_rag', 'workspace', 'preset_id', 'mode', 'model', 'endpoint_url'].forEach(name => {
       form.querySelectorAll(`[name="${name}"]`).forEach(el => { el.disabled = true; });
     });
   }, true);
@@ -240,7 +260,34 @@ function installShipmateCaptureGuards() {
 async function loadQuest(id) {
   if (!id || !caps?.is_venture) return;
   currentQuestId = id;
+  await loadQuestCapabilities(id);
   await renderRightRail();
+}
+
+async function loadQuestCapabilities(id) {
+  currentQuestCapabilities = await getJson(`/api/quests/${encodeURIComponent(id)}/capabilities`);
+  applyQuestCapabilities();
+  return currentQuestCapabilities;
+}
+
+function applyQuestCapabilities() {
+  const qc = currentQuestCapabilities;
+  document.body.classList.toggle('venture-quest-active', !!qc);
+  document.body.classList.toggle('venture-quest-no-voice', !!qc && !qc.voice?.show_voice_mode_control);
+  document.body.classList.toggle('venture-quest-no-stt', !!qc && !qc.voice?.stt_ready);
+  document.body.classList.toggle('venture-quest-tts-ready', !!qc && !!qc.voice?.tts_ready);
+  let indicator = document.getElementById('venture-mode-indicator');
+  const host = document.getElementById('mode-toggle') || document.getElementById('chat-mode-controls') || document.getElementById('current-meta')?.parentElement;
+  if (!qc || !host) {
+    indicator?.remove();
+    return;
+  }
+  if (!indicator) {
+    indicator = h('span', { id: 'venture-mode-indicator', class: 'venture-mode-indicator' });
+    host.appendChild(indicator);
+  }
+  indicator.textContent = qc.interaction_mode === 'agent' ? 'Agent' : 'Chat';
+  indicator.title = 'Fixed by Quest role';
 }
 
 async function enforceQuestSessionView(sessionId) {
@@ -294,6 +341,8 @@ async function renderRightRail() {
   const qid = selectedQuestId();
   let rail = document.getElementById('venture-right-rail');
   if (!qid || !questSessionIds.has(String(qid))) {
+    currentQuestCapabilities = null;
+    applyQuestCapabilities();
     rail?.remove();
     setRailLayoutState(false);
     return;
@@ -325,19 +374,24 @@ async function renderRightRail() {
   ]));
   const quest = await getJson(`/api/quests/${encodeURIComponent(qid)}`);
   if (!quest?.quest) {
+    currentQuestCapabilities = null;
+    applyQuestCapabilities();
     rail.remove();
     setRailLayoutState(false);
     return;
   }
-  const [bearing, roster, sources, artifacts, memory] = await Promise.all([
+  if (!currentQuestCapabilities || currentQuestId !== qid) await loadQuestCapabilities(qid);
+  const [bearing, roster, sources, artifacts, memory, synthesisJobs] = await Promise.all([
     getJson(`/api/quests/${encodeURIComponent(qid)}/bearing`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/roster`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/sources`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/artifacts`),
     caps.can_view_quest_memory ? getJson(`/api/quests/${encodeURIComponent(qid)}/memory`) : Promise.resolve(null),
+    caps.can_review_artifacts ? getJson(`/api/quests/${encodeURIComponent(qid)}/argo-synthesis/jobs`) : Promise.resolve(null),
   ]);
   const sourceRows = sources?.sources || [];
-  if (sourceRows.some(s => s.index_status?.has_active_job)) {
+  const activeSynthesis = (synthesisJobs?.jobs || []).some(j => ['queued', 'running'].includes(j.status));
+  if (sourceRows.some(s => s.index_status?.has_active_job) || activeSynthesis) {
     if (!questSourcePollTimer) {
       questSourcePollTimer = setInterval(() => {
         if (!document.hidden) renderRightRail().catch(() => {});
@@ -352,7 +406,7 @@ async function renderRightRail() {
   if (caps.can_manage_sources || sourceRows.length) rail.appendChild(sourceCard(sourceRows, qid));
   if (caps.can_review_artifacts) rail.appendChild(artifactReviewQueue(qid));
   rail.appendChild(artifactShelf(artifacts || { documents: [], gallery: [] }));
-  rail.appendChild(argoStatusCard(qid, memory?.memory || []));
+  rail.appendChild(argoStatusCard(qid, memory?.memory || [], synthesisJobs?.jobs || []));
 }
 
 function currentBearingCard(b) {
@@ -467,15 +521,42 @@ function artifactShelf(artifacts) {
   ]);
 }
 
-function argoStatusCard(qid, memory) {
+function synthesisStatusText(job) {
+  if (!job) return 'No synthesis jobs yet.';
+  if (job.status === 'queued') return 'Synthesis queued.';
+  if (job.status === 'running') return 'Synthesis running.';
+  if (job.status === 'created') return 'Artifact Draft ready for review.';
+  if (job.status === 'updated') return 'Artifact Draft updated.';
+  if (job.status === 'no_insight') {
+    if (job.reason === 'no_source_evidence') return 'No draft created: no indexed Quest source evidence was available.';
+    if (job.reason === 'duplicate_claim_without_new_evidence') return 'No draft created: no meaningful new evidence for that claim.';
+    return 'No draft created: no durable evidence-backed insight was found.';
+  }
+  if (job.status === 'failed') return job.safe_error_message || 'Synthesis failed.';
+  if (job.status === 'cancelled') return 'Synthesis cancelled.';
+  return `Synthesis status: ${job.status}`;
+}
+
+function argoStatusCard(qid, memory, synthesisJobs = []) {
+  const latestJob = synthesisJobs[0] || null;
   return h('section', { class: 'venture-card ArgoStatusCard' }, [
     h('h3', { text: 'Argo Status' }),
     h('div', { class: 'venture-muted', text: `${memory.length} Voyage Memory entries visible.` }),
+    caps.can_review_artifacts ? h('div', { class: 'venture-muted', text: synthesisStatusText(latestJob) }) : null,
     caps.can_view_quest_memory ? h('button', { class: 'venture-btn', type: 'button', text: 'View Voyage Memory', onclick: () => openVoyageMemory(qid) }) : null,
-    caps.can_review_artifacts ? h('button', { class: 'venture-btn', type: 'button', text: 'Run Synthesis', onclick: async () => {
-      await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/argo-synthesis/run`, { method: 'POST', credentials: 'same-origin' });
-      await renderRightRail();
+    caps.can_review_artifacts ? h('button', { class: 'venture-btn', type: 'button', text: 'Distill Insight', onclick: async (event) => {
+      const btn = event.currentTarget;
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Queued...';
+      }
+      try {
+        await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/argo-synthesis/run`, { method: 'POST', credentials: 'same-origin' });
+      } finally {
+        await renderRightRail();
+      }
     } }) : null,
+    latestJob?.artifact_proposal_id ? h('button', { class: 'venture-btn', type: 'button', text: 'Review Latest Draft', onclick: () => openArtifactDraft(latestJob.artifact_proposal_id) }) : null,
   ]);
 }
 

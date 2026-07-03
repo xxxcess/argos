@@ -1035,6 +1035,37 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_quest",
+            "description": "Captain-only scoped Quest tool for the active Argos Venture Quest. Refresh, reindex, and synthesis require explicit Captain request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "status",
+                            "list_sources",
+                            "inspect_source",
+                            "refresh_source",
+                            "reindex_source",
+                            "list_artifacts",
+                            "open_artifact",
+                            "request_synthesis",
+                            "list_memory",
+                        ],
+                    },
+                    "quest_id": {"type": "string", "description": "Optional Quest id; defaults to the active Quest."},
+                    "source_id": {"type": "string", "description": "Required for source actions."},
+                    "artifact_id": {"type": "string", "description": "Artifact or published document id for open_artifact."},
+                    "retrieval_run_id": {"type": "string", "description": "Optional retrieval run id for request_synthesis."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "resolve_contact",
             "description": "Look up a contact by name. Searches CardDAV address book and sent email history. Returns email addresses (when available) or phone numbers. Use when the user says 'message [name]', 'email [name]', or asks for someone's contact details.",
             "parameters": {
@@ -1431,7 +1462,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = json.dumps(normalize_generate_video_request(args))
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
-                        "manage_tokens", "manage_documents", "manage_settings"):
+                        "manage_tokens", "manage_documents", "manage_settings",
+                        "manage_quest"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")

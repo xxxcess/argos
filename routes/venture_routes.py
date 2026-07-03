@@ -29,6 +29,7 @@ from core.database import (
     QuestEvidenceChunk,
     QuestIndexJob,
     QuestSourceArtifact,
+    QuestSynthesisJob,
     Session as DbSession,
     SessionLocal,
     UserNotification,
@@ -243,6 +244,13 @@ def _proposal_to_dict(row: QuestArtifactProposal, include_document: bool = False
         "evidence_refs": _json_loads(row.evidence_refs_json, []),
         "evidence_fingerprint": row.evidence_fingerprint,
         "source_version_refs": _json_loads(row.source_version_refs_json, []),
+        "claim_key": row.claim_key,
+        "evidence_chunk_refs": _json_loads(row.evidence_chunk_refs_json, []),
+        "retrieval_run_ids": _json_loads(row.retrieval_run_ids_json, []),
+        "synthesis": _json_loads(row.synthesis_json, {}),
+        "revision_number": row.revision_number,
+        "supersedes_artifact_id": row.supersedes_artifact_id,
+        "visibility": row.visibility,
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
         "reviewed_at": row.reviewed_at.isoformat() + "Z" if row.reviewed_at else None,
         "published_at": row.published_at.isoformat() + "Z" if row.published_at else None,
@@ -271,12 +279,37 @@ def _memory_to_dict(row: QuestMemoryEntry) -> dict:
         "provenance": _json_loads(row.provenance_json, {}),
         "source_version_refs": _json_loads(row.source_version_refs_json, []),
         "origin_event_ids": _json_loads(row.origin_event_ids_json, []),
+        "artifact_id": row.artifact_id,
+        "artifact_revision_number": row.artifact_revision_number,
+        "evidence_chunk_refs": _json_loads(row.evidence_chunk_refs_json, []),
+        "claim_key": row.claim_key,
+        "superseded_by_memory_id": row.superseded_by_memory_id,
         "created_by": row.created_by,
         "supersedes_id": row.supersedes_id,
         "pinned": row.pinned,
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
         "updated_at": row.updated_at.isoformat() + "Z" if row.updated_at else None,
         "valid_until": row.valid_until.isoformat() + "Z" if row.valid_until else None,
+    }
+
+
+def _synthesis_job_to_safe_dict(row: QuestSynthesisJob) -> dict:
+    result = _json_loads(row.result_json, {})
+    reason = result.get("reason") if isinstance(result, dict) else None
+    return {
+        "id": row.id,
+        "trigger": row.trigger,
+        "status": row.status,
+        "created_by": row.created_by,
+        "artifact_proposal_id": row.artifact_proposal_id,
+        "attempt_count": row.attempt_count,
+        "requested_at": row.requested_at.isoformat() + "Z" if row.requested_at else None,
+        "started_at": row.started_at.isoformat() + "Z" if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() + "Z" if row.finished_at else None,
+        "next_retry_at": row.next_retry_at.isoformat() + "Z" if row.next_retry_at else None,
+        "safe_error_code": row.safe_error_code,
+        "safe_error_message": row.safe_error_message,
+        "reason": reason,
     }
 
 
@@ -540,6 +573,56 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             if not db.query(QuestBearing).filter(QuestBearing.session_id == quest_id).first():
                 raise HTTPException(404, "Quest not found")
             return {"quest": _session_to_quest(row, get_quest_role(user, quest_id))}
+        finally:
+            db.close()
+
+    def _voice_capability_for_captain(captain: str) -> dict:
+        try:
+            from src.settings import get_setting
+            tts_enabled = bool(get_setting("tts_enabled", True))
+            stt_enabled = bool(get_setting("stt_enabled", True))
+        except Exception:
+            tts_enabled = False
+            stt_enabled = False
+        tts_ready = False
+        stt_ready = False
+        if tts_enabled:
+            try:
+                from services.tts.tts_service import TTSService
+                tts_ready = bool(TTSService().available)
+            except Exception:
+                tts_ready = False
+        if stt_enabled:
+            try:
+                from services.stt.stt_service import STTService
+                stt_ready = bool(STTService().available)
+            except Exception:
+                stt_ready = False
+        return {
+            "tts_enabled": tts_enabled,
+            "tts_ready": bool(tts_enabled and tts_ready),
+            "stt_enabled": stt_enabled,
+            "stt_ready": bool(stt_enabled and stt_ready),
+            "show_voice_mode_control": bool((tts_enabled and tts_ready) or (stt_enabled and stt_ready)),
+        }
+
+    @router.get("/api/quests/{quest_id}/capabilities")
+    def quest_capabilities(request: Request, quest_id: str):
+        require_venture_runtime()
+        user = require_quest_member(request, quest_id)
+        role = get_quest_role(user, quest_id)
+        db = SessionLocal()
+        try:
+            quest = db.query(DbSession).filter(DbSession.id == quest_id).first()
+            if not quest:
+                raise HTTPException(404, "Quest not found")
+            voice = _voice_capability_for_captain(quest.owner)
+            return {
+                "role": "captain" if role == "captain" else "shipmate",
+                "interaction_mode": "agent" if role == "captain" else "chat",
+                "tools_allowed": role == "captain",
+                "voice": voice,
+            }
         finally:
             db.close()
 
@@ -843,13 +926,8 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                     email_poll = {"changed": False, "error": "email_poll_unavailable"}
             from src.quest_indexing import enqueue_index_job, job_to_dict
             job = enqueue_index_job(db, row, trigger="manual_refresh", created_by=captain)
-            synthesis = (
-                run_argo_synthesis(db, quest_id, captain).to_dict()
-                if row.source_type != "email" or (email_poll or {}).get("changed")
-                else {"created": False, "updated": False, "proposal_id": None, "evidence_count": 0, "reason": "no_email_updates"}
-            )
             db.commit()
-            payload = {"accepted": True, "source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job), "synthesis": synthesis}
+            payload = {"accepted": True, "source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job)}
             if email_poll is not None:
                 payload["email_poll"] = email_poll
                 payload["version_id"] = email_poll.get("version_id")
@@ -950,6 +1028,23 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         finally:
             db.close()
 
+    @router.get("/api/quests/{quest_id}/argo-synthesis/jobs")
+    def list_synthesis_jobs(request: Request, quest_id: str):
+        require_venture_runtime()
+        require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(QuestSynthesisJob)
+                .filter(QuestSynthesisJob.quest_id == quest_id)
+                .order_by(QuestSynthesisJob.requested_at.desc())
+                .limit(10)
+                .all()
+            )
+            return {"jobs": [_synthesis_job_to_safe_dict(row) for row in rows]}
+        finally:
+            db.close()
+
     @router.post("/api/quests/{quest_id}/argo-synthesis/pause")
     def pause_synthesis(request: Request, quest_id: str):
         require_venture_runtime()
@@ -969,9 +1064,8 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         db = SessionLocal()
         try:
             state = set_synthesis_paused(db, quest_id, False)
-            result = run_argo_synthesis(db, quest_id, require_quest_captain(request, quest_id))
             db.commit()
-            return {"ok": True, "synthesis_paused": bool(state.get("synthesis_paused")), "synthesis": result.to_dict()}
+            return {"ok": True, "synthesis_paused": bool(state.get("synthesis_paused"))}
         except Exception:
             db.rollback()
             raise
@@ -1073,9 +1167,35 @@ Review the cited evidence, validate the pattern, and decide whether to publish t
             doc.session_id = quest_id
             doc.is_active = True
             row.status = "published"
+            row.visibility = "quest_shared"
             row.reviewed_at = row.published_at = utcnow_naive()
             db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Artifact published: {row.title}", meta_data=_json_dumps({"event_type": "artifact_published", "proposal_id": row.id, "document_id": doc.id, "actor": captain})))
-            db.add(QuestMemoryEntry(id=uuid.uuid4().hex, session_id=quest_id, category="artifact_reference", visibility="quest_shared", state="confirmed", title=row.title, content=row.summary, confidence="high", provenance_json=_json_dumps({"proposal_id": row.id, "document_id": doc.id}), source_version_refs_json=row.source_version_refs_json, created_by="argo"))
+            synth = _json_loads(row.synthesis_json, {})
+            for candidate in (synth.get("memory_candidates") or [])[:3]:
+                category = candidate.get("category")
+                if category not in {"finding", "decision", "risk", "open_question", "entity"}:
+                    category = "finding"
+                title = str(candidate.get("title") or row.title).strip()
+                content = str(candidate.get("content") or "").strip()
+                if not content:
+                    continue
+                db.add(QuestMemoryEntry(
+                    id=uuid.uuid4().hex,
+                    session_id=quest_id,
+                    category=category,
+                    visibility="captain_private",
+                    state="provisional",
+                    title=title,
+                    content=content,
+                    confidence=candidate.get("confidence") if candidate.get("confidence") in {"low", "medium", "high"} else "low",
+                    provenance_json=_json_dumps({"proposal_id": row.id, "document_id": doc.id, "citations": candidate.get("citations") or []}),
+                    source_version_refs_json=row.source_version_refs_json,
+                    evidence_chunk_refs_json=row.evidence_chunk_refs_json,
+                    artifact_id=row.id,
+                    artifact_revision_number=row.revision_number,
+                    claim_key=row.claim_key,
+                    created_by="argo",
+                ))
             members = db.query(QuestMember).filter(QuestMember.session_id == quest_id, QuestMember.role == "shipmate").all()
             quest = db.query(DbSession).filter(DbSession.id == quest_id).first()
             for member in members:

@@ -40,7 +40,7 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import classify_tool_intent as _classify_tool_intent
-from src.tool_policy import build_effective_tool_policy
+from src.tool_policy import VENTURE_QUEST_ALLOWED_TOOLS, build_effective_tool_policy
 from src.runtime_profile import is_venture_runtime
 from src.venture_auth import get_quest_role, require_quest_member
 from src.venture_auth import get_visible_quest_ids
@@ -71,6 +71,12 @@ def _is_venture_quest_session(session_id: str) -> bool:
 
 def _shipmate_role(request: Request, session_id: str) -> bool:
     return is_venture_runtime() and _is_venture_quest_session(session_id) and get_quest_role(effective_user(request), session_id) == "shipmate"
+
+
+def _venture_quest_role(request: Request, session_id: str) -> str | None:
+    if not is_venture_runtime() or not _is_venture_quest_session(session_id):
+        return None
+    return get_quest_role(effective_user(request), session_id)
 
 
 def _reject_shipmate_json_controls(request: Request, session_id: str, chat_request: ChatRequest) -> None:
@@ -114,6 +120,27 @@ def _reject_shipmate_form_controls(request: Request, session_id: str, form_data,
         forbidden_body = forbidden_form | {"mode", "model", "endpoint_url", "tools"}
         if any(body.get(key) not in (None, "", False, [], {}) for key in forbidden_body):
             raise HTTPException(403, "Shipmates can send plain Quest messages only")
+
+
+def _normalize_venture_quest_turn(request: Request, session_id: str) -> dict:
+    role = _venture_quest_role(request, session_id)
+    if role == "captain":
+        return {
+            "is_quest": True,
+            "role": "captain",
+            "chat_mode": "agent",
+            "allow_tools": True,
+            "allowlist": set(VENTURE_QUEST_ALLOWED_TOOLS),
+        }
+    if role == "shipmate":
+        return {
+            "is_quest": True,
+            "role": "shipmate",
+            "chat_mode": "chat",
+            "allow_tools": False,
+            "allowlist": set(),
+        }
+    return {"is_quest": False, "role": None, "chat_mode": None, "allow_tools": None, "allowlist": set()}
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -426,6 +453,12 @@ def setup_chat_routes(
         # Shipmates into joined Quests; Nightly remains owner-scoped.
         _verify_chat_session_access(request, session)
         _reject_shipmate_json_controls(request, session, chat_request)
+        venture_turn = _normalize_venture_quest_turn(request, session)
+        if venture_turn["is_quest"]:
+            preset_id = None
+            att_ids = []
+            use_web = False
+            use_research = False
 
         try:
             sess = session_manager.get_session(session)
@@ -449,7 +482,13 @@ def setup_chat_routes(
         # non-streaming path can't be used to bypass).
         _enforce_chat_privileges(request, sess)
 
-        tool_policy = build_effective_tool_policy(last_user_message=message)
+        venture_allowlist = venture_turn["allowlist"] if venture_turn["is_quest"] and venture_turn["role"] == "captain" else None
+        tool_policy = build_effective_tool_policy(
+            last_user_message=message,
+            allowlist=venture_allowlist,
+            block_all_tool_calls=bool(venture_turn["is_quest"] and venture_turn["role"] == "shipmate"),
+            disable_mcp=bool(venture_turn["is_quest"]),
+        )
         allow_tool_preprocessing = not tool_policy.block_all_tool_calls
 
         # Inline memory command
@@ -671,6 +710,24 @@ def setup_chat_routes(
             # but BEFORE loading. Prevents cross-user session hijack.
             _verify_chat_session_access(request, session)
             _reject_shipmate_form_controls(request, session, form_data, body)
+            venture_turn = _normalize_venture_quest_turn(request, session)
+            if venture_turn["is_quest"]:
+                chat_mode = venture_turn["chat_mode"]
+                auto_escalated = False
+                user_requested_agent = venture_turn["role"] == "captain"
+                plan_mode = False
+                approved_plan = ""
+                workspace = None
+                workspace_rejected = None
+                preset_id = None
+                use_web = None
+                use_research = None
+                use_rag = "false"
+                search_context = None
+                compare_mode = False
+                incognito = False
+                allow_bash = None
+                allow_web_search = None
             sess = session_manager.get_session(session)
             owner = effective_user(request)
             if _clear_orphaned_session_endpoint(sess, owner=owner):
@@ -720,6 +777,8 @@ def setup_chat_routes(
                 att_ids = [str(x) for x in json.loads(attachments)]
             except Exception as e:
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
+        if 'venture_turn' in locals() and venture_turn["is_quest"] and venture_turn["role"] == "shipmate":
+            att_ids = []
 
         no_memory = str(form_data.get("no_memory", "")).lower() == "true"
         pre_context_tool_policy = build_effective_tool_policy(
@@ -946,9 +1005,21 @@ def setup_chat_routes(
             from src.tool_security import plan_mode_disabled_tools
             disabled_tools.update(plan_mode_disabled_tools())
 
+        venture_allowlist = None
+        if 'venture_turn' in locals() and venture_turn["is_quest"]:
+            if venture_turn["role"] == "shipmate":
+                disabled_tools.update({"web_search", "web_fetch", "trigger_research", "manage_research"})
+                chat_mode = "chat"
+                _research_flags["do"] = False
+            else:
+                venture_allowlist = venture_turn["allowlist"]
+
         tool_policy = build_effective_tool_policy(
             disabled_tools=disabled_tools,
             last_user_message=message,
+            allowlist=venture_allowlist,
+            block_all_tool_calls=bool('venture_turn' in locals() and venture_turn["is_quest"] and venture_turn["role"] == "shipmate"),
+            disable_mcp=bool('venture_turn' in locals() and venture_turn["is_quest"]),
         )
         disabled_tools = tool_policy.all_disabled_names()
         research_blocked_by_policy = bool(
@@ -1004,6 +1075,9 @@ def setup_chat_routes(
 
             if ctx.quest_sources_used:
                 yield f"data: {json.dumps({'type': 'quest_sources_used', 'data': ctx.quest_sources_used})}\n\n"
+
+            if ctx.quest_memories_used:
+                yield f"data: {json.dumps({'type': 'quest_memories_used', 'data': ctx.quest_memories_used})}\n\n"
 
             # Run research as a background task (survives page refresh)
             if effective_do_research:
@@ -1304,6 +1378,8 @@ def setup_chat_routes(
                                     character_name=ctx.preset.character_name,
                                     owner=_user,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    quest_retrieval_run_id=ctx.quest_retrieval_run_id,
+                                    triggering_assistant_message_id=_saved_id,
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1364,6 +1440,7 @@ def setup_chat_routes(
                         disabled_tools=disabled_tools if disabled_tools else None,
                         tool_policy=tool_policy,
                         owner=_user,
+                        relevant_tools=venture_allowlist if venture_allowlist else None,
                         fallbacks=_fallback_candidates,
                         plan_mode=plan_mode,
                         approved_plan=approved_plan or None,
@@ -1444,6 +1521,8 @@ def setup_chat_routes(
                                     owner=_user,
                                     extract_skills=user_requested_agent,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    quest_retrieval_run_id=ctx.quest_retrieval_run_id,
+                                    triggering_assistant_message_id=_saved_id,
                                 )
                             _stream_set(session, status="done")
                             yield chunk

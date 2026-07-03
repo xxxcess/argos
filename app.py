@@ -1013,7 +1013,9 @@ async def _startup_event():
         from src.runtime_profile import is_venture_runtime
         if is_venture_runtime():
             from src.quest_indexing import start_quest_index_worker
+            from src.venture_synthesis import start_quest_synthesis_worker
             start_quest_index_worker(app, concurrency=2)
+            start_quest_synthesis_worker(app, concurrency=1)
     except Exception as _e:
         logger.warning("Failed to start Quest index worker: %s", _e)
     # Always-on monitor that auto-continues the agent when a background bash

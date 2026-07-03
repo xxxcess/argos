@@ -11,6 +11,7 @@ from typing import Any
 
 from core.database import (
     QuestEvidenceChunk,
+    QuestMemoryEntry,
     QuestRetrievalRun,
     QuestSource,
     QuestSourceArtifact,
@@ -31,6 +32,7 @@ class QuestRetrievalResult:
     recall: list[dict[str, Any]] = None
     run_id: str | None = None
     retrieval_mode: str = "indexed"
+    freshness_requested: bool = False
 
     def __post_init__(self):
         if self.recall is None:
@@ -55,8 +57,17 @@ def _source_visible_to_role(source: QuestSource, role: str | None) -> bool:
     return role == "shipmate" and source.access_mode in {"shared_read", "shared_summaries"}
 
 
-def _freshness(message: str) -> str:
-    return "live_verified" if FRESHNESS_WORDS.search(message or "") else "indexed"
+def freshness_requested(message: str) -> bool:
+    return bool(FRESHNESS_WORDS.search(message or ""))
+
+
+def _retrieval_mode(selected: list[tuple]) -> str:
+    if not selected:
+        return "indexed"
+    static_modes = {"static"}
+    if all(getattr(source, "source_mode", "") in static_modes for (_hit, _chunk, source, _artifact, _version, _text, _meta) in selected):
+        return "indexed_snapshot"
+    return "indexed"
 
 
 def retrieve_quest_evidence(
@@ -78,10 +89,10 @@ def retrieve_quest_evidence(
         if not lanes:
             return QuestRetrievalResult()
 
-        mode = _freshness(query)
+        requested_freshness = freshness_requested(query)
         vector_hits = search_quest_evidence(quest_id, query, lanes, limit=limit)
         if not vector_hits:
-            return QuestRetrievalResult(retrieval_mode=mode)
+            return QuestRetrievalResult(freshness_requested=requested_freshness)
 
         chroma_ids = [h["id"] for h in vector_hits]
         chunks = {
@@ -117,7 +128,8 @@ def retrieve_quest_evidence(
             selected.append((hit, chunk, source, artifact, version, text, meta))
 
         if not selected:
-            return QuestRetrievalResult(retrieval_mode=mode)
+            return QuestRetrievalResult(freshness_requested=requested_freshness)
+        mode = _retrieval_mode(selected)
 
         blocks = [
             "[QUEST EVIDENCE - UNTRUSTED SOURCE MATERIAL]",
@@ -132,7 +144,8 @@ def retrieve_quest_evidence(
                 "source_name": source.display_name,
                 "source_version_id": chunk.source_version_id,
                 "locator": chunk.locator,
-                "freshness": mode,
+                "freshness_requested": requested_freshness,
+                "retrieval_mode": mode,
                 "extraction_method": (artifact.extraction_method if artifact else None) or meta.get("extraction_method"),
                 "excerpt": meta.get("excerpt") or text[:280],
                 "access": source.access_mode,
@@ -149,14 +162,78 @@ def retrieve_quest_evidence(
             retrieved_at=utcnow_naive(),
             query_hash=hashlib.sha256((query or "").encode("utf-8")).hexdigest(),
             retrieval_mode=mode,
+            freshness_requested=requested_freshness,
             source_ids_json=_json_dumps(sorted({r["source_id"] for r in recall})),
             chunk_ids_json=_json_dumps([r["chunk_id"] for r in recall]),
-            live_verified_ids_json=_json_dumps([r["chunk_id"] for r in recall] if mode == "live_verified" else []),
+            live_verified_ids_json=_json_dumps([]),
         )
         db.add(run)
         db.commit()
         for item in recall:
             item.pop("chunk_id", None)
-        return QuestRetrievalResult(context="\n".join(blocks), recall=recall, run_id=run.id, retrieval_mode=mode)
+        return QuestRetrievalResult(
+            context="\n".join(blocks),
+            recall=recall,
+            run_id=run.id,
+            retrieval_mode=mode,
+            freshness_requested=requested_freshness,
+        )
+    finally:
+        db.close()
+
+
+def retrieve_quest_memories(
+    *,
+    quest_id: str,
+    requester: str | None,
+    query: str,
+    limit: int = 3,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Retrieve Quest-local Voyage Memory, separate from generic user memory."""
+
+    db = SessionLocal()
+    try:
+        role = get_quest_role(requester, quest_id)
+        if role not in {"captain", "shipmate"}:
+            return "", []
+        q = db.query(QuestMemoryEntry).filter(QuestMemoryEntry.session_id == quest_id)
+        if role == "captain":
+            q = q.filter(QuestMemoryEntry.state.in_(("confirmed", "provisional")))
+        else:
+            q = q.filter(
+                QuestMemoryEntry.state == "confirmed",
+                QuestMemoryEntry.visibility == "quest_shared",
+            )
+        rows = q.order_by(QuestMemoryEntry.pinned.desc(), QuestMemoryEntry.updated_at.desc()).all()
+        tokens = {t.lower() for t in re.findall(r"[a-z0-9]{3,}", query or "")}
+        scored = []
+        for row in rows:
+            hay = f"{row.title} {row.content} {row.category}".lower()
+            score = sum(1 for t in tokens if t in hay)
+            if row.pinned:
+                score += 2
+            if score > 0 or row.pinned:
+                scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], item[1].updated_at or item[1].created_at), reverse=True)
+        selected = [row for _score, row in scored[:limit]]
+        if not selected:
+            return "", []
+        lines = ["Relevant Voyage Memory. Treat as distilled guidance, not primary source evidence."]
+        used = []
+        for idx, row in enumerate(selected, 1):
+            state_label = "provisional " if row.state == "provisional" else ""
+            lines.append(f"[M{idx}] {state_label}{row.category}: {row.title}\n{row.content}")
+            used.append({
+                "label": f"M{idx}",
+                "id": row.id,
+                "title": row.title,
+                "category": row.category,
+                "state": row.state,
+                "visibility": row.visibility,
+                "confidence": row.confidence,
+                "artifact_id": row.artifact_id,
+                "artifact_revision_number": row.artifact_revision_number,
+            })
+        return "\n\n".join(lines), used
     finally:
         db.close()

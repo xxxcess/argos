@@ -574,6 +574,7 @@ async def _execute_tool_block_impl(
         do_list_cookbook_servers,
         do_edit_image, do_trigger_research, do_manage_research, do_resolve_contact,
         do_manage_contact,
+        do_manage_quest,
         do_vault_search, do_vault_get, do_vault_unlock,
         do_app_api,
     )
@@ -897,6 +898,9 @@ async def _execute_tool_block_impl(
     elif tool == "manage_research":
         desc = "manage_research"
         result = await do_manage_research(content, owner=owner)
+    elif tool == "manage_quest":
+        desc = "manage_quest"
+        result = await do_manage_quest(content, owner=owner, session_id=session_id)
     elif tool == "resolve_contact":
         desc = "resolve_contact"
         result = await do_resolve_contact(content, owner=owner)

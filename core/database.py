@@ -429,9 +429,37 @@ class QuestRetrievalRun(Base):
     retrieved_at = Column(DateTime, nullable=False, default=utcnow_naive)
     query_hash = Column(String, nullable=False, index=True)
     retrieval_mode = Column(String, nullable=False, default="indexed")
+    freshness_requested = Column(Boolean, nullable=False, default=False)
     source_ids_json = Column(Text, nullable=False, default="[]")
     chunk_ids_json = Column(Text, nullable=False, default="[]")
     live_verified_ids_json = Column(Text, nullable=False, default="[]")
+
+
+class QuestSynthesisJob(Base):
+    """Durable asynchronous Quest Artifact synthesis job."""
+    __tablename__ = "quest_synthesis_jobs"
+
+    id = Column(String, primary_key=True, index=True)
+    quest_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    trigger = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="queued", index=True)
+    created_by = Column(String, nullable=True, index=True)
+    triggering_user_message_id = Column(String, nullable=True, index=True)
+    triggering_assistant_message_id = Column(String, nullable=True, index=True)
+    retrieval_run_id = Column(String, ForeignKey("quest_retrieval_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    artifact_proposal_id = Column(String, ForeignKey("quest_artifact_proposals.id", ondelete="SET NULL"), nullable=True, index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    requested_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    next_retry_at = Column(DateTime, nullable=True, index=True)
+    safe_error_code = Column(String, nullable=True)
+    safe_error_message = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=False, default="{}")
+
+    __table_args__ = (
+        Index("ix_quest_synthesis_jobs_claim", "status", "requested_at"),
+    )
 
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
@@ -1025,6 +1053,13 @@ class QuestArtifactProposal(TimestampMixin, Base):
     evidence_refs_json = Column(Text, nullable=False, default="[]")
     evidence_fingerprint = Column(String, nullable=False, index=True)
     source_version_refs_json = Column(Text, nullable=False, default="[]")
+    claim_key = Column(String, nullable=True, index=True)
+    evidence_chunk_refs_json = Column(Text, nullable=False, default="[]")
+    retrieval_run_ids_json = Column(Text, nullable=False, default="[]")
+    synthesis_json = Column(Text, nullable=False, default="{}")
+    revision_number = Column(Integer, nullable=False, default=1)
+    supersedes_artifact_id = Column(String, nullable=True, index=True)
+    visibility = Column(String, nullable=False, default="captain_private", index=True)
     reviewed_at = Column(DateTime, nullable=True)
     published_at = Column(DateTime, nullable=True)
     declined_at = Column(DateTime, nullable=True)
@@ -1035,6 +1070,7 @@ class QuestArtifactProposal(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_quest_artifact_proposals_session_status", "session_id", "status"),
         Index("ix_quest_artifact_proposals_fingerprint", "session_id", "evidence_fingerprint"),
+        Index("ix_quest_artifact_proposals_claim", "session_id", "claim_key", "artifact_type", "visibility"),
     )
 
 
@@ -1067,6 +1103,11 @@ class QuestMemoryEntry(TimestampMixin, Base):
     provenance_json = Column(Text, nullable=False, default="{}")
     source_version_refs_json = Column(Text, nullable=False, default="[]")
     origin_event_ids_json = Column(Text, nullable=False, default="[]")
+    artifact_id = Column(String, nullable=True, index=True)
+    artifact_revision_number = Column(Integer, nullable=True)
+    evidence_chunk_refs_json = Column(Text, nullable=False, default="[]")
+    claim_key = Column(String, nullable=True, index=True)
+    superseded_by_memory_id = Column(String, nullable=True, index=True)
     created_by = Column(String, nullable=False, default="argo")
     supersedes_id = Column(String, ForeignKey("quest_memory_entries.id", ondelete="SET NULL"), nullable=True)
     pinned = Column(Boolean, nullable=False, default=False)
@@ -2052,6 +2093,43 @@ def _migrate_add_quest_source_index_columns():
         logging.getLogger(__name__).warning(f"quest source index-column migration failed: {e}")
 
 
+def _migrate_add_venture_synthesis_columns():
+    """Add Venture synthesis/job/provenance columns to existing SQLite installs."""
+    if "sqlite" not in DATABASE_URL:
+        return
+    table_additions = {
+        "quest_retrieval_runs": {
+            "freshness_requested": "BOOLEAN NOT NULL DEFAULT 0",
+        },
+        "quest_artifact_proposals": {
+            "claim_key": "TEXT",
+            "evidence_chunk_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "retrieval_run_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+            "synthesis_json": "TEXT NOT NULL DEFAULT '{}'",
+            "revision_number": "INTEGER NOT NULL DEFAULT 1",
+            "supersedes_artifact_id": "TEXT",
+            "visibility": "TEXT NOT NULL DEFAULT 'captain_private'",
+        },
+        "quest_memory_entries": {
+            "artifact_id": "TEXT",
+            "artifact_revision_number": "INTEGER",
+            "evidence_chunk_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+            "claim_key": "TEXT",
+            "superseded_by_memory_id": "TEXT",
+        },
+    }
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            for table, additions in table_additions.items():
+                cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()}
+                for col, spec in additions.items():
+                    if col not in cols:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {spec}"))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"venture synthesis-column migration failed: {e}")
+
+
 
 
 
@@ -2278,6 +2356,7 @@ def init_db():
     _migrate_add_crew_member_id()
     _migrate_add_assistant_columns()
     _migrate_add_quest_source_index_columns()
+    _migrate_add_venture_synthesis_columns()
     _migrate_add_email_smtp_security()
     _migrate_seed_email_account()
     _migrate_add_calendar_metadata()

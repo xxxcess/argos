@@ -93,6 +93,7 @@ class ChatContext:
     web_sources: list
     used_memories: list
     quest_sources_used: list
+    quest_memories_used: list
     quest_evidence_context: str
     quest_retrieval_run_id: Optional[str]
     messages: list
@@ -617,6 +618,23 @@ async def build_chat_context(
     user = effective_user(request)
     uprefs = load_prefs_for_user(user)
     casual_low_signal = _is_casual_low_signal(message)
+    is_quest = False
+    quest_role = None
+    if user:
+        try:
+            from core.database import QuestBearing
+            from src.runtime_profile import is_venture_runtime
+            if is_venture_runtime():
+                db = SessionLocal()
+                try:
+                    is_quest = db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+                finally:
+                    db.close()
+                if is_quest:
+                    from src.venture_auth import get_quest_role
+                    quest_role = get_quest_role(user, session_id)
+        except Exception:
+            logger.debug("Quest role detection failed for session %s", session_id, exc_info=True)
 
     # Memory enabled?
     mem_enabled = not incognito and not no_memory and uprefs.get("memory_enabled", True)
@@ -629,6 +647,9 @@ async def build_chat_context(
     if casual_low_signal:
         mem_enabled = False
         skills_enabled = False
+    if is_quest:
+        mem_enabled = False
+        skills_enabled = bool(agent_mode and quest_role == "captain")
     logger.debug(
         "Memory enabled=%s for user=%s (incognito=%s, no_memory=%s, pref=%s)",
         mem_enabled, user, incognito, no_memory, uprefs.get("memory_enabled", "NOT_SET"),
@@ -645,6 +666,8 @@ async def build_chat_context(
     # Use RAG?
     use_rag_val = (str(use_rag).lower() != "false") if use_rag is not None else True
     if incognito or not allow_tool_preprocessing or is_research_spinoff or casual_low_signal:
+        use_rag_val = False
+    if is_quest:
         use_rag_val = False
 
     # If pre-fetched search context was provided (compare mode), skip live web search
@@ -683,19 +706,43 @@ async def build_chat_context(
         preface.append(untrusted_context_message("youtube transcript", transcript))
 
     quest_sources_used: list = []
+    quest_memories_used: list = []
     quest_evidence_context = ""
     quest_retrieval_run_id = None
     try:
-        from core.database import QuestBearing
         from src.runtime_profile import is_venture_runtime
-        if is_venture_runtime():
+        if is_venture_runtime() and is_quest:
+            from src.venture_prompts import (
+                QUEST_CAPTAIN_AGENT_POLICY,
+                QUEST_MEMORY_POLICY,
+                QUEST_RESPONSE_POLICY,
+            )
+            preface.append({"role": "system", "content": QUEST_RESPONSE_POLICY})
+            preface.append({"role": "system", "content": QUEST_MEMORY_POLICY})
+            if agent_mode and quest_role == "captain":
+                preface.append({"role": "system", "content": QUEST_CAPTAIN_AGENT_POLICY})
             db = SessionLocal()
             try:
-                is_quest = db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+                bearing = db.query(QuestBearing).filter(QuestBearing.session_id == session_id).first()
             finally:
                 db.close()
-            if is_quest and user and not incognito:
-                from src.quest_retrieval import retrieve_quest_evidence
+            if bearing:
+                bearing_lines = [
+                    f"Title: {bearing.title or ''}",
+                    f"Exploration goal: {bearing.exploration_goal or ''}",
+                    f"Current summary: {bearing.current_summary or ''}",
+                    f"Next bearing: {bearing.next_bearing or ''}",
+                ]
+                preface.append(untrusted_context_message("Current Quest Bearing", "\n".join(bearing_lines)))
+            if user and not incognito:
+                from src.quest_retrieval import retrieve_quest_evidence, retrieve_quest_memories
+                memory_context, quest_memories_used = retrieve_quest_memories(
+                    quest_id=session_id,
+                    requester=user,
+                    query=preprocessed.text_for_context or message,
+                )
+                if memory_context:
+                    preface.append(untrusted_context_message("Relevant Voyage Memory", memory_context))
                 qres = retrieve_quest_evidence(
                     quest_id=session_id,
                     requester=user,
@@ -706,7 +753,7 @@ async def build_chat_context(
                     quest_evidence_context = qres.context
                     quest_sources_used = qres.recall
                     quest_retrieval_run_id = qres.run_id
-                    preface.append({"role": "system", "content": qres.context})
+                    preface.append(untrusted_context_message("Quest Evidence", qres.context))
     except Exception:
         logger.warning("Quest evidence retrieval failed for session %s", session_id, exc_info=True)
 
@@ -755,6 +802,7 @@ async def build_chat_context(
         web_sources=web_sources,
         used_memories=used_memories,
         quest_sources_used=quest_sources_used,
+        quest_memories_used=quest_memories_used,
         quest_evidence_context=quest_evidence_context,
         quest_retrieval_run_id=quest_retrieval_run_id,
         messages=messages,
@@ -1114,6 +1162,8 @@ def run_post_response_tasks(
     owner: str = None,
     extract_skills: bool = True,
     allow_background_extraction: bool = True,
+    quest_retrieval_run_id: str | None = None,
+    triggering_assistant_message_id: str | None = None,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1189,24 +1239,40 @@ def run_post_response_tasks(
     if _extraction_jobs:
         _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))
 
-    # Venture Quest-local synthesis. This is intentionally not an LLM call; it
-    # uses already-persisted Voyage Log/source evidence to create or update a
-    # Captain-private draft when thresholds are met.
+    # Venture Quest-local synthesis. Queue only; never block streaming or
+    # source indexing.
     try:
         from src.runtime_profile import is_venture_runtime
-        if is_venture_runtime() and not incognito and not compare_mode:
-            from core.database import SessionLocal as _SL, Session as _DbSession
-            from src.venture_synthesis import run_argo_synthesis
+        if is_venture_runtime() and not incognito and not compare_mode and quest_retrieval_run_id:
+            from core.database import QuestRetrievalRun, SessionLocal as _SL, Session as _DbSession, ChatMessage as _DbChatMessage
+            from src.venture_synthesis import enqueue_synthesis_job
             _db = _SL()
             try:
                 _row = _db.query(_DbSession).filter(_DbSession.id == session_id).first()
-                if _row and _row.owner:
-                    _result = run_argo_synthesis(_db, session_id, _row.owner)
-                    _db.commit()
-                    logger.debug("[venture-synthesis] %s", _result.to_dict())
+                _run = _db.query(QuestRetrievalRun).filter(QuestRetrievalRun.id == quest_retrieval_run_id, QuestRetrievalRun.quest_id == session_id).first()
+                chunk_ids = json.loads(_run.chunk_ids_json or "[]") if _run else []
+                substantive_response = len((full_response or "").strip()) >= 180
+                if _row and _row.owner and _run and len(chunk_ids) >= 2 and substantive_response:
+                    user_msg = (
+                        _db.query(_DbChatMessage)
+                        .filter(_DbChatMessage.session_id == session_id, _DbChatMessage.role == "user")
+                        .order_by(_DbChatMessage.timestamp.desc())
+                        .first()
+                    )
+                    if user_msg:
+                        enqueue_synthesis_job(
+                            _db,
+                            quest_id=session_id,
+                            trigger="grounded_response",
+                            created_by="argo",
+                            triggering_user_message_id=user_msg.id,
+                            triggering_assistant_message_id=triggering_assistant_message_id,
+                            retrieval_run_id=quest_retrieval_run_id,
+                        )
+                        _db.commit()
             except Exception:
                 _db.rollback()
-                logger.warning("[venture-synthesis] post-response synthesis failed for %s", session_id, exc_info=True)
+                logger.warning("[venture-synthesis] queue failed for %s", session_id, exc_info=True)
             finally:
                 _db.close()
     except Exception:

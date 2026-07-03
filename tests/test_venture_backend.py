@@ -1,4 +1,5 @@
 import tempfile
+import asyncio
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -14,6 +15,7 @@ from core.database import (
     QuestMember,
     QuestMemoryEntry,
     QuestSourceCheckpoint,
+    QuestSynthesisJob,
     QuestSourceVersion,
     Session as DbSession,
     SessionLocal as RealSessionLocal,
@@ -47,11 +49,13 @@ def _client(monkeypatch, username="ada", venture=True):
     import core.session_manager as csm
     import routes.venture_routes as vr
     import src.venture_auth as va
+    import src.venture_synthesis as vs
 
     monkeypatch.setattr(cdb, "SessionLocal", SessionLocal)
     monkeypatch.setattr(csm, "SessionLocal", SessionLocal)
     monkeypatch.setattr(vr, "SessionLocal", SessionLocal)
     monkeypatch.setattr(va, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(vs, "SessionLocal", SessionLocal)
 
     sm = SessionManager(tempfile.NamedTemporaryFile(delete=False).name)
     app = FastAPI()
@@ -286,7 +290,97 @@ def test_source_visibility_modes_are_enforced(monkeypatch):
     assert visible["configuration"] == {"summary": "safe summary"}
 
 
-def test_artifact_draft_private_until_publish_and_creates_shared_memory(monkeypatch):
+def test_quest_capabilities_force_modes_by_role(monkeypatch):
+    client, _SessionLocal, app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invitation_id = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
+    captain_caps = client.get(f"/api/quests/{quest_id}/capabilities").json()
+    assert captain_caps["role"] == "captain"
+    assert captain_caps["interaction_mode"] == "agent"
+    assert captain_caps["tools_allowed"] is True
+    assert set(captain_caps["voice"]) == {"tts_enabled", "tts_ready", "stt_enabled", "stt_ready", "show_voice_mode_control"}
+
+    app.state.test_user = "mara"
+    client.post(f"/api/quest-invitations/{invitation_id}/accept")
+    shipmate_caps = client.get(f"/api/quests/{quest_id}/capabilities").json()
+    assert shipmate_caps["role"] == "shipmate"
+    assert shipmate_caps["interaction_mode"] == "chat"
+    assert shipmate_caps["tools_allowed"] is False
+
+
+def test_synthesis_jobs_status_visible_to_captain_only(monkeypatch):
+    client, SessionLocal, app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    invitation_id = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
+    with SessionLocal() as db:
+        db.add(QuestSynthesisJob(
+            id="synth-job-1",
+            quest_id=quest_id,
+            trigger="captain_requested",
+            status="no_insight",
+            created_by="ada",
+            result_json='{"should_create": false, "reason": "no_source_evidence"}',
+        ))
+        db.commit()
+
+    data = client.get(f"/api/quests/{quest_id}/argo-synthesis/jobs").json()
+    assert data["jobs"][0]["status"] == "no_insight"
+    assert data["jobs"][0]["reason"] == "no_source_evidence"
+    assert "triggering_user_message_id" not in data["jobs"][0]
+    assert "retrieval_run_id" not in data["jobs"][0]
+
+    app.state.test_user = "mara"
+    client.post(f"/api/quest-invitations/{invitation_id}/accept")
+    assert client.get(f"/api/quests/{quest_id}/argo-synthesis/jobs").status_code == 403
+
+
+def test_captain_requested_discussion_synthesis_creates_review_draft(monkeypatch):
+    client, SessionLocal, _app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    with SessionLocal() as db:
+        db.add(ChatMessage(id="captain-msg-1", session_id=quest_id, role="user", content="Remember this Quest decision: focus the Google AI models exploration on enterprise Gemini release risk."))
+        db.commit()
+
+    client.post(f"/api/quests/{quest_id}/argo-synthesis/run")
+    job_id = client.get(f"/api/quests/{quest_id}/argo-synthesis/jobs").json()["jobs"][0]["id"]
+
+    from src.venture_synthesis import process_synthesis_job
+    asyncio.run(process_synthesis_job(job_id))
+
+    jobs = client.get(f"/api/quests/{quest_id}/argo-synthesis/jobs").json()["jobs"]
+    assert jobs[0]["status"] == "created"
+    proposal_id = jobs[0]["artifact_proposal_id"]
+    proposal = client.get(f"/api/quests/{quest_id}/artifact-proposals/{proposal_id}").json()["proposal"]
+    assert proposal["status"] == "pending_review"
+    assert proposal["visibility"] == "captain_private"
+    assert "Captain discussion" in proposal["document"]["content"]
+    assert "[D1]" in proposal["document"]["content"]
+
+
+def test_venture_tool_policy_allowlist_blocks_generic_and_mcp_tools():
+    from src.tool_policy import VENTURE_QUEST_ALLOWED_TOOLS, build_effective_tool_policy
+
+    policy = build_effective_tool_policy(allowlist=VENTURE_QUEST_ALLOWED_TOOLS)
+    for allowed in VENTURE_QUEST_ALLOWED_TOOLS:
+        assert not policy.blocks(allowed)
+    assert VENTURE_QUEST_ALLOWED_TOOLS == frozenset({"web_search", "web_fetch", "manage_quest"})
+    for denied in [
+        "trigger_research",
+        "manage_research",
+        "bash",
+        "python",
+        "read_file",
+        "write_file",
+        "app_api",
+        "manage_settings",
+        "generate_image",
+        "mcp__x__y",
+    ]:
+        assert policy.blocks(denied)
+    assert policy.disable_mcp is True
+
+
+def test_artifact_draft_private_until_publish_without_generic_shared_memory(monkeypatch):
     client, SessionLocal, app, *_ = _client(monkeypatch)
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
     invitation_id = client.post(f"/api/quests/{quest_id}/invitations", json={"invitee_username": "mara"}).json()["invitation_id"]
@@ -319,8 +413,7 @@ def test_artifact_draft_private_until_publish_and_creates_shared_memory(monkeypa
         assert db.query(QuestMemoryEntry).filter(
             QuestMemoryEntry.session_id == quest_id,
             QuestMemoryEntry.category == "artifact_reference",
-            QuestMemoryEntry.visibility == "quest_shared",
-        ).count() == 1
+        ).count() == 0
     finally:
         db.close()
 
@@ -460,7 +553,7 @@ def test_shipmate_can_read_published_gallery_artifact(monkeypatch):
     assert [i["id"] for i in items] == ["img-artifact"]
 
 
-def test_static_source_refresh_runs_functional_synthesis(monkeypatch):
+def test_static_source_refresh_creates_no_artifact_or_synthesis(monkeypatch):
     client, SessionLocal, *_ = _client(monkeypatch)
     quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
     source_id = client.get(f"/api/quests/{quest_id}/sources").json()["sources"][0]["id"]
@@ -473,16 +566,13 @@ def test_static_source_refresh_runs_functional_synthesis(monkeypatch):
         db.close()
 
     result = client.post(f"/api/quests/{quest_id}/sources/{source_id}/refresh").json()
-    assert result["synthesis"]["created"] is True
+    assert "synthesis" not in result
 
     db = SessionLocal()
     try:
-        proposal = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.session_id == quest_id).one()
-        doc = db.query(Document).filter(Document.id == proposal.document_id).one()
-        assert doc.session_id is None
-        assert doc.owner == "ada"
-        assert "## Evidence" in doc.current_content
-        assert db.query(UserNotification).filter(UserNotification.resource_id == proposal.id, UserNotification.state == "action_required").count() == 1
+        assert db.query(QuestArtifactProposal).filter(QuestArtifactProposal.session_id == quest_id).count() == 0
+        assert db.query(QuestMemoryEntry).filter(QuestMemoryEntry.session_id == quest_id).count() == 0
+        assert db.query(QuestSynthesisJob).filter(QuestSynthesisJob.quest_id == quest_id).count() == 0
     finally:
         db.close()
 

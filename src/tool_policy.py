@@ -16,6 +16,14 @@ GUIDE_ONLY_DIRECTIVE = (
     "output they will produce locally."
 )
 
+VENTURE_QUEST_ALLOWED_TOOLS = frozenset({
+    "web_search",
+    "web_fetch",
+    "manage_quest",
+})
+
+VENTURE_QUEST_TOOL_REASON = "Only scoped Quest tools are available in Venture Quest agent mode."
+
 
 _COMMON_TOOL_NAMES = {
     "api_call",
@@ -55,6 +63,7 @@ _COMMON_TOOL_NAMES = {
     "manage_mcp",
     "manage_memory",
     "manage_notes",
+    "manage_quest",
     "manage_research",
     "manage_session",
     "manage_settings",
@@ -114,6 +123,7 @@ class ToolPolicy:
     mode: str = "normal"
     block_all_tool_calls: bool = False
     disable_mcp: bool = False
+    allowlist: frozenset[str] = frozenset()
 
     def all_disabled_names(self) -> Set[str]:
         return set(self.disabled_tools) | set(self.hidden_tools)
@@ -121,11 +131,17 @@ class ToolPolicy:
     def blocks(self, tool_name: Optional[str]) -> bool:
         if not tool_name:
             return False
-        return self.block_all_tool_calls or tool_name in self.disabled_tools or tool_name in self.hidden_tools
+        if self.block_all_tool_calls:
+            return True
+        if self.allowlist and (tool_name not in self.allowlist or str(tool_name).startswith("mcp__")):
+            return True
+        return tool_name in self.disabled_tools or tool_name in self.hidden_tools
 
     def reason_for(self, tool_name: Optional[str]) -> str:
         if tool_name and tool_name in self.reasons:
             return self.reasons[tool_name]
+        if self.allowlist and tool_name not in self.allowlist:
+            return VENTURE_QUEST_TOOL_REASON
         if self.block_all_tool_calls and self.mode == "guide_only":
             return "Tool use is disabled for this guide-only turn."
         return "Tool use is disabled for this turn."
@@ -172,10 +188,23 @@ def known_tool_names() -> Set[str]:
     return names
 
 
+def venture_quest_disabled_tools(allowed: Iterable[str] = VENTURE_QUEST_ALLOWED_TOOLS) -> Set[str]:
+    """Strict denylist counterpart for the Venture Quest allowlist."""
+
+    allowed_set = {str(t) for t in allowed}
+    disabled = known_tool_names() - allowed_set
+    disabled.update(t for t in known_tool_names() if str(t).startswith("mcp__"))
+    return disabled
+
+
 def build_effective_tool_policy(
     *,
     disabled_tools: Optional[Iterable[str]] = None,
     last_user_message: object = "",
+    allowlist: Optional[Iterable[str]] = None,
+    mode: str = "normal",
+    block_all_tool_calls: bool = False,
+    disable_mcp: bool = False,
 ) -> ToolPolicy:
     """Compose the effective policy for one agent turn.
 
@@ -185,8 +214,15 @@ def build_effective_tool_policy(
     """
 
     disabled = {str(t) for t in (disabled_tools or []) if t}
+    allowed = frozenset(str(t) for t in (allowlist or []) if t)
     hidden: Set[str] = set()
     reasons = {tool: "Tool is disabled for this request." for tool in disabled}
+    if allowed:
+        denied = venture_quest_disabled_tools(allowed)
+        disabled.update(denied)
+        hidden.update(denied)
+        reasons.update({tool: VENTURE_QUEST_TOOL_REASON for tool in denied})
+        disable_mcp = True
 
     guide_reason = detect_guide_only_turn(last_user_message)
     if guide_reason:
@@ -201,10 +237,15 @@ def build_effective_tool_policy(
             mode="guide_only",
             block_all_tool_calls=True,
             disable_mcp=True,
+            allowlist=allowed,
         )
 
     return ToolPolicy(
         disabled_tools=frozenset(disabled),
         hidden_tools=frozenset(hidden),
         reasons=MappingProxyType(dict(reasons)),
+        mode=mode,
+        block_all_tool_calls=block_all_tool_calls,
+        disable_mcp=disable_mcp,
+        allowlist=allowed,
     )

@@ -278,7 +278,7 @@ _DOMAIN_RULES = {
 }
 
 _DOMAIN_TOOL_MAP = {
-    "web": {"web_search", "web_fetch", "trigger_research", "manage_research"},
+    "web": {"web_search", "web_fetch", "trigger_research", "manage_research", "manage_quest"},
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
@@ -433,6 +433,7 @@ Create a short silent video with the user's saved Video Generation provider. The
     "manage_tokens": "- ```manage_tokens``` — Generate or revoke API access tokens for external integrations. Args (JSON): {\"action\": \"list|create|delete\", ...}",
     "manage_documents": "- ```manage_documents``` — List, read/open, delete, or tidy documents in the editor panel. Args (JSON): {\"action\": \"list|read|delete|tidy\", ...}. `list` returns rows like `[Title](#document-<id>) — lang, size, updated 5m ago` sorted MOST-RECENT FIRST; the user clicks the anchor to open. `read` (aliases: view/open/get) takes `document_id` and returns the content. When the user asks \"open/show/read my notes\" or \"what documents do I have\", use this — do NOT shell out, do NOT curl.",
     "manage_research": "- ```manage_research``` — List, read/open, or delete saved DEEP RESEARCH results from the Library. Args (JSON): {\"action\": \"list|read|delete\", \"id\": \"<id>\", \"search\": \"...\"}. `list` returns rows like `[query](#research-<id>) — N sources` MOST-RECENT FIRST; the user clicks to open. `read` (aliases: open/view/get) takes `id` and returns the report text + sources. Use when the user says \"open/read/find/delete my research\" or \"that report\". This IS how you read a finished report: when the user refers to a just-completed deep-research job (\"check it out\", \"read that report\", \"summarize the research\") WITHOUT giving an id, call `manage_research` with `action:list` to get the most-recent id, then `action:read` with that id, and answer from the returned text. Do NOT `web_fetch`/`app_api` the `/api/research/report/{id}` URL — that endpoint renders HTML for the browser, not clean text — and do NOT start a fresh `web_search`/`trigger_research` just to read an existing report. To START new research, use trigger_research instead.",
+    "manage_quest": "- ```manage_quest``` — Captain-only scoped Quest tool. Args (JSON): {\"action\":\"status|list_sources|inspect_source|refresh_source|reindex_source|list_artifacts|open_artifact|request_synthesis|list_memory\", \"source_id\":\"...\", \"artifact_id\":\"...\"}. Use only for the active Quest. Refresh, reindex, and synthesis require explicit Captain request.",
     "manage_settings": "- ```manage_settings``` — View/change the REAL app settings (same ones the Settings panel writes) AND turn tools on/off. Change a setting: `{\"action\":\"set\",\"key\":\"...\",\"value\":\"...\"}` — keys accept friendly aliases, e.g. voice→tts_voice, \"search engine\"→search_provider, \"default model\"→default_model, \"teacher model\"→teacher_model, \"task/background model\"→task_model, \"image quality\"→image_quality, \"reminder channel\"→reminder_channel (browser|email|ntfy), \"agent timeout\"/\"max tool calls\"/\"token budget\". Read: `{\"action\":\"get\",\"key\":\"...\"}`; see all: `{\"action\":\"list\"}`; reset one: `{\"action\":\"reset\",\"key\":\"...\"}`. Use this when the user asks to change ANY preference instead of making them open Settings. Secrets/API keys are read-only (tell them to set those in the panel). Tool toggles: `{\"action\":\"disable_tool|enable_tool\",\"tool\":\"shell\"}` (aliases: shell/search/browser/documents/memory/skills/images/tasks/notes/calendar/email), list disabled: `{\"action\":\"list_tools\"}`.",
     "manage_notes": """\
 ```manage_notes
@@ -2002,6 +2003,8 @@ async def stream_agent_loop(
         disabled_tools.update(tool_policy.all_disabled_names())
         if tool_policy.disable_mcp:
             mcp_mgr = None
+        if tool_policy.allowlist:
+            relevant_tools = set(tool_policy.allowlist)
     guide_only = bool(tool_policy and tool_policy.mode == "guide_only")
     public_blocked_tools = blocked_tools_for_owner(owner)
     if public_blocked_tools:
@@ -2276,6 +2279,8 @@ async def stream_agent_loop(
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
     if _relevant_tools is not None:
+        if tool_policy and tool_policy.allowlist:
+            _relevant_tools = set(_relevant_tools) & set(tool_policy.allowlist)
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
 
     prep_timings["tool_selection"] = time.time() - _t1
