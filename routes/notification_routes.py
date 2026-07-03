@@ -12,7 +12,6 @@ from pydantic import BaseModel
 
 from core.database import SessionLocal, UserNotification, utcnow_naive
 from src.auth_helpers import get_current_user
-from src.task_notifications import dispatch_pending_outbox_once
 
 
 class NotificationMarkRead(BaseModel):
@@ -81,7 +80,8 @@ def setup_notification_routes() -> APIRouter:
         limit: int = 30,
         include_archived: bool = False,
     ):
-        dispatch_pending_outbox_once(limit=50)
+        # The application startup loop dispatches the durable outbox. Keep GET
+        # requests read-only so a badge refresh cannot hold a write connection.
         user = _user(request)
         limit = max(1, min(limit, 100))
         db = SessionLocal()
@@ -112,7 +112,8 @@ def setup_notification_routes() -> APIRouter:
 
     @router.get("/unread-count")
     async def unread_count(request: Request):
-        dispatch_pending_outbox_once(limit=50)
+        # See list_notifications: background delivery is intentionally decoupled
+        # from panel/badge polling.
         user = _user(request)
         db = SessionLocal()
         try:
