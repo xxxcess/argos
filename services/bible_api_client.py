@@ -9,13 +9,15 @@ import random
 import re
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy.exc import IntegrityError
 
 from core.database import BibleChapterCache, BibleVerse, SessionLocal, utcnow_naive
-from src.bible_catalog import validate_book_in_testament, get_book
+from src.bible_catalog import get_book
 
 
 class BibleApiError(RuntimeError):
@@ -64,13 +66,28 @@ class BibleChapterPayload:
 
 _provider_lock = asyncio.Lock()
 _last_request_at = 0.0
+_request_timestamps: deque[float] = deque()
 
 
 def min_request_interval_seconds() -> float:
     try:
-        return max(0.0, float(os.getenv("BIBLE_API_MIN_REQUEST_INTERVAL_SECONDS", "1.5")))
+        return max(0.0, float(os.getenv("BIBLE_API_MIN_REQUEST_INTERVAL_SECONDS", "0")))
     except Exception:
-        return 1.5
+        return 0.0
+
+
+def max_requests_per_window() -> int:
+    try:
+        return max(1, int(os.getenv("BIBLE_API_MAX_REQUESTS_PER_WINDOW", "15")))
+    except Exception:
+        return 15
+
+
+def rate_limit_window_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("BIBLE_API_RATE_LIMIT_WINDOW_SECONDS", "30")))
+    except Exception:
+        return 30.0
 
 
 def allow_full_testament_import() -> bool:
@@ -86,7 +103,7 @@ def _testament_for_book(book_id: str) -> str:
 
 
 class BibleApiClient:
-    async def fetch_chapter(self, translation: str, book_id: str, chapter_number: int) -> BibleChapterPayload:
+    async def fetch_chapter(self, translation: str, book_id: str, chapter_number: int, db=None) -> BibleChapterPayload:
         translation = str(translation or "web").lower()
         book_id = str(book_id or "").upper()
         try:
@@ -95,15 +112,16 @@ class BibleApiClient:
             raise BibleScopeInvalid("bible_scope_invalid") from exc
         if chapter_number < 1 or chapter_number > book.chapters:
             raise BibleChapterNotFound("bible_chapter_not_found")
-        cached = self._read_cache(translation, book_id, chapter_number)
+        cached = self._read_cache(translation, book_id, chapter_number, db=db)
         if cached:
             return cached
         payload = await self._fetch_provider(translation, book_id, chapter_number)
-        self._write_cache(payload)
+        self._write_cache(payload, db=db)
         return payload
 
-    def _read_cache(self, translation: str, book_id: str, chapter_number: int) -> BibleChapterPayload | None:
-        db = SessionLocal()
+    def _read_cache(self, translation: str, book_id: str, chapter_number: int, db=None) -> BibleChapterPayload | None:
+        owned = db is None
+        db = db or SessionLocal()
         try:
             row = db.query(BibleChapterCache).filter(
                 BibleChapterCache.translation == translation,
@@ -117,10 +135,12 @@ class BibleApiClient:
                 return None
             return BibleChapterPayload(row.translation, row.testament, row.book_id, row.book_name, row.chapter_number, tuple(BibleVersePayload(v.verse_number, v.text) for v in verses))
         finally:
-            db.close()
+            if owned:
+                db.close()
 
-    def _write_cache(self, payload: BibleChapterPayload) -> None:
-        db = SessionLocal()
+    def _write_cache(self, payload: BibleChapterPayload, db=None) -> None:
+        owned = db is None
+        db = db or SessionLocal()
         try:
             source = "\n".join(f"{v.verse_number}:{v.text}" for v in payload.verses)
             row = db.query(BibleChapterCache).filter(
@@ -147,41 +167,69 @@ class BibleApiClient:
                 db.query(BibleVerse).filter(BibleVerse.bible_chapter_id == row.id).delete(synchronize_session=False)
             for verse in payload.verses:
                 db.add(BibleVerse(id=uuid.uuid4().hex, bible_chapter_id=row.id, verse_number=verse.verse_number, text=verse.text))
-            db.commit()
+            if owned:
+                db.commit()
         except IntegrityError:
-            db.rollback()
+            if owned:
+                db.rollback()
         finally:
-            db.close()
+            if owned:
+                db.close()
 
     async def _fetch_provider(self, translation: str, book_id: str, chapter_number: int) -> BibleChapterPayload:
         global _last_request_at
         book = get_book(book_id)
-        url = f"https://bible-api.com/{book.name.replace(' ', '%20')}%20{chapter_number}"
-        params = {"translation": translation}
+        url = f"https://bible-api.com/data/{quote(translation)}/{quote(book.book_id)}/{int(chapter_number)}"
         last_error: Exception | None = None
         for attempt in range(4):
             try:
                 async with _provider_lock:
-                    wait = min_request_interval_seconds() - (time.monotonic() - _last_request_at)
+                    now = time.monotonic()
+                    window = rate_limit_window_seconds()
+                    while _request_timestamps and now - _request_timestamps[0] >= window:
+                        _request_timestamps.popleft()
+                    if len(_request_timestamps) >= max_requests_per_window():
+                        await asyncio.sleep(max(0.0, (_request_timestamps[0] + window) - now))
+                        now = time.monotonic()
+                        while _request_timestamps and now - _request_timestamps[0] >= window:
+                            _request_timestamps.popleft()
+                    wait = min_request_interval_seconds() - (now - _last_request_at)
                     if wait > 0:
                         await asyncio.sleep(wait)
+                        now = time.monotonic()
                     async with httpx.AsyncClient(timeout=20.0) as client:
-                        resp = await client.get(url, params=params)
+                        resp = await client.get(url)
                     _last_request_at = time.monotonic()
+                    _request_timestamps.append(_last_request_at)
                 if resp.status_code == 404:
                     raise BibleChapterNotFound("bible_chapter_not_found")
                 if resp.status_code == 429:
+                    retry_after = _retry_after_seconds(resp)
+                    if retry_after:
+                        await asyncio.sleep(retry_after + random.uniform(0, 0.5))
                     raise BibleRateLimited("bible_rate_limited")
                 if 500 <= resp.status_code < 600:
                     raise BibleUnavailable("bible_unavailable")
                 if resp.status_code >= 400:
                     raise BibleChapterNotFound("bible_chapter_not_found")
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception as exc:
+                    raise BibleInvalidResponse("bible_invalid_response") from exc
+                translation_row = data.get("translation") if isinstance(data, dict) else None
+                if not isinstance(translation_row, dict) or str(translation_row.get("identifier") or "").lower() != translation:
+                    raise BibleInvalidResponse("bible_invalid_response")
                 verses = data.get("verses")
                 if not isinstance(verses, list) or not verses:
                     raise BibleInvalidResponse("bible_invalid_response")
                 out = []
                 for item in verses:
+                    if not isinstance(item, dict):
+                        raise BibleInvalidResponse("bible_invalid_response")
+                    if str(item.get("book_id") or "").upper() != book.book_id:
+                        raise BibleInvalidResponse("bible_invalid_response")
+                    if int(item.get("chapter") or 0) != int(chapter_number):
+                        raise BibleInvalidResponse("bible_invalid_response")
                     number = int(item.get("verse") or 0)
                     text = _normalize_text(str(item.get("text") or ""))
                     if number < 1 or not text:
@@ -196,7 +244,18 @@ class BibleApiClient:
                 last_error = exc
             except (BibleUnavailable, httpx.NetworkError, httpx.TimeoutException) as exc:
                 last_error = exc
-            await asyncio.sleep(min(12.0, 0.75 * (2 ** attempt)) + random.uniform(0, 0.5))
+            delay = rate_limit_window_seconds() if isinstance(last_error, BibleRateLimited) else min(12.0, 0.75 * (2 ** attempt))
+            await asyncio.sleep(delay + random.uniform(0, 0.5))
         if isinstance(last_error, BibleRateLimited):
             raise last_error
         raise BibleUnavailable("bible_unavailable") from last_error
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float:
+    raw = resp.headers.get("retry-after")
+    if not raw:
+        return rate_limit_window_seconds()
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return rate_limit_window_seconds()

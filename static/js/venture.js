@@ -534,8 +534,8 @@ function crewStatusLabel(member) {
 function sourceCard(sources, qid) {
   const counts = sources.reduce((acc, s) => {
     const st = s.index_status?.index_state || s.index_state || 'not_indexed';
-    if (st === 'ready') acc.ready++;
-    else if (st === 'queued' || st === 'running') acc.indexing++;
+    if (st === 'ready' || st === 'indexed') acc.ready++;
+    else if (st === 'queued' || st === 'running' || st === 'indexing') acc.indexing++;
     else if (st === 'failed' || st === 'partial') acc.attention++;
     return acc;
   }, { ready: 0, indexing: 0, attention: 0 });
@@ -547,14 +547,14 @@ function sourceCard(sources, qid) {
     const job = idx.current_job || {};
     const safeErr = job.safe_error_message || idx.warning || '';
     const errCode = job.error_code ? ` (${job.error_code})` : '';
-    if (state === 'running' || state === 'queued') {
+    if (state === 'running' || state === 'queued' || state === 'indexing') {
       const total = job.progress_total || 0;
       const done = job.progress_completed || 0;
       const pct = total ? Math.round((done / total) * 100) : 0;
       if (job.error_code && state === 'queued') return `◌ Retrying · ${safeErr || 'Waiting to retry'}${errCode}`;
-      return `◌ Indexing · ${pct}% · ${done} / ${total}`;
+      return total ? `◌ Indexing · ${pct}% · ${done} / ${total}` : `◌ Indexing`;
     }
-    if (state === 'ready') return `● Ready · ${chunks} chunks`;
+    if (state === 'ready' || state === 'indexed') return `● Ready · ${chunks} chunks`;
     if (state === 'failed') return `△ Needs attention · ${safeErr || 'Indexing failed'}${errCode}`;
     if (state === 'partial') return `△ Partial · ${chunks} chunks`;
     return `○ Not indexed`;
@@ -842,9 +842,9 @@ async function launchRegularChatFromWizard(modal, backdrop, status) {
 }
 
 function selectedCheckboxValues(root, name) {
-  return Array.from(root.querySelectorAll(`input[name="${name}"]:checked`))
+  return Array.from(new Set(Array.from(root.querySelectorAll(`input[name="${name}"]:checked`))
     .map(input => input.value)
-    .filter(Boolean);
+    .filter(Boolean)));
 }
 
 function sourceDisplayName(type, config, emailAccountsById) {

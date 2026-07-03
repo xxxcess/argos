@@ -120,6 +120,53 @@ def enqueue_index_job(
     return job
 
 
+def has_active_bible_book_job(db, source_id: str) -> bool:
+    return db.query(QuestIndexJob).filter(
+        QuestIndexJob.source_id == source_id,
+        QuestIndexJob.status.in_(("queued", "running")),
+        QuestIndexJob.scope_json.like('%"kind": "bible_book_import"%'),
+    ).count() > 0
+
+
+def enqueue_bible_book_job(
+    db,
+    source: QuestSource,
+    selection: QuestBibleBookSelection,
+    *,
+    created_by: str | None = None,
+    selection_mode: str = "manual_selection",
+    priority: int = 80,
+) -> QuestIndexJob:
+    return enqueue_index_job(
+        db,
+        source,
+        trigger="manual_refresh",
+        created_by=created_by,
+        priority=priority,
+        scope={
+            "kind": "bible_book_import",
+            "selection_id": selection.id,
+            "translation": selection.translation,
+            "testament": selection.testament,
+            "book_id": selection.book_id,
+            "selection_mode": selection_mode,
+        },
+    )
+
+
+def enqueue_next_bible_book_job_if_idle(db, source: QuestSource) -> QuestIndexJob | None:
+    if source.source_type != "bible" or has_active_bible_book_job(db, source.id):
+        return None
+    selection = db.query(QuestBibleBookSelection).filter(
+        QuestBibleBookSelection.source_id == source.id,
+        QuestBibleBookSelection.active == True,  # noqa: E712
+        QuestBibleBookSelection.state == "queued",
+    ).order_by(QuestBibleBookSelection.canonical_order.asc()).first()
+    if not selection:
+        return None
+    return enqueue_bible_book_job(db, source, selection, created_by=source.captain_username)
+
+
 def job_to_dict(job: QuestIndexJob) -> dict[str, Any]:
     return {
         "id": job.id,
@@ -278,6 +325,7 @@ async def process_index_job(job_id: str) -> None:
                 db.query(QuestSourceArtifact).filter(QuestSourceArtifact.id.in_(stale_ids)).update({"is_current": False}, synchronize_session=False)
                 db.query(QuestEvidenceChunk).filter(QuestEvidenceChunk.artifact_id.in_(stale_ids)).update({"is_current": False}, synchronize_session=False)
                 delete_where(source.session_id, {"$and": [{"source_id": source.id}, {"translation": str(scope.get("translation") or "web").lower()}, {"book_id": book_id}]})
+            db.commit()
         else:
             db.query(QuestSourceArtifact).filter(QuestSourceArtifact.source_id == source.id, QuestSourceArtifact.is_current == True).update({"is_current": False}, synchronize_session=False)
             db.query(QuestEvidenceChunk).filter(QuestEvidenceChunk.source_id == source.id, QuestEvidenceChunk.is_current == True).update({"is_current": False}, synchronize_session=False)
@@ -320,8 +368,9 @@ async def process_index_job(job_id: str) -> None:
                 art.extraction_confidence = units[0].extraction_confidence
                 art.normalized_text_path_or_text = units[0].content[:6000]
                 art.visibility_lane = units[0].visibility_lane
+            chunk_index = 0
             for unit in units:
-                for chunk_index, (chunk_text, locator) in enumerate(_chunk_text(unit)):
+                for chunk_text, locator in _chunk_text(unit):
                     chroma_id = deterministic_chunk_doc_id(source.session_id, source.id, version.id, artifact_id, chunk_index)
                     chash = content_hash(chunk_text)
                     chunk = QuestEvidenceChunk(
@@ -360,9 +409,15 @@ async def process_index_job(job_id: str) -> None:
                         } | dict(unit.raw_reference or {}),
                     })
                     job.chunks_created += 1
+                    chunk_index += 1
             job.artifacts_created += 1
             job.records_changed += 1
             job.progress_completed = idx + 1
+            if source.source_type == "bible" and scope.get("selection_id"):
+                sel = db.query(QuestBibleBookSelection).filter(QuestBibleBookSelection.id == scope.get("selection_id")).first()
+                if sel:
+                    sel.state = "indexing"
+                    sel.completed_chapters = min(idx + 1, sel.total_chapters or job.progress_total or idx + 1)
             db.commit()
 
         if not vector_rows:
@@ -388,6 +443,7 @@ async def process_index_job(job_id: str) -> None:
                 sel.completed_chapters = sel.total_chapters
                 sel.indexed_at = job.finished_at
                 sel.last_error = None
+            enqueue_next_bible_book_job_if_idle(db, source)
         db.commit()
         _event(
             db,
@@ -433,6 +489,8 @@ async def process_index_job(job_id: str) -> None:
                     if sel:
                         sel.state = "failed" if job.status == "failed" else "queued"
                         sel.last_error = message
+                    if job.status == "failed":
+                        enqueue_next_bible_book_job_if_idle(db, source)
                 _event(db, quest_id=source.session_id, source=source, job=job, status=job.status, message=f'Argo could not index "{source.display_name}": {message}', error_code=code)
         db.commit()
         logger.info("Quest index job %s failed with %s", job_id, code)
@@ -449,13 +507,32 @@ def _claim_next_job() -> str | None:
             QuestIndexJob.status == "running",
             QuestIndexJob.started_at < stale_before,
         ).update({"status": "queued", "next_retry_at": now}, synchronize_session=False)
-        job = (
+        bible_stale_before = now - timedelta(minutes=5)
+        db.query(QuestIndexJob).filter(
+            QuestIndexJob.status == "running",
+            QuestIndexJob.scope_json.like('%"kind": "bible_book_import"%'),
+            QuestIndexJob.progress_completed == 0,
+            QuestIndexJob.started_at < bible_stale_before,
+        ).update({"status": "queued", "next_retry_at": now}, synchronize_session=False)
+        bible_running = db.query(QuestIndexJob).filter(
+            QuestIndexJob.status == "running",
+            QuestIndexJob.scope_json.like('%"kind": "bible_book_import"%'),
+        ).count() > 0
+        candidates = (
             db.query(QuestIndexJob)
             .filter(QuestIndexJob.status == "queued")
             .filter((QuestIndexJob.next_retry_at == None) | (QuestIndexJob.next_retry_at <= now))  # noqa: E711
             .order_by(QuestIndexJob.priority.asc(), QuestIndexJob.requested_at.asc())
-            .first()
+            .limit(20)
+            .all()
         )
+        job = None
+        for candidate in candidates:
+            is_bible = '"kind": "bible_book_import"' in (candidate.scope_json or "")
+            if bible_running and is_bible:
+                continue
+            job = candidate
+            break
         if not job:
             db.commit()
             return None
