@@ -15,6 +15,7 @@ from core.database import (
     ChatMessage,
     QuestEvidenceChunk,
     QuestIndexJob,
+    QuestBibleBookSelection,
     QuestSource,
     QuestSourceArtifact,
     QuestSourceVersion,
@@ -28,7 +29,7 @@ from src.quest_source_adapters import (
     content_hash,
     safe_excerpt,
 )
-from src.quest_vector_store import deterministic_chunk_doc_id, ensure_quest_vector_store_available, index_evidence_chunks
+from src.quest_vector_store import deterministic_chunk_doc_id, ensure_quest_vector_store_available, index_evidence_chunks, delete_where
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,14 @@ _worker_stop: asyncio.Event | None = None
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True)
+
+
+def _json_loads(value: str | None, fallback: Any = None) -> Any:
+    try:
+        parsed = json.loads(value or "")
+        return parsed if parsed is not None else ({} if fallback is None else fallback)
+    except Exception:
+        return {} if fallback is None else fallback
 
 
 def _event(db, *, quest_id: str, source: QuestSource, job: QuestIndexJob | None, status: str, message: str, counts: dict[str, Any] | None = None, error_code: str | None = None) -> None:
@@ -91,6 +100,7 @@ def enqueue_index_job(
     trigger: str = "manual_refresh",
     created_by: str | None = None,
     priority: int = 100,
+    scope: dict[str, Any] | None = None,
 ) -> QuestIndexJob:
     trigger = trigger if trigger in JOB_TRIGGERS else "manual_refresh"
     job = QuestIndexJob(
@@ -102,6 +112,7 @@ def enqueue_index_job(
         priority=priority,
         created_by=created_by,
         requested_at=utcnow_naive(),
+        scope_json=_json_dumps(scope or {}),
     )
     source.index_state = "queued"
     db.add(job)
@@ -133,6 +144,7 @@ def job_to_dict(job: QuestIndexJob) -> dict[str, Any]:
         "chunks_deduplicated": job.chunks_deduplicated,
         "error_code": job.error_code,
         "safe_error_message": job.safe_error_message,
+        "scope": json.loads(job.scope_json or "{}") if getattr(job, "scope_json", None) else {},
     }
 
 
@@ -140,6 +152,8 @@ def _chunk_text(unit: NormalizedTextUnit, target: int = 1000, overlap: int = 200
     text = re.sub(r"\n{3,}", "\n\n", (unit.content or "").strip())
     if not text:
         return []
+    if getattr(unit, "preserve_boundaries", False):
+        return [(text, unit.locator)]
     if len(text) <= target:
         return [(text, unit.locator)]
     if unit.artifact_kind == "youtube":
@@ -179,6 +193,12 @@ def _safe_error(exc: Exception) -> tuple[str, str, bool]:
         "invalid_url": "The URL is not valid for server-side capture.",
         "unconstrained_email_scope": "Email source scope is too broad.",
         "transcript_unavailable": "No usable transcript is available for this video.",
+        "bible_rate_limited": "The Bible provider is rate limiting requests. Retry later.",
+        "bible_unavailable": "The Bible provider is temporarily unavailable.",
+        "bible_invalid_response": "The Bible provider returned an invalid chapter response.",
+        "bible_chapter_not_found": "The requested Bible chapter was not found.",
+        "bible_scope_invalid": "The Bible source scope is invalid.",
+        "bulk_import_disabled": "Full-testament Bible imports are disabled by this installation.",
         "database_source_unsupported": "Database/API Quest indexing is not enabled for this connector.",
         "vector_store_unavailable": "Quest vector storage is unavailable.",
         "upload_not_found": "The uploaded file could not be found on the server. Upload it again and retry.",
@@ -222,7 +242,8 @@ async def process_index_job(job_id: str) -> None:
         db.commit()
 
         adapter = adapter_for_source(source)
-        refs = await adapter.discover(source, getattr(source, "checkpoint", None))
+        scope = json.loads(job.scope_json or "{}") if getattr(job, "scope_json", None) else {}
+        refs = await adapter.discover(source, getattr(source, "checkpoint", None), job=job)
         job.records_discovered = len(refs)
         job.progress_total = max(1, len(refs))
         db.commit()
@@ -236,19 +257,34 @@ async def process_index_job(job_id: str) -> None:
             quest_source_id=source.id,
             version_label=f"v{len(source.versions) + 1}",
             source_fingerprint=fp,
-            provenance_json=_json_dumps({"trigger": job.trigger, "source_type": source.source_type}),
+            provenance_json=_json_dumps({"trigger": job.trigger, "source_type": source.source_type, "scope": scope}),
             captured_at=now,
         )
         db.add(version)
         db.flush()
         job.source_version_id = version.id
 
-        db.query(QuestSourceArtifact).filter(QuestSourceArtifact.source_id == source.id, QuestSourceArtifact.is_current == True).update({"is_current": False}, synchronize_session=False)
-        db.query(QuestEvidenceChunk).filter(QuestEvidenceChunk.source_id == source.id, QuestEvidenceChunk.is_current == True).update({"is_current": False}, synchronize_session=False)
+        append_only = source.source_type == "bible" and _json_loads(source.configuration_json, {}).get("versioning_mode") == "append_only"
+        if append_only:
+            book_id = str(scope.get("book_id") or "").upper()
+            translation = str(scope.get("translation") or "web").upper()
+            stale_artifacts = db.query(QuestSourceArtifact).filter(
+                QuestSourceArtifact.source_id == source.id,
+                QuestSourceArtifact.external_locator.like(f"BIBLE|{translation}|{book_id}|%"),
+                QuestSourceArtifact.is_current == True,  # noqa: E712
+            ).all()
+            stale_ids = [a.id for a in stale_artifacts]
+            if stale_ids:
+                db.query(QuestSourceArtifact).filter(QuestSourceArtifact.id.in_(stale_ids)).update({"is_current": False}, synchronize_session=False)
+                db.query(QuestEvidenceChunk).filter(QuestEvidenceChunk.artifact_id.in_(stale_ids)).update({"is_current": False}, synchronize_session=False)
+                delete_where(source.session_id, {"$and": [{"source_id": source.id}, {"translation": str(scope.get("translation") or "web").lower()}, {"book_id": book_id}]})
+        else:
+            db.query(QuestSourceArtifact).filter(QuestSourceArtifact.source_id == source.id, QuestSourceArtifact.is_current == True).update({"is_current": False}, synchronize_session=False)
+            db.query(QuestEvidenceChunk).filter(QuestEvidenceChunk.source_id == source.id, QuestEvidenceChunk.is_current == True).update({"is_current": False}, synchronize_session=False)
 
         vector_rows: list[dict[str, Any]] = []
         for idx, ref in enumerate(refs):
-            artifact = await adapter.capture(source, ref)
+            artifact = await adapter.capture(source, ref, job=job)
             artifact_id = uuid.uuid4().hex
             raw_ref = dict(artifact.raw_reference or {})
             raw_ref.pop("password", None)
@@ -277,7 +313,7 @@ async def process_index_job(job_id: str) -> None:
             if artifact.status not in {"captured", "ready"}:
                 job.progress_completed = idx + 1
                 continue
-            units = await adapter.extract(source, artifact, version.id, artifact_id)
+            units = await adapter.extract(source, artifact, version.id, artifact_id, job=job)
             if units:
                 art.status = "ready"
                 art.extraction_method = units[0].extraction_method
@@ -321,7 +357,7 @@ async def process_index_job(job_id: str) -> None:
                             "extraction_method": unit.extraction_method,
                             "is_current": True,
                             "excerpt": safe_excerpt(chunk_text),
-                        },
+                        } | dict(unit.raw_reference or {}),
                     })
                     job.chunks_created += 1
             job.artifacts_created += 1
@@ -345,6 +381,13 @@ async def process_index_job(job_id: str) -> None:
         source.last_processed_at = now
         job.status = "ready"
         job.finished_at = utcnow_naive()
+        if source.source_type == "bible" and scope.get("selection_id"):
+            sel = db.query(QuestBibleBookSelection).filter(QuestBibleBookSelection.id == scope.get("selection_id")).first()
+            if sel:
+                sel.state = "indexed"
+                sel.completed_chapters = sel.total_chapters
+                sel.indexed_at = job.finished_at
+                sel.last_error = None
         db.commit()
         _event(
             db,
@@ -368,7 +411,15 @@ async def process_index_job(job_id: str) -> None:
                 job.status = "failed"
                 job.finished_at = utcnow_naive()
                 if source:
-                    source.index_state = "failed"
+                    if source.source_type == "bible":
+                        completed = db.query(QuestBibleBookSelection).filter(
+                            QuestBibleBookSelection.source_id == source.id,
+                            QuestBibleBookSelection.state == "indexed",
+                            QuestBibleBookSelection.active == True,  # noqa: E712
+                        ).count()
+                        source.index_state = "partial" if completed else "failed"
+                    else:
+                        source.index_state = "failed"
             else:
                 job.status = "queued"
                 delay = min(60 * (2 ** max(job.attempt_count - 1, 0)), 900)
@@ -376,6 +427,12 @@ async def process_index_job(job_id: str) -> None:
                 if source:
                     source.index_state = "queued"
             if source:
+                scope = json.loads(job.scope_json or "{}") if getattr(job, "scope_json", None) else {}
+                if source.source_type == "bible" and scope.get("selection_id"):
+                    sel = db.query(QuestBibleBookSelection).filter(QuestBibleBookSelection.id == scope.get("selection_id")).first()
+                    if sel:
+                        sel.state = "failed" if job.status == "failed" else "queued"
+                        sel.last_error = message
                 _event(db, quest_id=source.session_id, source=source, job=job, status=job.status, message=f'Argo could not index "{source.display_name}": {message}', error_code=code)
         db.commit()
         logger.info("Quest index job %s failed with %s", job_id, code)

@@ -20,6 +20,7 @@ from core.database import (
     QuestArtifactProposal,
     QuestBearing,
     QuestInvitation,
+    QuestBibleBookSelection,
     QuestMember,
     QuestMemoryEntry,
     QuestMemoryState,
@@ -48,7 +49,7 @@ from src.venture_auth import (
 )
 
 
-SOURCE_TYPES = {"website", "file", "document", "database", "email", "youtube"}
+SOURCE_TYPES = {"website", "file", "document", "database", "email", "youtube", "bible"}
 SOURCE_MODES = {"static", "dynamic"}
 REFRESH_STRATEGIES = {"manual", "scheduled", "event", "live_verify"}
 SOURCE_ACCESS_MODES = {"captain_only", "shared_read", "shared_summaries"}
@@ -255,6 +256,42 @@ def _source_to_dict(row: QuestSource, access: str | None = None) -> dict:
 def _source_index_status(row: QuestSource) -> dict:
     db = SessionLocal()
     try:
+        if row.source_type == "bible":
+            selections = db.query(QuestBibleBookSelection).filter(
+                QuestBibleBookSelection.source_id == row.id,
+                QuestBibleBookSelection.active == True,  # noqa: E712
+            ).order_by(QuestBibleBookSelection.canonical_order.asc()).all()
+            aggregate = _bible_aggregate(selections)
+            job = (
+                db.query(QuestIndexJob)
+                .filter(QuestIndexJob.source_id == row.id)
+                .order_by(QuestIndexJob.requested_at.desc())
+                .first()
+            )
+            chunks = db.query(QuestEvidenceChunk).filter(
+                QuestEvidenceChunk.source_id == row.id,
+                QuestEvidenceChunk.is_current == True,  # noqa: E712
+            ).count()
+            return {
+                "index_state": aggregate,
+                "last_successful_index_at": row.last_processed_at.isoformat() + "Z" if row.last_processed_at else None,
+                "current_job": {
+                    "id": job.id,
+                    "status": job.status,
+                    "progress_total": 1,
+                    "progress_completed": 0 if job.status in {"queued", "running"} else 1,
+                    "chunks_indexed": job.chunks_indexed,
+                    "safe_error_message": job.safe_error_message,
+                    "error_code": job.error_code,
+                    "next_retry_at": job.next_retry_at.isoformat() + "Z" if job.next_retry_at else None,
+                } if job else None,
+                "has_active_job": bool(job and job.status in {"queued", "running"}),
+                "artifact_count": sum(1 for s in selections if s.state == "indexed"),
+                "chunk_count": chunks,
+                "freshness": aggregate,
+                "warning": job.safe_error_message if job and job.status == "failed" else None,
+                "books": [_selection_to_dict(s) for s in selections],
+            }
         job = (
             db.query(QuestIndexJob)
             .filter(QuestIndexJob.source_id == row.id)
@@ -420,6 +457,12 @@ class SourceCreate(BaseModel):
     configuration: dict[str, Any] = Field(default_factory=dict)
 
 
+class BibleBooksPayload(BaseModel):
+    translation: str = "web"
+    selection_mode: str = "manual_selection"
+    books: list[str] = Field(default_factory=list)
+
+
 class ProposalCreate(BaseModel):
     artifact_type: str = "insight"
     title: str
@@ -469,6 +512,19 @@ def _validate_source_payload(db, captain: str, payload: SourceCreate) -> tuple[s
     access_mode = payload.access_mode or ("captain_only" if source_type == "email" else "shared_read")
     if access_mode not in SOURCE_ACCESS_MODES:
         raise HTTPException(400, "Unsupported source access mode")
+    if source_type == "bible":
+        cfg = payload.configuration if isinstance(payload.configuration, dict) else {}
+        testament = str(cfg.get("testament") or "").lower()
+        datasource_key = str(cfg.get("datasource_key") or "")
+        if testament not in {"old", "new"}:
+            raise HTTPException(400, "Bible source requires testament old or new")
+        if access_mode == "shared_summaries":
+            raise HTTPException(400, "Bible sources support captain_only or shared_read")
+        if source_mode != "static" or refresh_strategy != "manual":
+            raise HTTPException(400, "Bible sources must be static with manual refresh")
+        expected_key = "old-test-bible" if testament == "old" else "new-test-bible"
+        if datasource_key and datasource_key != expected_key:
+            raise HTTPException(400, "Bible datasource_key does not match testament")
     if source_type == "email":
         account_id = str(payload.configuration.get("account_id") or "").strip()
         scope = payload.configuration.get("scope") if isinstance(payload.configuration, dict) else {}
@@ -520,6 +576,137 @@ def _validate_source_payload(db, captain: str, payload: SourceCreate) -> tuple[s
     return source_mode, access_mode, refresh_strategy
 
 
+def _ensure_single_bible_source(db, quest_id: str, testament: str, exclude_source_id: str | None = None) -> None:
+    for row in db.query(QuestSource).filter(
+        QuestSource.session_id == quest_id,
+        QuestSource.source_type == "bible",
+        QuestSource.status != "archived",
+    ).all():
+        if exclude_source_id and row.id == exclude_source_id:
+            continue
+        if _json_loads(row.configuration_json, {}).get("testament") == testament:
+            raise HTTPException(400, "This Quest already has an active Bible source for that testament")
+
+
+def _require_bible_source(row: QuestSource) -> dict[str, Any]:
+    if not row or row.source_type != "bible" or row.status == "archived":
+        raise HTTPException(404, "Bible source not found")
+    cfg = _json_loads(row.configuration_json, {})
+    testament = str(cfg.get("testament") or "").lower()
+    if testament not in {"old", "new"}:
+        raise HTTPException(400, "Bible source scope is invalid")
+    return cfg
+
+
+def _selection_to_dict(row: QuestBibleBookSelection) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "translation": row.translation,
+        "testament": row.testament,
+        "book_id": row.book_id,
+        "book_name": row.book_name,
+        "canonical_order": row.canonical_order,
+        "state": row.state,
+        "active": row.active,
+        "total_chapters": row.total_chapters,
+        "completed_chapters": row.completed_chapters,
+        "last_error": row.last_error,
+        "indexed_at": row.indexed_at.isoformat() + "Z" if row.indexed_at else None,
+    }
+
+
+def _bible_aggregate(rows: list[QuestBibleBookSelection]) -> str:
+    states = {r.state for r in rows if r.active}
+    if not rows:
+        return "not_indexed"
+    if states <= {"indexed"}:
+        return "indexed"
+    if "failed" in states and "indexed" in states:
+        return "partial"
+    if "failed" in states:
+        return "failed"
+    if "paused" in states:
+        return "paused"
+    if "indexing" in states:
+        return "indexing"
+    return "queued"
+
+
+def _queue_bible_books(db, *, source: QuestSource, captain: str, payload: BibleBooksPayload) -> list[QuestIndexJob]:
+    from services.bible_api_client import allow_full_testament_import
+    from src.bible_catalog import books_for_testament, validate_book_in_testament
+    from src.quest_indexing import enqueue_index_job
+
+    cfg = _require_bible_source(source)
+    if source.status != "active":
+        raise HTTPException(400, "Bible source is not active")
+    testament = str(cfg.get("testament")).lower()
+    translation = str(payload.translation or cfg.get("default_translation") or "web").lower()
+    if translation != "web":
+        raise HTTPException(400, "Unsupported Bible translation")
+    mode = str(payload.selection_mode or "manual_selection")
+    if mode not in {"manual_selection", "all_books", "reindex"}:
+        raise HTTPException(400, "Unsupported Bible selection mode")
+    if mode == "all_books":
+        if not allow_full_testament_import():
+            raise HTTPException(400, "bulk_import_disabled")
+        books = books_for_testament(testament)
+    else:
+        seen = []
+        for bid in payload.books:
+            book = validate_book_in_testament(str(bid).upper(), testament)
+            if book.book_id not in seen:
+                seen.append(book.book_id)
+        books = [validate_book_in_testament(bid, testament) for bid in seen]
+    if not books:
+        raise HTTPException(400, "Select at least one Bible book")
+    jobs: list[QuestIndexJob] = []
+    for idx, book in enumerate(sorted(books, key=lambda b: b.canonical_order)):
+        existing = db.query(QuestBibleBookSelection).filter(
+            QuestBibleBookSelection.source_id == source.id,
+            QuestBibleBookSelection.translation == translation,
+            QuestBibleBookSelection.book_id == book.book_id,
+        ).first()
+        if existing and existing.active and mode != "reindex":
+            if existing.state in {"queued", "indexing", "indexed"}:
+                raise HTTPException(409, f"{book.name} is already selected")
+        row = existing or QuestBibleBookSelection(
+            source_id=source.id,
+            translation=translation,
+            testament=testament,
+            book_id=book.book_id,
+            book_name=book.name,
+            canonical_order=book.canonical_order,
+        )
+        row.state = "queued"
+        row.active = True
+        row.total_chapters = book.chapters
+        row.completed_chapters = 0
+        row.last_error = None
+        if existing is None:
+            db.add(row)
+            db.flush()
+        job = enqueue_index_job(
+            db,
+            source,
+            trigger="manual_refresh" if mode != "reindex" else "retry",
+            created_by=captain,
+            priority=80 + idx,
+            scope={
+                "kind": "bible_book_import",
+                "selection_id": row.id,
+                "translation": translation,
+                "testament": testament,
+                "book_id": book.book_id,
+                "selection_mode": "all_books" if mode == "all_books" else "manual_selection",
+            },
+        )
+        jobs.append(job)
+    source.index_state = "queued"
+    db.add(ChatMessage(id=uuid.uuid4().hex, session_id=source.session_id, role="system", content=f"Bible books queued: {len(jobs)}", meta_data=_timeline_meta("bible_books_queued", title="Bible books queued", source_id=source.id, actor=captain, subject=source.display_name, selection_mode=mode, book_count=len(jobs))))
+    return jobs
+
+
 def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
     router = APIRouter(tags=["venture"])
 
@@ -556,6 +743,23 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             "can_manage_sources": is_captain,
         }
 
+    @router.get("/api/venture/bible/catalog")
+    def bible_catalog(request: Request, testament: str):
+        require_venture_runtime()
+        require_user(request)
+        from services.bible_api_client import allow_full_testament_import
+        from src.bible_catalog import catalog_payload
+        t = str(testament or "").lower()
+        if t not in {"old", "new"}:
+            raise HTTPException(400, "testament must be old or new")
+        payload = catalog_payload(t)
+        payload["select_all"] = {
+            "available": True,
+            "bulk_full_testament_import_enabled": allow_full_testament_import(),
+            "message": None if allow_full_testament_import() else "Full-testament imports require BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT=true.",
+        }
+        return payload
+
     @router.get("/api/quests")
     def list_quests(request: Request):
         require_venture_runtime()
@@ -579,6 +783,15 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         db = SessionLocal()
         try:
             source_mode, access_mode, refresh_strategy = _validate_source_payload(db, captain, source_payload)
+            if source_payload.source_type == "bible":
+                testament = str(source_payload.configuration.get("testament") or "").lower()
+                _ensure_single_bible_source(db, sid, testament)
+                source_payload.configuration = {
+                    **source_payload.configuration,
+                    "datasource_key": source_payload.configuration.get("datasource_key") or ("old-test-bible" if testament == "old" else "new-test-bible"),
+                    "default_translation": source_payload.configuration.get("default_translation") or "web",
+                    "versioning_mode": "append_only",
+                }
             session_manager.create_session(
                 session_id=sid,
                 name=body.title,
@@ -613,14 +826,23 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             )
             db.add(src)
             from src.quest_indexing import enqueue_index_job, job_to_dict
-            job = enqueue_index_job(db, src, trigger="source_connected", created_by=captain)
+            job = None
+            bible_jobs = []
+            if source_payload.source_type == "bible":
+                initial_books = source_payload.configuration.get("selected_books") or []
+                selection_mode = source_payload.configuration.get("selection_mode") or "manual_selection"
+                if initial_books or selection_mode == "all_books":
+                    bible_jobs = _queue_bible_books(db, source=src, captain=captain, payload=BibleBooksPayload(translation="web", selection_mode=selection_mode, books=initial_books))
+                    job = bible_jobs[0] if bible_jobs else None
+            else:
+                job = enqueue_index_job(db, src, trigger="source_connected", created_by=captain)
             db.add(QuestMemoryState(session_id=sid, current_bearing_json=_json_dumps(_bearing_to_dict(bearing))))
             db.commit()
             for shipmate in body.shipmates:
                 if shipmate and shipmate != captain:
                     _create_invitation(db, request, sid, captain, shipmate, 14)
             db.commit()
-            return {"quest": _session_to_quest(db.query(DbSession).filter(DbSession.id == sid).one(), "captain"), "primary_source": _source_to_dict(src, "raw"), "index_job": job_to_dict(job)}
+            return {"quest": _session_to_quest(db.query(DbSession).filter(DbSession.id == sid).one(), "captain"), "primary_source": _source_to_dict(src, "raw"), "index_job": job_to_dict(job) if job else None, "index_jobs": [job_to_dict(j) for j in bible_jobs]}
         except Exception:
             db.rollback()
             raise
@@ -926,15 +1148,26 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         db = SessionLocal()
         try:
             source_mode, access_mode, refresh_strategy = _validate_source_payload(db, captain, body)
+            if body.source_type == "bible":
+                testament = str(body.configuration.get("testament") or "").lower()
+                _ensure_single_bible_source(db, quest_id, testament)
+                body.configuration = {
+                    **body.configuration,
+                    "datasource_key": body.configuration.get("datasource_key") or ("old-test-bible" if testament == "old" else "new-test-bible"),
+                    "default_translation": body.configuration.get("default_translation") or "web",
+                    "versioning_mode": "append_only",
+                }
             row = QuestSource(id=uuid.uuid4().hex, session_id=quest_id, captain_username=captain, source_type=body.source_type, source_mode=source_mode, refresh_strategy=refresh_strategy, display_name=body.display_name, access_mode=access_mode, configuration_json=_json_dumps(body.configuration))
             db.add(row)
             if source_mode == "dynamic":
                 db.add(QuestSourceCheckpoint(id=uuid.uuid4().hex, quest_source_id=row.id, cursor=str(body.configuration.get("initial_cursor") or "")))
             db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Source connected: {body.display_name}", meta_data=_timeline_meta("source_connected", title="Source connected", source_id=row.id, actor=captain, subject=body.display_name)))
             from src.quest_indexing import enqueue_index_job, job_to_dict
-            job = enqueue_index_job(db, row, trigger="source_connected", created_by=captain)
+            job = None
+            if body.source_type != "bible":
+                job = enqueue_index_job(db, row, trigger="source_connected", created_by=captain)
             db.commit()
-            return {"source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job)}
+            return {"source": _source_to_dict(row, "raw"), "index_job": job_to_dict(job) if job else None}
         except Exception:
             db.rollback()
             raise
@@ -1046,6 +1279,91 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
         require_venture_runtime()
         return _enqueue_action(request, quest_id, source_id, "retry")
 
+    @router.get("/api/quests/{quest_id}/sources/{source_id}/bible/books")
+    def list_bible_books(request: Request, quest_id: str, source_id: str):
+        require_venture_runtime()
+        db = SessionLocal()
+        try:
+            row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
+            if not row:
+                raise HTTPException(404, "Bible source not found")
+            require_quest_source_read_access(request, row)
+            _require_bible_source(row)
+            selections = db.query(QuestBibleBookSelection).filter(
+                QuestBibleBookSelection.source_id == row.id,
+                QuestBibleBookSelection.active == True,  # noqa: E712
+            ).order_by(QuestBibleBookSelection.canonical_order.asc()).all()
+            return {
+                "source_id": row.id,
+                "aggregate_state": _bible_aggregate(selections),
+                "may_modify_scope": get_quest_role(effective_user(request), quest_id) == "captain",
+                "books": [_selection_to_dict(s) for s in selections],
+            }
+        finally:
+            db.close()
+
+    @router.post("/api/quests/{quest_id}/sources/{source_id}/bible/books")
+    def add_bible_books(request: Request, quest_id: str, source_id: str, body: BibleBooksPayload):
+        require_venture_runtime()
+        captain = require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
+            if not row:
+                raise HTTPException(404, "Bible source not found")
+            _require_bible_source(row)
+            jobs = _queue_bible_books(db, source=row, captain=captain, payload=body)
+            db.commit()
+            from src.quest_indexing import job_to_dict
+            selections = db.query(QuestBibleBookSelection).filter(QuestBibleBookSelection.source_id == row.id, QuestBibleBookSelection.active == True).order_by(QuestBibleBookSelection.canonical_order.asc()).all()  # noqa: E712
+            return {"accepted": True, "source": _source_to_dict(row, "raw"), "aggregate_state": _bible_aggregate(selections), "books": [_selection_to_dict(s) for s in selections], "index_jobs": [job_to_dict(j) for j in jobs]}
+        except HTTPException:
+            db.rollback()
+            raise
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc) or "bible_scope_invalid")
+        finally:
+            db.close()
+
+    @router.post("/api/quests/{quest_id}/sources/{source_id}/bible/books/{book_id}/reindex")
+    def reindex_bible_book(request: Request, quest_id: str, source_id: str, book_id: str):
+        require_venture_runtime()
+        captain = require_quest_captain(request, quest_id)
+        db = SessionLocal()
+        try:
+            row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
+            if not row:
+                raise HTTPException(404, "Bible source not found")
+            _require_bible_source(row)
+            jobs = _queue_bible_books(db, source=row, captain=captain, payload=BibleBooksPayload(selection_mode="reindex", books=[book_id]))
+            db.commit()
+            from src.quest_indexing import job_to_dict
+            return {"accepted": True, "index_job": job_to_dict(jobs[0])}
+        except HTTPException:
+            db.rollback()
+            raise
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(400, str(exc) or "bible_scope_invalid")
+        finally:
+            db.close()
+
+    @router.get("/api/quests/{quest_id}/sources/{source_id}/bible/lookup")
+    def lookup_bible_reference(request: Request, quest_id: str, source_id: str, reference: str):
+        require_venture_runtime()
+        db = SessionLocal()
+        try:
+            row = db.query(QuestSource).filter(QuestSource.id == source_id, QuestSource.session_id == quest_id).first()
+            if not row:
+                raise HTTPException(404, "Bible source not found")
+            require_quest_source_read_access(request, row)
+            _require_bible_source(row)
+            from services.bible_lookup import resolve_indexed_bible_reference
+            return resolve_indexed_bible_reference(db, quest_id=quest_id, source=row, reference=reference)
+        finally:
+            db.close()
+
     def _set_source_status(request: Request, quest_id: str, source_id: str, status: str):
         require_venture_runtime()
         require_quest_captain(request, quest_id)
@@ -1061,11 +1379,21 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                     QuestIndexJob.source_id == row.id,
                     QuestIndexJob.status.in_(("queued", "running")),
                 ).update({"status": "paused"}, synchronize_session=False)
+                if row.source_type == "bible":
+                    db.query(QuestBibleBookSelection).filter(
+                        QuestBibleBookSelection.source_id == row.id,
+                        QuestBibleBookSelection.state.in_(("queued", "indexing")),
+                    ).update({"state": "paused"}, synchronize_session=False)
             elif status == "active":
                 db.query(QuestIndexJob).filter(
                     QuestIndexJob.source_id == row.id,
                     QuestIndexJob.status == "paused",
                 ).update({"status": "queued"}, synchronize_session=False)
+                if row.source_type == "bible":
+                    db.query(QuestBibleBookSelection).filter(
+                        QuestBibleBookSelection.source_id == row.id,
+                        QuestBibleBookSelection.state == "paused",
+                    ).update({"state": "queued"}, synchronize_session=False)
             db.commit()
             return {"source": _source_to_dict(row, "raw")}
         finally:

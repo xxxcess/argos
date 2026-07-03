@@ -49,6 +49,8 @@ Quest Sources are either:
 - **Static** — websites, files, CSV datasets, PDFs, text or Word documents, Captain-owned documents, and connected databases queried through a defined schema or saved query.
 - **Dynamic** — sources that grow over time and need incremental polling. For the first Venture release, Email is the only dynamic source.
 
+Venture includes static **Bible Quest Sources** for `Old Test Bible` and `New Test Bible`. Captains select books only; Argos indexes selected books internally chapter by chapter and stores verses for precise citations. Full-testament Select all submissions are disabled by default with `BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT=false`; individual book imports remain available. Provider calls are throttled by `BIBLE_API_MIN_REQUEST_INTERVAL_SECONDS`.
+
 Every source has an explicit Shipmate access mode:
 
 ```text

@@ -185,3 +185,13 @@ def delete_source(quest_id: str, source_id: str, visibility_lanes: list[str] | N
                 embed_lane.collection.delete(where={"source_id": source_id})
         except Exception:
             logger.debug("Quest vector delete_source skipped", exc_info=True)
+
+
+def delete_where(quest_id: str, where: dict[str, Any], visibility_lanes: list[str] | None = None) -> None:
+    lanes_to_scan = visibility_lanes or sorted(VALID_VISIBILITY_LANES)
+    for lane in lanes_to_scan:
+        try:
+            for embed_lane in _lanes_for(quest_id, lane):
+                embed_lane.collection.delete(where=where)
+        except Exception:
+            logger.debug("Quest vector delete_where skipped", exc_info=True)

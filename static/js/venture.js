@@ -563,24 +563,101 @@ function sourceCard(sources, qid) {
     await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(source.id)}/${endpoint}`, { method: 'POST', credentials: 'same-origin' });
     await renderRightRail();
   } });
+  const bibleBookRows = (s) => (s.index_status?.books || []).map(book => h('div', { class: 'venture-row' }, [
+    h('span', { text: book.book_name }),
+    h('span', { class: 'venture-muted', text: bibleStateLabel(book.state) }),
+    caps.can_manage_sources ? h('span', { class: 'venture-source-actions' }, [
+      (book.state === 'failed') ? h('button', { class: 'venture-btn', type: 'button', text: 'Retry failed book', onclick: () => reindexBibleBook(qid, s.id, book.book_id) }) : null,
+      (book.state === 'indexed') ? h('button', { class: 'venture-btn', type: 'button', text: 'Re-index book', onclick: () => reindexBibleBook(qid, s.id, book.book_id) }) : null,
+    ]) : null,
+  ]));
   return h('section', { class: 'venture-card QuestSourceCard' }, [
     h('h3', { text: 'Quest Sources' }),
     h('div', { class: 'venture-muted', text: aggregate }),
     h('div', { class: 'venture-list' }, sources.map(s => h('div', { class: 'venture-row' }, [
       h('span', { text: s.display_name }),
       h('span', { class: 'venture-muted', text: `${s.access_mode} · ${statusText(s)}` }),
-      caps.can_manage_sources ? h('span', { class: 'venture-source-actions' }, [
+      caps.can_manage_sources ? h('span', { class: 'venture-source-actions' }, s.source_type === 'bible' ? [
+        h('button', { class: 'venture-btn', type: 'button', text: 'Add books', onclick: () => openBibleBookManager(qid, s) }),
+        s.status === 'paused' ? action('Resume', s, 'resume') : action('Pause', s, 'pause'),
+      ] : [
         action('Refresh', s, 'refresh'),
         (s.index_status?.index_state === 'failed') ? action('Retry', s, 'retry') : null,
         action('Reindex', s, 'reindex'),
         s.status === 'paused' ? action('Resume', s, 'resume') : action('Pause', s, 'pause'),
       ]) : null,
+      s.source_type === 'bible' ? h('div', { class: 'venture-full-span venture-list' }, bibleBookRows(s)) : null,
     ]))),
     caps.can_manage_sources ? h('button', { class: 'venture-btn', type: 'button', text: 'Refresh Sources', onclick: async () => {
       for (const s of sources) await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(s.id)}/refresh`, { method: 'POST', credentials: 'same-origin' });
       await renderRightRail();
     } }) : null,
   ]);
+}
+
+function bibleStateLabel(state) {
+  const labels = { queued: 'Queued', indexing: 'Indexing', indexed: 'Indexed', partial: 'Partial', failed: 'Failed', paused: 'Paused' };
+  return labels[state] || state || 'Queued';
+}
+
+async function reindexBibleBook(qid, sourceId, bookId) {
+  await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(sourceId)}/bible/books/${encodeURIComponent(bookId)}/reindex`, { method: 'POST', credentials: 'same-origin' });
+  await renderRightRail();
+}
+
+async function openBibleBookManager(qid, source) {
+  const testament = source.configuration?.testament;
+  if (!testament) return;
+  const catalog = await getJson(`/api/venture/bible/catalog?testament=${encodeURIComponent(testament)}`);
+  const selected = new Set((source.index_status?.books || []).map(b => b.book_id));
+  const backdrop = h('div', { class: 'venture-modal-backdrop', 'data-bible-books': 'true' });
+  const modal = h('div', { class: 'venture-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Add Bible books' });
+  const list = h('div', { class: 'venture-check-list' });
+  (catalog.books || []).forEach(book => {
+    list.appendChild(h('label', { class: 'venture-check-row', 'data-book-name': book.name.toLowerCase() }, [
+      h('input', { type: 'checkbox', name: 'bible_books_add', value: book.book_id, disabled: selected.has(book.book_id) }),
+      h('span', { text: `${book.name}${selected.has(book.book_id) ? ' · already selected' : ''}` }),
+    ]));
+  });
+  const count = h('span', { class: 'venture-muted', text: '0 selected' });
+  const sync = () => { count.textContent = `${selectedCheckboxValues(modal, 'bible_books_add').length} selected`; };
+  modal.appendChild(h('h2', { text: 'Add books' }));
+  modal.appendChild(h('div', { class: 'venture-source-actions' }, [
+    h('input', { type: 'search', placeholder: 'Search books', oninput: e => {
+      const q = String(e.target.value || '').toLowerCase();
+      list.querySelectorAll('.venture-check-row').forEach(row => { row.hidden = q && !row.dataset.bookName.includes(q); });
+    } }),
+    h('button', { class: 'venture-btn', type: 'button', text: 'Select all books', onclick: () => { list.querySelectorAll('input:not(:disabled)').forEach(i => { i.checked = true; }); sync(); } }),
+    h('button', { class: 'venture-btn', type: 'button', text: 'Clear selection', onclick: () => { list.querySelectorAll('input').forEach(i => { i.checked = false; }); sync(); } }),
+    count,
+  ]));
+  if (!catalog.select_all?.bulk_full_testament_import_enabled) modal.appendChild(h('div', { class: 'venture-muted', text: 'Full-testament imports are disabled until an administrator enables BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT or configures a permitted bulk corpus source.' }));
+  list.addEventListener('change', sync);
+  modal.appendChild(list);
+  modal.appendChild(h('div', { class: 'venture-modal-actions' }, [
+    h('button', { class: 'venture-btn', type: 'button', text: 'Cancel', onclick: () => closeVentureModal(modal, backdrop) }),
+    h('button', { class: 'venture-btn primary', type: 'button', text: 'Index selected books', onclick: async () => {
+      const books = selectedCheckboxValues(modal, 'bible_books_add');
+      if (!books.length) return;
+      const mode = selected.size === 0 && books.length === (catalog.books || []).length ? 'all_books' : 'manual_selection';
+      if (mode === 'all_books') {
+        const ok = window.confirm(`${testament === 'old' ? 'Old Testament' : 'New Testament'}\n${catalog.book_count} selected books\nTranslation: WEB\n\nIndexing runs as staged background work and can be paused and resumed.`);
+        if (!ok) return;
+      }
+      const res = await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(source.id)}/bible/books`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ translation: 'web', selection_mode: mode, books }),
+      });
+      if (!res.ok) showVentureError((await res.json().catch(() => ({}))).detail || 'Unable to queue Bible books.');
+      closeVentureModal(modal, backdrop);
+      await renderRightRail();
+    } }),
+  ]));
+  backdrop.addEventListener('click', () => closeVentureModal(modal, backdrop));
+  document.body.appendChild(backdrop);
+  document.body.appendChild(modal);
 }
 
 function artifactReviewQueue(qid, proposals = []) {
@@ -771,6 +848,7 @@ function selectedCheckboxValues(root, name) {
 }
 
 function sourceDisplayName(type, config, emailAccountsById) {
+  if (type === 'bible') return config.testament === 'old' ? 'Old Test Bible' : 'New Test Bible';
   if (type === 'website') return config.urls?.length === 1 ? config.urls[0] : 'Website evidence';
   if (type === 'file') return config.files?.length === 1 ? config.files[0].name : 'Selected files';
   if (type === 'youtube') return config.video_urls?.length === 1 ? config.video_urls[0] : 'YouTube evidence';
@@ -794,6 +872,29 @@ async function uploadQuestFiles(files) {
 
 async function buildSourcePayload(modal, emailAccountsById) {
   const type = modal.querySelector('[name="source_type"]')?.value || 'website';
+  if (type === 'bible_old' || type === 'bible_new') {
+    const testament = type === 'bible_old' ? 'old' : 'new';
+    const books = selectedCheckboxValues(modal, 'bible_books');
+    if (!books.length) throw new Error('Select at least one Bible book.');
+    const total = Number(modal.querySelector('[data-bible-total]')?.dataset.bibleTotal || '0');
+    const bulkEnabled = modal.querySelector('[data-bible-bulk-enabled]')?.dataset.bibleBulkEnabled === 'true';
+    const selectionMode = total && books.length === total ? 'all_books' : 'manual_selection';
+    if (selectionMode === 'all_books') {
+      const ok = window.confirm(`${testament === 'old' ? 'Old Testament' : 'New Testament'}\n${books.length} selected books\nTranslation: WEB\n\nIndexing runs as staged background work and can be paused and resumed.`);
+      if (!ok) throw new Error('Full-testament indexing was cancelled.');
+      if (!bulkEnabled) throw new Error('Full-testament imports are disabled. The installation administrator must set BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT=true or configure a permitted bulk corpus source.');
+    }
+    const config = {
+      datasource_key: testament === 'old' ? 'old-test-bible' : 'new-test-bible',
+      testament,
+      default_translation: 'web',
+      versioning_mode: 'append_only',
+      selected_books: books,
+      selection_mode: selectionMode,
+      summary: `${books.length} ${testament === 'old' ? 'Old Testament' : 'New Testament'} book${books.length === 1 ? '' : 's'}`,
+    };
+    return { type: 'bible', config, extraSources: [] };
+  }
   if (type === 'website') {
     const urls = String(modal.querySelector('[name="source_urls"]')?.value || '')
       .split(/\n+/)
@@ -889,8 +990,52 @@ async function loadWizardOptions(modal) {
 function syncQuestWizardSourcePanel(modal) {
   const type = modal.querySelector('[name="source_type"]')?.value || 'website';
   modal.querySelectorAll('[data-source-panel]').forEach(panel => {
-    panel.hidden = panel.dataset.sourcePanel !== type;
+    panel.hidden = panel.dataset.sourcePanel !== type && !(panel.dataset.sourcePanel === 'bible' && (type === 'bible_old' || type === 'bible_new'));
   });
+  if (type === 'bible_old' || type === 'bible_new') loadBibleCatalogIntoModal(modal, type === 'bible_old' ? 'old' : 'new');
+}
+
+async function loadBibleCatalogIntoModal(modal, testament) {
+  const panel = modal.querySelector('[data-source-panel="bible"]');
+  if (!panel || panel.dataset.loadedTestament === testament) return;
+  panel.dataset.loadedTestament = testament;
+  const data = await getJson(`/api/venture/bible/catalog?testament=${encodeURIComponent(testament)}`);
+  const books = data.books || [];
+  const recommended = new Set((data.recommended_books || []).map(b => b.book_id));
+  const bulkEnabled = !!data.select_all?.bulk_full_testament_import_enabled;
+  panel.querySelector('[data-bible-total]').dataset.bibleTotal = String(books.length);
+  panel.querySelector('[data-bible-bulk-enabled]').dataset.bibleBulkEnabled = bulkEnabled ? 'true' : 'false';
+  panel.querySelector('[data-bible-bulk-message]').textContent = bulkEnabled ? '' : 'Full-testament imports are disabled until an administrator enables BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT or configures a permitted bulk corpus source.';
+  const renderList = (root, items) => {
+    root.innerHTML = '';
+    items.forEach(book => root.appendChild(h('label', { class: 'venture-check-row', 'data-book-name': book.name.toLowerCase() }, [
+      h('input', { type: 'checkbox', name: 'bible_books', value: book.book_id }),
+      h('span', { text: book.name }),
+    ])));
+  };
+  renderList(panel.querySelector('[data-bible-recommended]'), books.filter(b => recommended.has(b.book_id)));
+  renderList(panel.querySelector('[data-bible-all]'), books);
+  const syncCount = () => {
+    const count = selectedCheckboxValues(panel, 'bible_books').length;
+    panel.querySelector('[data-bible-count]').textContent = `${count} selected`;
+  };
+  panel.querySelectorAll('input[name="bible_books"]').forEach(input => input.addEventListener('change', () => {
+    panel.querySelectorAll(`input[name="bible_books"][value="${CSS.escape(input.value)}"]`).forEach(peer => { peer.checked = input.checked; });
+    syncCount();
+  }));
+  panel.querySelector('[data-bible-search]').oninput = event => {
+    const q = String(event.target.value || '').toLowerCase();
+    panel.querySelectorAll('[data-bible-all] .venture-check-row').forEach(row => { row.hidden = q && !row.dataset.bookName.includes(q); });
+  };
+  panel.querySelector('[data-bible-select-all]').onclick = () => {
+    panel.querySelectorAll('input[name="bible_books"]').forEach(input => { input.checked = true; });
+    syncCount();
+  };
+  panel.querySelector('[data-bible-clear]').onclick = () => {
+    panel.querySelectorAll('input[name="bible_books"]').forEach(input => { input.checked = false; });
+    syncCount();
+  };
+  syncCount();
 }
 
 function syncSelectedFiles(modal) {
@@ -983,6 +1128,8 @@ function openSessionWizard() {
             <option value="file">File</option>
             <option value="email">Email</option>
             <option value="youtube">YouTube</option>
+            <option value="bible_old">Old Test Bible</option>
+            <option value="bible_new">New Test Bible</option>
           </select>
         </div>
         <div class="venture-full-span">
@@ -1006,6 +1153,21 @@ function openSessionWizard() {
       <div class="venture-source-panel" data-source-panel="youtube" hidden>
         <label>YouTube URLs</label>
         <textarea name="youtube_urls" placeholder="https://www.youtube.com/watch?v=..."></textarea>
+      </div>
+      <div class="venture-source-panel" data-source-panel="bible" hidden>
+        <div class="venture-source-actions">
+          <input type="search" data-bible-search placeholder="Search books">
+          <button type="button" class="venture-btn" data-bible-select-all>Select all books</button>
+          <button type="button" class="venture-btn" data-bible-clear>Clear selection</button>
+          <span class="venture-muted" data-bible-count>0 selected</span>
+        </div>
+        <div class="venture-muted" data-bible-bulk-message></div>
+        <div data-bible-total data-bible-total="0"></div>
+        <div data-bible-bulk-enabled data-bible-bulk-enabled="false"></div>
+        <label>Recommended books</label>
+        <div class="venture-check-list" data-bible-recommended><div class="venture-muted">Loading Bible catalog...</div></div>
+        <label>All books</label>
+        <div class="venture-check-list" data-bible-all><div class="venture-muted">Loading Bible catalog...</div></div>
       </div>
       <label>Shipmates</label>
       <div class="venture-check-list" data-shipmate-list><div class="venture-muted">Loading regular users...</div></div>

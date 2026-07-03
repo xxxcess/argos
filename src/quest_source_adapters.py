@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-from core.database import Document, DocumentVersion, EmailAccount, QuestSource, SessionLocal, utcnow_naive
+from core.database import Document, DocumentVersion, EmailAccount, QuestBibleBookSelection, QuestSource, SessionLocal, utcnow_naive
 from src.constants import UPLOAD_DIR
 from src.markitdown_runtime import convert_to_markdown, is_markitdown_format
 from src.upload_handler import is_valid_upload_id
@@ -85,16 +85,17 @@ class NormalizedTextUnit:
     extraction_confidence: str = "high"
     artifact_kind: str = "record"
     raw_reference: dict[str, Any] = field(default_factory=dict)
+    preserve_boundaries: bool = False
 
 
 class QuestSourceAdapter:
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         raise NotImplementedError
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         raise NotImplementedError
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         raise NotImplementedError
 
     def visibility_lane(self, source: QuestSource) -> str:
@@ -153,7 +154,7 @@ def _resolve_upload(upload_id: str, owner: str | None) -> dict[str, Any]:
 
 
 class FileQuestSourceAdapter(QuestSourceAdapter):
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         cfg = _json_loads(source.configuration_json, {})
         ids = cfg.get("upload_ids") or ([cfg.get("upload_id")] if cfg.get("upload_id") else [])
         refs = []
@@ -188,7 +189,7 @@ class FileQuestSourceAdapter(QuestSourceAdapter):
                 refs.append(RecordRef(upload_id, str(upload_id), {"upload_id": upload_id}))
         return refs
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         meta = _resolve_upload(record_ref.raw["upload_id"], source.captain_username)
         page_number = record_ref.raw.get("page_number")
         locator = f"{meta['name']} · page {page_number}" if page_number else meta["name"]
@@ -200,7 +201,7 @@ class FileQuestSourceAdapter(QuestSourceAdapter):
             content="",
         )
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         path = str(artifact.raw_reference.get("path") or "")
         name = artifact.title or os.path.basename(path)
         ext = Path(name).suffix.lower()
@@ -285,12 +286,12 @@ class FileQuestSourceAdapter(QuestSourceAdapter):
 
 
 class DocumentQuestSourceAdapter(QuestSourceAdapter):
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         cfg = _json_loads(source.configuration_json, {})
         doc_id = str(cfg.get("document_id") or "").strip()
         return [RecordRef(doc_id, f"Argo Document · {doc_id}", {"document_id": doc_id})] if doc_id else []
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == record_ref.raw["document_id"], Document.owner == source.captain_username).first()
@@ -309,7 +310,7 @@ class DocumentQuestSourceAdapter(QuestSourceAdapter):
         finally:
             db.close()
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         text = (artifact.content or "").strip()
         if not text:
             raise ValueError("no_readable_text")
@@ -339,7 +340,7 @@ def _canonical_url(url: str) -> str:
 
 
 class WebsiteQuestSourceAdapter(QuestSourceAdapter):
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         cfg = _json_loads(source.configuration_json, {})
         urls = cfg.get("seed_urls") or cfg.get("urls") or ([cfg.get("url")] if cfg.get("url") else [])
         seen = set()
@@ -352,7 +353,7 @@ class WebsiteQuestSourceAdapter(QuestSourceAdapter):
                 refs.append(RecordRef(canonical, canonical, {"url": canonical, "capture_mode": cfg.get("capture_mode") or "url_capture"}))
         return refs
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         from src.search.content import fetch_webpage_content
         url = validate_public_http_url(record_ref.raw["url"])
         result = await asyncio.get_running_loop().run_in_executor(
@@ -369,7 +370,7 @@ class WebsiteQuestSourceAdapter(QuestSourceAdapter):
             status=status,
         )
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         text = (artifact.content or "").strip()
         if artifact.status == "needs_browser":
             raise ValueError("needs_browser")
@@ -398,7 +399,7 @@ class EmailQuestSourceAdapter(QuestSourceAdapter):
             raise ValueError("unconstrained_email_scope")
         return scope
 
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         cfg = _json_loads(source.configuration_json, {})
         self._validate_scope(cfg)
         seeded = cfg.get("messages") if isinstance(cfg.get("messages"), list) else []
@@ -411,14 +412,14 @@ class EmailQuestSourceAdapter(QuestSourceAdapter):
         # consumes selected messages when provided by constrained connectors/tests.
         return refs
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         msg = record_ref.raw.get("message") or {}
         title = msg.get("subject") or f"Email {record_ref.key}"
         locator = f"Email: {title}"
         raw = {k: msg.get(k) for k in ("account_id", "folder", "uid", "thread_id", "sender", "subject", "received_at") if msg.get(k)}
         return CapturedArtifact("email", locator, title, raw, content=(msg.get("text") or msg.get("body") or ""))
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         text = (artifact.content or "").strip()
         if not text:
             raise ValueError("no_readable_text")
@@ -439,7 +440,7 @@ class EmailQuestSourceAdapter(QuestSourceAdapter):
 
 
 class YoutubeQuestSourceAdapter(QuestSourceAdapter):
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         cfg = _json_loads(source.configuration_json, {})
         urls = cfg.get("video_urls") or ([cfg.get("video_url")] if cfg.get("video_url") else [])
         from src.youtube_handler import extract_youtube_id
@@ -450,7 +451,7 @@ class YoutubeQuestSourceAdapter(QuestSourceAdapter):
                 refs.append(RecordRef(vid, f"YouTube · {vid}", {"video_id": vid, "url": str(url)}))
         return refs
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         cfg = _json_loads(source.configuration_json, {})
         video_id = record_ref.raw["video_id"]
         transcript_text = ""
@@ -477,7 +478,7 @@ class YoutubeQuestSourceAdapter(QuestSourceAdapter):
             status=status,
         )
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         text = (artifact.content or "").strip()
         if artifact.status == "transcript_unavailable" or not text:
             raise ValueError("transcript_unavailable")
@@ -497,14 +498,123 @@ class YoutubeQuestSourceAdapter(QuestSourceAdapter):
         )]
 
 
+class BibleQuestSourceAdapter(QuestSourceAdapter):
+    def _scope(self, source: QuestSource, job: Any) -> dict[str, Any]:
+        cfg = _json_loads(source.configuration_json, {})
+        scope = _json_loads(getattr(job, "scope_json", None), {}) if job else {}
+        if scope.get("kind") != "bible_book_import":
+            raise ValueError("bible_scope_invalid")
+        testament = str(scope.get("testament") or cfg.get("testament") or "").lower()
+        book_id = str(scope.get("book_id") or "").upper()
+        translation = str(scope.get("translation") or cfg.get("default_translation") or "web").lower()
+        from src.bible_catalog import validate_book_in_testament
+        book = validate_book_in_testament(book_id, testament)
+        return {"translation": translation, "testament": testament, "book": book, "selection_id": scope.get("selection_id")}
+
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
+        scoped = self._scope(source, job)
+        book = scoped["book"]
+        db = SessionLocal()
+        try:
+            selection = db.query(QuestBibleBookSelection).filter(QuestBibleBookSelection.id == scoped.get("selection_id")).first()
+            if selection:
+                selection.state = "indexing"
+                selection.total_chapters = book.chapters
+                selection.completed_chapters = 0
+                selection.last_error = None
+                db.commit()
+        finally:
+            db.close()
+        return [
+            RecordRef(
+                f"BIBLE|{scoped['translation'].upper()}|{book.book_id}|{chapter}",
+                f"{book.name} {chapter} ({scoped['translation'].upper()})",
+                {"translation": scoped["translation"], "testament": scoped["testament"], "book_id": book.book_id, "book_name": book.name, "chapter": chapter, "selection_id": scoped.get("selection_id")},
+            )
+            for chapter in range(1, book.chapters + 1)
+        ]
+
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
+        from services.bible_api_client import BibleApiClient
+        raw = record_ref.raw
+        chapter = await BibleApiClient().fetch_chapter(str(raw["translation"]), str(raw["book_id"]), int(raw["chapter"]))
+        content = "\n".join(f"{v.verse_number}. {v.text}" for v in chapter.verses)
+        return CapturedArtifact(
+            artifact_kind="bible_chapter",
+            external_locator=record_ref.key,
+            title=record_ref.locator,
+            raw_reference=raw | {"verse_count": len(chapter.verses)},
+            content=content,
+        )
+
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
+        raw = artifact.raw_reference
+        lines = [line.strip() for line in (artifact.content or "").splitlines() if line.strip()]
+        verses: list[tuple[int, str]] = []
+        for line in lines:
+            m = re.match(r"^(\d+)\.\s*(.*)$", line)
+            if m:
+                verses.append((int(m.group(1)), m.group(2).strip()))
+        if not verses:
+            raise ValueError("bible_invalid_response")
+        units = []
+        translation = str(raw["translation"]).lower()
+        book_name = str(raw["book_name"])
+        chapter = int(raw["chapter"])
+        for start in range(0, len(verses), 3):
+            window = verses[start:start + 5]
+            if not window:
+                continue
+            start_verse = window[0][0]
+            end_verse = window[-1][0]
+            ref = f"{book_name} {chapter}:{start_verse}-{end_verse} ({translation.upper()})" if start_verse != end_verse else f"{book_name} {chapter}:{start_verse} ({translation.upper()})"
+            content = "\n".join(f"{num}. {text}" for num, text in window)
+            units.append(NormalizedTextUnit(
+                content=content,
+                title=ref,
+                locator=ref,
+                source_id=source.id,
+                source_version_id=source_version_id,
+                artifact_id=artifact_id,
+                content_hash=content_hash(content),
+                captured_at=artifact.captured_at,
+                visibility_lane=self.visibility_lane(source),
+                extraction_method="bible_api",
+                extraction_confidence="high",
+                artifact_kind="bible_passage",
+                preserve_boundaries=True,
+                raw_reference={
+                    "artifact_kind": "bible_passage",
+                    "translation": translation,
+                    "testament": raw["testament"],
+                    "book_id": raw["book_id"],
+                    "book_name": book_name,
+                    "chapter": chapter,
+                    "start_verse": start_verse,
+                    "end_verse": end_verse,
+                    "reference": ref,
+                    "is_current": True,
+                },
+            ))
+        db = SessionLocal()
+        try:
+            selection = db.query(QuestBibleBookSelection).filter(QuestBibleBookSelection.id == raw.get("selection_id")).first()
+            if selection:
+                selection.completed_chapters = min((selection.completed_chapters or 0) + 1, selection.total_chapters or 1)
+                db.commit()
+        finally:
+            db.close()
+        return units
+
+
 class DatabaseQuestSourceAdapter(QuestSourceAdapter):
-    async def discover(self, source: QuestSource, checkpoint: Any = None) -> list[RecordRef]:
+    async def discover(self, source: QuestSource, checkpoint: Any = None, job: Any = None) -> list[RecordRef]:
         raise ValueError("database_source_unsupported")
 
-    async def capture(self, source: QuestSource, record_ref: RecordRef) -> CapturedArtifact:
+    async def capture(self, source: QuestSource, record_ref: RecordRef, job: Any = None) -> CapturedArtifact:
         raise ValueError("database_source_unsupported")
 
-    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str) -> list[NormalizedTextUnit]:
+    async def extract(self, source: QuestSource, artifact: CapturedArtifact, source_version_id: str, artifact_id: str, job: Any = None) -> list[NormalizedTextUnit]:
         raise ValueError("database_source_unsupported")
 
 
@@ -515,6 +625,7 @@ def adapter_for_source(source: QuestSource) -> QuestSourceAdapter:
         "website": WebsiteQuestSourceAdapter,
         "email": EmailQuestSourceAdapter,
         "youtube": YoutubeQuestSourceAdapter,
+        "bible": BibleQuestSourceAdapter,
         "database": DatabaseQuestSourceAdapter,
     }
     cls = adapters.get(source.source_type)

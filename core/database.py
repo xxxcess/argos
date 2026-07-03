@@ -336,6 +336,7 @@ class QuestIndexJob(TimestampMixin, Base):
     source_version_id = Column(String, nullable=True, index=True)
     status = Column(String, nullable=False, default="queued", index=True)
     trigger = Column(String, nullable=False, default="manual_refresh", index=True)
+    scope_json = Column(Text, nullable=False, default="{}")
     attempt_count = Column(Integer, nullable=False, default=0)
     priority = Column(Integer, nullable=False, default=100, index=True)
     requested_at = Column(DateTime, nullable=False, default=utcnow_naive, index=True)
@@ -414,6 +415,64 @@ class QuestEvidenceChunk(Base):
     __table_args__ = (
         Index("ix_quest_chunks_current", "quest_id", "visibility_lane", "is_current"),
         UniqueConstraint("artifact_id", "chunk_index", name="uq_quest_chunk_artifact_index"),
+    )
+
+
+class BibleChapterCache(TimestampMixin, Base):
+    """Cached provider chapter payload normalized into verse rows."""
+    __tablename__ = "bible_chapter_cache"
+
+    id = Column(String, primary_key=True, index=True)
+    translation = Column(String, nullable=False, index=True)
+    testament = Column(String, nullable=False, index=True)
+    book_id = Column(String, nullable=False, index=True)
+    book_name = Column(String, nullable=False)
+    chapter_number = Column(Integer, nullable=False, index=True)
+    source_hash = Column(String, nullable=False, index=True)
+    fetched_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint("translation", "book_id", "chapter_number", name="uq_bible_chapter_translation_book_chapter"),
+    )
+
+
+class BibleVerse(TimestampMixin, Base):
+    __tablename__ = "bible_verses"
+
+    id = Column(String, primary_key=True, index=True)
+    bible_chapter_id = Column(String, ForeignKey("bible_chapter_cache.id", ondelete="CASCADE"), nullable=False, index=True)
+    verse_number = Column(Integer, nullable=False, index=True)
+    text = Column(Text, nullable=False)
+
+    chapter = relationship("BibleChapterCache", backref=backref("verses", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        UniqueConstraint("bible_chapter_id", "verse_number", name="uq_bible_verse_chapter_verse"),
+    )
+
+
+class QuestBibleBookSelection(TimestampMixin, Base):
+    """Book-level user intent and indexing state for a Bible Quest Source."""
+    __tablename__ = "quest_bible_book_selections"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(String, ForeignKey("quest_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    translation = Column(String, nullable=False, index=True)
+    testament = Column(String, nullable=False, index=True)
+    book_id = Column(String, nullable=False, index=True)
+    book_name = Column(String, nullable=False)
+    canonical_order = Column(Integer, nullable=False, index=True)
+    state = Column(String, nullable=False, default="queued", index=True)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    total_chapters = Column(Integer, nullable=False, default=0)
+    completed_chapters = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    indexed_at = Column(DateTime, nullable=True)
+
+    source = relationship("QuestSource", backref=backref("bible_book_selections", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "translation", "book_id", name="uq_quest_bible_selection_source_translation_book"),
     )
 
 
@@ -2130,6 +2189,20 @@ def _migrate_add_venture_synthesis_columns():
         logging.getLogger(__name__).warning(f"venture synthesis-column migration failed: {e}")
 
 
+def _migrate_add_bible_quest_sources():
+    """Add Venture Bible Quest source cache, selections, and durable job scope."""
+    if "sqlite" not in DATABASE_URL:
+        return
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            cols = {row[1] for row in conn.execute(text("PRAGMA table_info(quest_index_jobs)")).fetchall()}
+            if "scope_json" not in cols:
+                conn.execute(text("ALTER TABLE quest_index_jobs ADD COLUMN scope_json TEXT NOT NULL DEFAULT '{}'"))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"bible quest-source migration failed: {e}")
+
+
 
 
 
@@ -2357,6 +2430,7 @@ def init_db():
     _migrate_add_assistant_columns()
     _migrate_add_quest_source_index_columns()
     _migrate_add_venture_synthesis_columns()
+    _migrate_add_bible_quest_sources()
     _migrate_add_email_smtp_security()
     _migrate_seed_email_account()
     _migrate_add_calendar_metadata()

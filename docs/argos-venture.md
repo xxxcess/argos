@@ -104,6 +104,21 @@ Dynamic sources expand over time and require incremental polling to maintain cur
 
 For the first Venture release, Email is the only dynamic source. An Email Quest Source records a Captain-owned integration reference plus a narrow mailbox, folder, label, sender, subject, or search-query scope. It uses a checkpoint or cursor for incremental updates.
 
+### Bible Quest Sources
+
+Venture supports static Bible Quest Sources through two templates:
+
+- `Old Test Bible` with `datasource_key=old-test-bible`, `testament=old`, and `default_translation=web`
+- `New Test Bible` with `datasource_key=new-test-bible`, `testament=new`, and `default_translation=web`
+
+The user-facing scope is book-only: Testament -> Book. The UI must not expose chapter or verse selectors. Selecting a book queues durable book imports; the indexer expands that book internally chapter by chapter and stores verses for exact lookup and citations.
+
+Bible sources use append-only source versioning. Adding a book preserves previously indexed books. Re-indexing a book replaces only that book's current artifacts, chunks, and vectors; failed or paused books do not invalidate completed books.
+
+Select all books is available in the UI for each testament, but full-testament provider imports are gated by `BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT`. When it is false, individual book imports remain available and Select all explains that an administrator must enable full-testament imports or configure a permitted bulk corpus source. Provider calls are serialized through a process-wide throttle controlled by `BIBLE_API_MIN_REQUEST_INTERVAL_SECONDS`, and successful chapters are cached in the local Bible chapter/verse tables.
+
+Bible citations use `Book chapter:start-end (translation)` from retrieved evidence. Quest chat policy forbids silently filling unindexed passages from model memory; exact references resolve only from indexed Quest-local Bible evidence.
+
 A Quest must never default to scanning a Captain's entire mailbox. Email credentials are never stored in a Quest record.
 
 ### Source access modes
