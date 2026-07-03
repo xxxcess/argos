@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 
-from src.venture_synthesis import (
-    _extract_artifact_key_point_candidates,
-    render_artifact_markdown,
-    validate_synthesis_json,
+import src.venture_synthesis as synthesis
+from src.venture_artifact_quality_v2 import (
+    install_artifact_quality_contract,
+    is_displayable_memory,
 )
+
+install_artifact_quality_contract()
 
 
 def _labels():
@@ -79,21 +81,21 @@ def _payload():
         "key_points": [
             {
                 "title": "Durable completion controls queue progression",
-                "content": "Later selections can remain queued when scheduling checks active work before the completed state is flushed.",
+                "revelation": "Later selections can remain queued when scheduling checks active work before the completed state is durably flushed.",
                 "category": "finding",
                 "confidence": "high",
                 "citations": ["C3", "S1"],
             },
             {
                 "title": "Staged processing remains the intended model",
-                "content": "The conversation narrows the fix to the handoff order without replacing serialized background processing.",
+                "revelation": "The repair can preserve serialized processing while changing the handoff order that releases the next selected item.",
                 "category": "decision",
                 "confidence": "medium",
                 "citations": ["C1", "C2"],
             },
             {
                 "title": "Queue regression coverage is required",
-                "content": "A regression test should prove that later selected items advance after the prior item reaches durable completion.",
+                "revelation": "A regression test should prove that later selected items advance only after the prior item reaches durable completion.",
                 "category": "next_step",
                 "confidence": "medium",
                 "citations": ["C1", "S1"],
@@ -104,38 +106,50 @@ def _payload():
     }
 
 
-def test_validation_limits_conversation_path_and_requires_cited_key_points():
-    result = validate_synthesis_json(_payload(), _labels())
+def test_validation_accepts_cited_revelations_and_chronological_path():
+    result = synthesis.validate_synthesis_json(_payload(), _labels())
 
     assert result["should_create"] is True
     assert len(result["conversation_observations"]) == 3
     assert len(result["key_points"]) == 3
-    assert all(point["citations"] for point in result["key_points"])
+    assert all(point["revelation"] for point in result["key_points"])
 
 
-def test_generic_artifact_title_is_replaced_with_first_key_point_title():
+def test_numeric_or_generic_artifact_title_is_replaced_with_a_key_point_title():
     payload = _payload()
-    payload["title"] = "Insights"
+    payload["title"] = "1."
 
-    result = validate_synthesis_json(payload, _labels())
+    result = synthesis.validate_synthesis_json(payload, _labels())
 
     assert result["title"] == "Durable completion controls queue progression"
 
 
-def test_memory_candidates_are_extracted_only_from_key_points_section():
-    synthesis = validate_synthesis_json(_payload(), _labels())
-    synthesis["quest_title"] = "Queue reliability"
-    synthesis["current_bearing"] = "Stabilize staged processing"
-    document = render_artifact_markdown(synthesis, _labels())
+def test_memory_is_extracted_only_from_explicit_revelation_lines():
+    result = synthesis.validate_synthesis_json(_payload(), _labels())
+    result["quest_title"] = "Queue reliability"
+    result["current_bearing"] = "Stabilize staged processing"
+    document = synthesis.render_artifact_markdown(result, _labels())
     document += "\n## Why this matters\nThis extra evidence-backed paragraph must not become a memory. [C1]\n"
     proposal = SimpleNamespace(document=SimpleNamespace(current_content=document))
 
-    candidates = _extract_artifact_key_point_candidates(proposal)
+    candidates = synthesis._extract_artifact_key_point_candidates(proposal)
 
     assert len(candidates) == 3
-    assert [candidate["title"] for candidate in candidates] == [
-        "Durable completion controls queue progression",
-        "Staged processing remains the intended model",
-        "Queue regression coverage is required",
-    ]
+    assert candidates[0]["content"] == _payload()["key_points"][0]["revelation"]
     assert candidates[0]["citations"] == ["C3", "S1"]
+
+
+def test_raw_numbered_evidence_cannot_become_a_revelation_or_visible_memory():
+    payload = _payload()
+    payload["key_points"][0]["revelation"] = "1. He entered the city. 2. They brought him a man lying on a bed. 3. Jesus said their sins were forgiven."
+
+    result = synthesis.validate_synthesis_json(payload, _labels())
+
+    assert result["should_create"] is False
+    legacy_dump = SimpleNamespace(
+        artifact_id="artifact-1",
+        created_by="argo",
+        title="1",
+        content="1. He entered the city. 2. They brought him a man lying on a bed. 3. Jesus said their sins were forgiven.",
+    )
+    assert is_displayable_memory(legacy_dump) is False
