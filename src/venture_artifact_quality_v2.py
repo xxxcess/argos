@@ -367,30 +367,4 @@ extracted directly from revelations, so every revelation must stand alone withou
 """
 
     def no_raw_evidence_fallback(_pack: dict[str, Any]) -> dict[str, Any]:
-        return {"should_create": False, "reason": "synthesis_model_unavailable"}
-
-    original_process = synthesis._process_artifact_memory_synthesis
-
-    def process_artifact_memory_synthesis(db, job):
-        proposal = db.query(synthesis.QuestArtifactProposal).filter(
-            synthesis.QuestArtifactProposal.id == job.artifact_proposal_id,
-            synthesis.QuestArtifactProposal.session_id == job.quest_id,
-        ).first()
-        if proposal:
-            rows = db.query(synthesis.QuestMemoryEntry).filter(
-                synthesis.QuestMemoryEntry.session_id == job.quest_id,
-                synthesis.QuestMemoryEntry.artifact_id == proposal.id,
-                synthesis.QuestMemoryEntry.state != "retired",
-            ).all()
-            for row in rows:
-                if not is_displayable_memory(row):
-                    row.state = "retired"
-                    row.updated_at = synthesis.utcnow_naive()
-        return original_process(db, job)
-
-    synthesis._fallback_synthesis = no_raw_evidence_fallback
-    synthesis.validate_synthesis_json = validate_synthesis_json
-    synthesis.render_artifact_markdown = render_artifact_markdown
-    synthesis._extract_artifact_key_point_candidates = extract_artifact_key_point_candidates
-    synthesis._process_artifact_memory_synthesis = process_artifact_memory_synthesis
-    synthesis._artifact_quality_contract_installed = True
+        return {"should_create": false, 
