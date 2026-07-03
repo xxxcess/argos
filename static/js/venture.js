@@ -1,724 +1,103 @@
-// Argos Venture UI shell and capability gates.
+// Targeted live-status shell for Argos Venture.
+//
+// The legacy UI remains responsible for the initial Quest panel and all action
+// flows. This shell suppresses its full-panel timer and refreshes only the
+// Quest Sources and Argo Status cards while asynchronous work is active.
+
+const nativeSetInterval = window.setInterval.bind(window);
+const LEGACY_RAIL_POLL_DELAY = 4000;
+const IDLE_INTERVAL = 2_147_000_000;
+
+function isLegacyFullRailPoll(callback, delay) {
+  return Number(delay) === LEGACY_RAIL_POLL_DELAY
+    && /\brenderRightRail\b/.test(Function.prototype.toString.call(callback));
+}
+
+// The legacy module closes over its polling timer. Install the narrow timer
+// guard before it evaluates, then use a separate, DOM-targeted live updater.
+window.setInterval = function ventureScopedSetInterval(callback, delay, ...args) {
+  if (isLegacyFullRailPoll(callback, delay)) {
+    return nativeSetInterval(() => {}, IDLE_INTERVAL);
+  }
+  return nativeSetInterval(callback, delay, ...args);
+};
+
+const legacyModule = await import('./venture_legacy.js');
+const legacy = legacyModule.default;
 
 const API_BASE = window.API_BASE || '';
-let caps = null;
-let currentQuestId = null;
-let currentQuestCapabilities = null;
-const questSessionIds = new Set();
-const questHistorySignatures = new Map();
-let railRenderEpoch = 0;
-let railPollTimer = null;
-let railPollQuestId = null;
-const QUEST_RAIL_HIDDEN_KEY = 'argos-venture:quest-rail-hidden';
-
-const captainOnlySelectors = [
-  '#workspace-new-tab', '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
-  '#overflow-rag-btn', '#overflow-workspace-btn', '#overflow-preset-btn',
-  '#web-toggle-btn', '#bash-toggle-btn', '#model-picker-btn', '#model-picker-add-models-btn',
-  '#mode-agent-btn', '#research-toggle-btn', '#tool-research-btn', '#tool-memory-btn',
-  '#rail-calendar', '#rail-compare', '#rail-cookbook', '#rail-research', '#rail-email',
-  '#incognito-btn', '#custom-preset-modal', '#workspace-indicator-btn',
-  'input[type="file"]', '.attachment-strip', '#attach-strip',
-];
-
-const shipmateSidebarBlockedSelectors = [
-  '#rail-delete-session', '#rail-documents', '#rail-calendar', '#rail-compare', '#rail-cookbook',
-  '#rail-research', '#rail-email', '#rail-gallery', '#rail-archive', '#rail-memory',
-  '#rail-notes', '#rail-tasks', '#rail-theme', '#rail-settings',
-  '#email-section', '#models-section', '#tools-section',
-  '#chats-library-btn', '#session-bulk-bar', '#session-actions-dropdown',
-  '#session-sort-btn', '#session-sort-dropdown', '#session-select-from-dropdown',
-  '#session-bulk-archive', '#session-bulk-delete', '#session-bulk-cancel',
-  '#tool-memory-btn', '#tool-calendar-btn', '#tool-compare-btn', '#tool-cookbook-btn',
-  '#tool-research-btn', '#tool-gallery-btn', '#tool-library-btn', '#tool-notes-btn',
-  '#tool-tasks-btn', '#tool-theme-btn', '#library-new-doc-btn',
-  '#email-compose-btn', '#email-section-title',
-  '#model-sort-btn', '#model-sort-dropdown', '#model-select', '#btn-model-chat',
-];
-
-function h(tag, attrs = {}, children = []) {
-  const el = document.createElement(tag);
-  Object.entries(attrs || {}).forEach(([k, v]) => {
-    if (k === 'class') el.className = v;
-    else if (k === 'text') el.textContent = v;
-    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
-    else el.setAttribute(k, v);
-  });
-  (Array.isArray(children) ? children : [children]).forEach(c => {
-    if (c == null) return;
-    el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
-  });
-  return el;
-}
-
-async function loadCapabilities() {
-  try {
-    const res = await fetch(`${API_BASE}/api/venture/capabilities`, { credentials: 'same-origin' });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (_) {
-    return null;
-  }
-}
-
-function publishQuestRegistry() {
-  window.argosVentureIsQuestSession = sessionId => questSessionIds.has(String(sessionId || ''));
-  document.dispatchEvent(new CustomEvent('argos-venture:quest-registry-updated'));
-}
-
-async function refreshQuestRegistry() {
-  if (!caps?.is_venture) return;
-  const data = await getJson('/api/quests');
-  questSessionIds.clear();
-  (data?.quests || []).forEach(quest => {
-    if (quest?.id) questSessionIds.add(String(quest.id));
-  });
-  publishQuestRegistry();
-}
-
-function installStyles() {
-  if (document.getElementById('venture-style')) return;
-  const style = document.createElement('style');
-  style.id = 'venture-style';
-  style.textContent = `
-    body.argos-venture #current-meta::before { content: "Voyage Log · "; opacity: .75; }
-    .venture-right-rail { --venture-rail-width: min(360px, 34vw); position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: var(--venture-rail-width); min-width: 280px; max-width: calc(100vw - var(--icon-rail-w, 0px)); z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow-x:hidden; overflow-y:auto; padding: 12px; box-sizing: border-box; overflow-wrap:anywhere; }
-    .venture-rail-show { position: fixed; left: calc(var(--icon-rail-w, 0px) + 10px); top: calc(var(--workspace-shell-h, 0px) + 10px); z-index: 21; border:1px solid var(--border); background:var(--panel, #151515); color:var(--fg); border-radius:6px; padding:6px 9px; font:inherit; font-size:12px; cursor:pointer; box-shadow:0 8px 24px rgba(0,0,0,.22); }
-    .venture-rail-header { position: sticky; top: 0; z-index: 2; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 0 8px; background:var(--panel, #151515); }
-    .venture-rail-title { font-size:12px; font-weight:700; opacity:.75; min-width:0; overflow-wrap:anywhere; }
-    .venture-rail-actions { display:flex; align-items:center; gap:6px; }
-    .venture-rail-toggle { border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:12px; line-height:1; padding:6px 8px; }
-    body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: var(--venture-chat-offset, min(360px, 34vw)); }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-bar { display:none!important; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-composer-slot { display:none!important; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-dashboard-header { display:none!important; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-active-panel { display:none!important; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-recent-activity-section { display:none!important; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-operations-drawer,
-    body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-palette { display:none!important; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title { font-size:0; }
-    body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-recent-title::after { content:"Recent Chats and Quests"; font-size:16px; }
-    body.argos-venture.venture-quest-active #mode-chat-btn,
-    body.argos-venture.venture-quest-active #mode-agent-btn,
-    body.argos-venture.venture-quest-active [data-mode-tool],
-    body.argos-venture.venture-quest-active #bash-toggle-btn,
-    body.argos-venture.venture-quest-active #overflow-workspace-btn,
-    body.argos-venture.venture-quest-active #overflow-preset-btn,
-    body.argos-venture.venture-quest-active #model-picker-btn,
-    body.argos-venture.venture-quest-active #workspace-indicator-btn,
-    body.argos-venture.venture-quest-active #overflow-attach-btn { display:none!important; }
-    body.argos-venture.venture-quest-active.venture-shipmate #web-toggle-btn,
-    body.argos-venture.venture-quest-active.venture-shipmate #research-toggle-btn,
-    body.argos-venture.venture-quest-active.venture-shipmate #overflow-rag-btn,
-    body.argos-venture.venture-quest-active.venture-shipmate #overflow-doc-btn { display:none!important; }
-    body.argos-venture.venture-quest-no-voice #overflow-tts-btn,
-    body.argos-venture.venture-quest-no-voice #voice-recorder-btn,
-    body.argos-venture.venture-quest-no-voice .tts-mode-option,
-    body.argos-venture.venture-quest-no-stt #voice-recorder-btn { display:none!important; }
-    body.argos-venture.venture-quest-active.mission-dashboard-visible .mission-control { display:none!important; }
-    .venture-mode-indicator { display:inline-flex; align-items:center; height:24px; padding:0 8px; border:1px solid var(--border); border-radius:6px; font-size:12px; font-weight:700; opacity:.82; pointer-events:none; }
-    .venture-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; background: color-mix(in srgb, var(--panel) 88%, var(--fg) 4%); min-width:0; max-width:100%; box-sizing:border-box; overflow:hidden; overflow-wrap:anywhere; }
-    .venture-card h3 { font-size: 13px; margin: 0 0 8px; letter-spacing: 0; overflow-wrap:anywhere; }
-    .venture-card p, .venture-card div, .venture-card span { min-width:0; overflow-wrap:anywhere; }
-    .venture-muted { opacity: .65; font-size: 12px; overflow-wrap:anywhere; }
-    .venture-list { display:flex; flex-direction:column; gap:6px; min-width:0; max-width:100%; }
-    .venture-row { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; font-size:12px; min-width:0; max-width:100%; flex-wrap:wrap; }
-    .venture-row > span:first-child, .venture-row > div:first-child { flex:1 1 150px; min-width:0; }
-    .venture-row > .venture-muted { flex:0 1 120px; text-align:right; }
-    .venture-row > .venture-btn { flex:0 0 auto; }
-    .venture-btn { border:1px solid var(--border); background:var(--bg); color:var(--fg); border-radius:6px; padding:5px 8px; cursor:pointer; font:inherit; font-size:12px; max-width:100%; white-space:normal; text-align:center; overflow-wrap:anywhere; }
-    .venture-btn.primary { background:var(--fg); color:var(--bg); }
-    .venture-modal-backdrop { position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.45); }
-    .venture-modal { position:fixed; inset:7vh auto auto 50%; transform:translateX(-50%); width:min(760px, 94vw); max-height:86vh; overflow:auto; z-index:10000; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:16px; box-shadow:0 18px 60px rgba(0,0,0,.35); }
-    .venture-modal h2 { margin:0 0 12px; font-size:18px; letter-spacing:0; }
-    .venture-modal label { display:block; font-size:12px; margin:10px 0 4px; opacity:.8; }
-    .venture-modal input, .venture-modal textarea, .venture-modal select { width:100%; box-sizing:border-box; border:1px solid var(--border); background:var(--panel); color:var(--fg); border-radius:6px; padding:8px; font:inherit; }
-    .venture-modal textarea { min-height:72px; resize:vertical; }
-    .venture-modal input[type="radio"], .venture-modal input[type="checkbox"] { width:auto; }
-    .venture-modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px; }
-    .venture-memory-list { display:grid; gap:8px; margin-top:12px; max-height:58vh; overflow:auto; min-width:0; }
-    .venture-memory-entry { border:1px solid var(--border); border-radius:8px; padding:10px; background:color-mix(in srgb, var(--panel) 86%, var(--fg) 3%); min-width:0; overflow-wrap:anywhere; }
-    .venture-memory-entry-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:6px; flex-wrap:wrap; min-width:0; }
-    .venture-memory-title { font-weight:700; font-size:13px; flex:1 1 180px; min-width:0; overflow-wrap:anywhere; }
-    .venture-memory-meta { font-size:11px; opacity:.62; min-width:0; overflow-wrap:anywhere; }
-    .venture-memory-content { font-size:12px; line-height:1.45; white-space:pre-wrap; overflow-wrap:anywhere; }
-    .venture-choice-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; margin:10px 0 14px; }
-    .venture-choice { border:1px solid var(--border); border-radius:8px; padding:10px; background:var(--panel); cursor:pointer; display:grid; gap:4px; }
-    .venture-choice input { position:absolute; opacity:0; pointer-events:none; }
-    .venture-choice:has(input:checked) { outline:2px solid color-mix(in srgb, var(--fg) 38%, transparent); }
-    .venture-choice strong { font-size:13px; letter-spacing:0; }
-    .venture-form-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
-    .venture-source-panel { border:1px solid var(--border); border-radius:8px; padding:10px; margin-top:10px; background:color-mix(in srgb, var(--panel) 86%, var(--fg) 3%); }
-    .venture-check-list { display:grid; gap:6px; max-height:160px; overflow:auto; border:1px solid var(--border); border-radius:8px; padding:8px; background:var(--panel); }
-    .venture-check-row { display:flex!important; align-items:center; gap:8px; margin:0!important; opacity:1!important; }
-    .venture-file-list { margin-top:6px; display:grid; gap:4px; }
-    .venture-full-span { grid-column:1 / -1; }
-    .voyage-timeline-event, .voyage-activity-card { margin:10px 0; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:color-mix(in srgb, var(--panel) 92%, var(--fg) 3%); font-size:12px; line-height:1.45; }
-    .voyage-timeline-event { border-left:3px solid color-mix(in srgb, var(--fg) 40%, transparent); }
-    .voyage-activity-card { border-left:3px solid color-mix(in srgb, var(--accent, var(--fg)) 55%, transparent); }
-    .voyage-card-title { font-weight:700; margin-bottom:3px; }
-    .voyage-card-meta { opacity:.68; white-space:pre-wrap; }
-    @media (max-width: 900px) { .venture-right-rail { width:min(86vw, 360px); } }
-    @media (max-width: 900px) { body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: min(86vw, 360px); } }
-    @media (max-width: 720px) { .venture-choice-grid, .venture-form-grid { grid-template-columns:1fr; } }
-    @media (max-width: 720px) { body.argos-venture.venture-quest-rail-visible #chat-container { margin-left:0; } }
-  `;
-  document.head.appendChild(style);
-}
-
-function isShipmate() {
-  return caps && caps.role === 'shipmate';
-}
-
-function applyTerminology() {
-  const meta = document.getElementById('current-meta');
-  if (meta && /Odysseus Chat|Chat/.test(meta.textContent || '')) meta.textContent = 'Quest';
-  const search = document.getElementById('search-input');
-  if (search) search.placeholder = 'Search Quests and Artifacts...';
-}
-
-function hardDisableShipmateControls() {
-  if (!isShipmate()) return;
-  [...captainOnlySelectors, ...shipmateSidebarBlockedSelectors].forEach(sel => {
-    document.querySelectorAll(sel).forEach(el => {
-      el.setAttribute('hidden', '');
-      el.setAttribute('aria-hidden', 'true');
-      el.style.display = 'none';
-      if ('disabled' in el) el.disabled = true;
-    });
-  });
-  document.querySelectorAll('.settings-nav-item').forEach(btn => {
-    const tab = btn.getAttribute('data-settings-tab');
-    if (tab && tab !== 'account') {
-      btn.setAttribute('hidden', '');
-      btn.style.display = 'none';
-    }
-  });
-  document.querySelectorAll('#rail-search-btn, #sidebar-search-btn, #sessions-section, #session-list').forEach(el => {
-    el.removeAttribute('hidden');
-    el.removeAttribute('aria-hidden');
-    if (el.style.display === 'none') el.style.display = '';
-    if ('disabled' in el) el.disabled = false;
-  });
-  const label = document.getElementById('chats-section-label');
-  if (label) label.textContent = 'Chats and Quests';
-}
-
-function setRailLayoutState(visible, collapsed = false) {
-  document.body.classList.toggle('venture-quest-rail-visible', !!visible && !collapsed);
-  document.body.classList.toggle('venture-quest-rail-collapsed', false);
-  document.documentElement.style.setProperty('--venture-chat-offset', visible && !collapsed ? 'min(360px, 34vw)' : '0px');
-}
-
-function isQuestRailHidden() {
-  try { return localStorage.getItem(QUEST_RAIL_HIDDEN_KEY) === '1'; } catch (_) { return false; }
-}
-
-function setQuestRailHidden(hidden) {
-  try { localStorage.setItem(QUEST_RAIL_HIDDEN_KEY, hidden ? '1' : '0'); } catch (_) {}
-}
-
-function hideVentureNewChatShortcuts() {
-  if (!caps?.is_venture) return;
-  document.querySelectorAll('#rail-new-session, #new-session-btn, #chat-new-btn').forEach(el => {
-    el.setAttribute('hidden', '');
-    el.setAttribute('aria-hidden', 'true');
-    el.style.display = 'none';
-    if ('disabled' in el) el.disabled = true;
-  });
-  const brand = document.getElementById('sidebar-brand-btn');
-  if (brand) {
-    brand.removeAttribute('title');
-    brand.style.cursor = 'default';
-  }
-  const workspacePlus = document.getElementById('workspace-new-tab');
-  if (workspacePlus && !isShipmate()) {
-    workspacePlus.removeAttribute('hidden');
-    workspacePlus.removeAttribute('aria-hidden');
-    workspacePlus.style.display = '';
-    workspacePlus.disabled = false;
-    workspacePlus.title = 'Create session';
-    workspacePlus.setAttribute('aria-label', 'Create session');
-  }
-}
-
-function installShipmateCaptureGuards() {
-  document.addEventListener('click', e => {
-    if (!isShipmate()) return;
-    const blocked = e.target.closest([...captainOnlySelectors, ...shipmateSidebarBlockedSelectors].join(','));
-    if (blocked) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    }
-  }, true);
-  document.addEventListener('drop', e => {
-    if (isShipmate()) { e.preventDefault(); e.stopImmediatePropagation(); }
-  }, true);
-  document.addEventListener('paste', e => {
-    if (!isShipmate()) return;
-    const items = Array.from(e.clipboardData?.items || []);
-    if (items.some(i => i.kind === 'file')) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    }
-  }, true);
-  document.addEventListener('submit', e => {
-    const form = e.target;
-    if (!form || form.id !== 'chat-form') return;
-    const sid = selectedQuestId();
-    if (!isShipmate() && (!sid || !questSessionIds.has(String(sid)))) return;
-    ['attachments', 'use_web', 'use_research', 'allow_bash', 'allow_web_search', 'use_rag', 'workspace', 'preset_id', 'mode', 'model', 'endpoint_url'].forEach(name => {
-      form.querySelectorAll(`[name="${name}"]`).forEach(el => { el.disabled = true; });
-    });
-  }, true);
-}
-
-async function loadQuest(id) {
-  if (!id || !caps?.is_venture) return;
-  currentQuestId = id;
-  await loadQuestCapabilities(id);
-  await renderRightRail();
-}
-
-async function loadQuestCapabilities(id) {
-  currentQuestCapabilities = await getJson(`/api/quests/${encodeURIComponent(id)}/capabilities`);
-  applyQuestCapabilities();
-  return currentQuestCapabilities;
-}
-
-function applyQuestCapabilities() {
-  const qc = currentQuestCapabilities;
-  document.body.classList.toggle('venture-quest-active', !!qc);
-  document.body.classList.toggle('venture-quest-no-voice', !!qc && !qc.voice?.show_voice_mode_control);
-  document.body.classList.toggle('venture-quest-no-stt', !!qc && !qc.voice?.stt_ready);
-  document.body.classList.toggle('venture-quest-tts-ready', !!qc && !!qc.voice?.tts_ready);
-  let indicator = document.getElementById('venture-mode-indicator');
-  const host = document.getElementById('mode-toggle') || document.getElementById('chat-mode-controls') || document.getElementById('current-meta')?.parentElement;
-  if (!qc || !host) {
-    indicator?.remove();
-    return;
-  }
-  if (!indicator) {
-    indicator = h('span', { id: 'venture-mode-indicator', class: 'venture-mode-indicator' });
-    host.appendChild(indicator);
-  }
-  indicator.textContent = qc.interaction_mode === 'agent' ? 'Agent' : 'Chat';
-  indicator.title = 'Fixed by Quest role';
-}
-
-async function enforceQuestSessionView(sessionId) {
-  if (!caps?.is_venture || !sessionId) return false;
-  const quest = await getJson(`/api/quests/${encodeURIComponent(sessionId)}`);
-  if (!quest?.quest) return false;
-  if (String(window.sessionModule?.getCurrentSessionId?.() || '') !== String(sessionId)) return false;
-  window.sessionControlModule?.viewFullConversation?.(sessionId);
-  await renderRightRail();
-  return true;
-}
-
-function forceQuestFullConversation(sessionId) {
-  if (!caps?.is_venture || !sessionId || !questSessionIds.has(String(sessionId))) return;
-  window.sessionControlModule?.viewFullConversation?.(sessionId);
-  const history = document.getElementById('chat-history');
-  if (history) history.hidden = false;
-}
+let liveTimer = null;
+let liveQuestId = null;
+let liveRefreshInFlight = false;
+let observerInstalled = false;
+let refreshQueued = false;
 
 function selectedQuestId() {
   if (document.body.classList.contains('workspace-home-active')) return '';
-  const activeSessionId = window.sessionModule?.getCurrentSessionId?.();
-  return activeSessionId ? String(activeSessionId) : '';
+  const sessionId = window.sessionModule?.getCurrentSessionId?.();
+  return sessionId ? String(sessionId) : '';
 }
 
-async function getJson(url) {
-  const res = await fetch(`${API_BASE}${url}`, { credentials: 'same-origin' });
-  if (!res.ok) return null;
-  return await res.json().catch(() => null);
+function getJson(url) {
+  return fetch(`${API_BASE}${url}`, { credentials: 'same-origin' })
+    .then(response => response.ok ? response.json() : null)
+    .catch(() => null);
 }
 
-function questHistorySignature(history) {
-  if (!Array.isArray(history)) return null;
-  return `count:${history.length}|` + history.map(msg => {
-    const content = typeof msg?.content === 'string' ? msg.content : JSON.stringify(msg?.content || '');
-    return `${msg?.role || ''}:${content.length}:${content.slice(0, 80)}`;
-  }).join('|');
+function activeSourceWork(sources) {
+  return (sources || []).some(source => source.index_status?.has_active_job);
 }
 
-async function syncActiveQuestHistory() {
-  if (!caps?.is_venture || document.hidden) return;
-  const qid = selectedQuestId();
-  if (!qid || !questSessionIds.has(String(qid))) return;
-  if (window.chatModule?.hasActiveStream?.(qid)) return;
-  const data = await getJson(`/api/history/${encodeURIComponent(qid)}`);
-  const signature = questHistorySignature(data?.history || []);
-  if (signature == null) return;
-  const previous = questHistorySignatures.get(qid);
-  questHistorySignatures.set(qid, signature);
-  if (!previous || previous === signature) return;
-  if (String(window.sessionModule?.getCurrentSessionId?.() || '') !== String(qid)) return;
-  await window.sessionModule?.selectSession?.(qid, { keepSidebar: true });
+function activeArgoWork(status) {
+  return (status?.jobs || []).some(job => ['queued', 'running'].includes(job.status));
 }
 
-function stopQuestRailPolling() {
-  if (railPollTimer) {
-    clearInterval(railPollTimer);
-    railPollTimer = null;
-  }
-  railPollQuestId = null;
+function stopLivePolling() {
+  if (liveTimer) window.clearInterval(liveTimer);
+  liveTimer = null;
+  liveQuestId = null;
 }
 
-function questRailHasActiveWork(sources, synthesisJobs) {
-  return (sources || []).some(s => s.index_status?.has_active_job)
-    || (synthesisJobs || []).some(j => ['queued', 'running'].includes(j.status));
-}
-
-function syncQuestRailPolling(qid, sources, synthesisJobs) {
-  const shouldPoll = !!qid && questRailHasActiveWork(sources, synthesisJobs);
+function syncLivePolling(questId, sources, status) {
+  const shouldPoll = !!questId && (activeSourceWork(sources) || activeArgoWork(status));
   if (!shouldPoll) {
-    stopQuestRailPolling();
+    stopLivePolling();
     return;
   }
-  if (railPollTimer && railPollQuestId === qid) return;
-  stopQuestRailPolling();
-  railPollQuestId = qid;
-  railPollTimer = setInterval(() => {
-    if (document.hidden) return;
-    if (selectedQuestId() !== railPollQuestId) {
-      stopQuestRailPolling();
+  if (liveTimer && liveQuestId === questId) return;
+  stopLivePolling();
+  liveQuestId = questId;
+  liveTimer = nativeSetInterval(() => {
+    if (document.hidden || selectedQuestId() !== liveQuestId) {
+      if (selectedQuestId() !== liveQuestId) stopLivePolling();
       return;
     }
-    renderRightRail().catch(() => {});
-  }, 4000);
+    refreshLivePanels().catch(() => {});
+  }, LEGACY_RAIL_POLL_DELAY);
 }
 
-function teardownQuestRail() {
-  railRenderEpoch++;
-  currentQuestCapabilities = null;
-  applyQuestCapabilities();
-  stopQuestRailPolling();
-  document.getElementById('venture-right-rail')?.remove();
-  document.getElementById('venture-rail-show')?.remove();
-  setRailLayoutState(false);
-}
-
-function ensureRailShowButton(qid) {
-  let btn = document.getElementById('venture-rail-show');
-  if (!qid) {
-    btn?.remove();
-    return null;
+function sourceStatusText(source) {
+  const index = source.index_status || {};
+  const state = index.index_state || source.index_state || 'not_indexed';
+  const chunks = index.chunk_count || 0;
+  const job = index.current_job || {};
+  const safeError = job.safe_error_message || index.warning || '';
+  const errorCode = job.error_code ? ` (${job.error_code})` : '';
+  if (state === 'running' || state === 'queued' || state === 'indexing') {
+    const total = job.progress_total || 0;
+    const done = job.progress_completed || 0;
+    const percentage = total ? Math.round((done / total) * 100) : 0;
+    if (job.error_code && state === 'queued') return `◌ Retrying · ${safeError || 'Waiting to retry'}${errorCode}`;
+    return total ? `◌ Indexing · ${percentage}% · ${done} / ${total}` : '◌ Indexing';
   }
-  if (!btn) {
-    btn = h('button', {
-      id: 'venture-rail-show',
-      class: 'venture-rail-show',
-      type: 'button',
-      text: 'Show Quest panel',
-      onclick: async () => {
-        setQuestRailHidden(false);
-        await renderRightRail();
-      },
-    });
-    document.body.appendChild(btn);
-  }
-  return btn;
-}
-
-function ensureSingleQuestRail() {
-  const rails = Array.from(document.querySelectorAll('#venture-right-rail'));
-  rails.slice(1).forEach(node => node.remove());
-  let rail = rails[0];
-  if (!rail) {
-    rail = h('aside', { id: 'venture-right-rail', class: 'venture-right-rail', 'aria-label': 'Quest context' });
-    document.body.appendChild(rail);
-  }
-  return rail;
-}
-
-async function renderRightRail() {
-  if (!caps?.is_venture) return;
-  installStyles();
-  const epoch = ++railRenderEpoch;
-  const qid = selectedQuestId();
-  if (!qid || !questSessionIds.has(String(qid))) {
-    teardownQuestRail();
-    return;
-  }
-  if (isQuestRailHidden()) {
-    stopQuestRailPolling();
-    document.getElementById('venture-right-rail')?.remove();
-    ensureRailShowButton(qid);
-    setRailLayoutState(false);
-    return;
-  }
-  document.getElementById('venture-rail-show')?.remove();
-  const quest = await getJson(`/api/quests/${encodeURIComponent(qid)}`);
-  if (!quest?.quest) {
-    if (epoch === railRenderEpoch) teardownQuestRail();
-    return;
-  }
-  if (!currentQuestCapabilities || currentQuestId !== qid) await loadQuestCapabilities(qid);
-  const settled = await Promise.allSettled([
-    getJson(`/api/quests/${encodeURIComponent(qid)}/bearing`),
-    getJson(`/api/quests/${encodeURIComponent(qid)}/roster`),
-    getJson(`/api/quests/${encodeURIComponent(qid)}/sources`),
-    getJson(`/api/quests/${encodeURIComponent(qid)}/artifacts`),
-    caps.can_view_quest_memory ? getJson(`/api/quests/${encodeURIComponent(qid)}/memory`) : Promise.resolve(null),
-    caps.can_review_artifacts ? getJson(`/api/quests/${encodeURIComponent(qid)}/argo-synthesis/jobs`) : Promise.resolve(null),
-  ]);
-  if (epoch !== railRenderEpoch) return;
-  const [bearing, roster, sources, artifacts, memory, synthesisJobs] = settled.map(r => r.status === 'fulfilled' ? r.value : null);
-  const sourceRows = sources?.sources || [];
-  const jobs = synthesisJobs?.jobs || [];
-  syncQuestRailPolling(qid, sourceRows, jobs);
-  const rail = ensureSingleQuestRail();
-  const hide = h('button', {
-    class: 'venture-rail-toggle',
-    type: 'button',
-    title: 'Hide panel',
-    'aria-label': 'Hide Quest panel',
-    text: 'Hide panel',
-    onclick: async () => {
-      setQuestRailHidden(true);
-      await renderRightRail();
-    },
-  });
-  const children = [
-    h('div', { class: 'venture-rail-header' }, [
-      h('div', { class: 'venture-rail-title', text: quest.quest?.title || 'Quest Context' }),
-      h('div', { class: 'venture-rail-actions' }, [hide]),
-    ]),
-    currentBearingCard(bearing?.bearing || {}),
-    crewRoster(roster?.members || []),
-  ];
-  if (caps.can_manage_sources || sourceRows.length) children.push(sourceCard(sourceRows, qid));
-  if (caps.can_review_artifacts) {
-    const proposals = await getJson(`/api/quests/${encodeURIComponent(qid)}/artifact-proposals`);
-    if (epoch !== railRenderEpoch) return;
-    children.push(artifactReviewQueue(qid, proposals?.proposals || []));
-  }
-  children.push(artifactShelf(artifacts || { documents: [], gallery: [] }));
-  children.push(argoStatusCard(qid, memory?.memory || [], jobs));
-  rail.replaceChildren(...children);
-  setRailLayoutState(true, false);
-}
-
-function currentBearingCard(b) {
-  return h('section', { class: 'venture-card CurrentBearingCard' }, [
-    h('h3', { text: 'Current Bearing' }),
-    h('div', { text: b.title || 'Untitled Quest' }),
-    h('p', { class: 'venture-muted', text: b.exploration_goal || 'No exploration goal set.' }),
-    b.next_bearing ? h('div', { class: 'venture-muted', text: `Next: ${b.next_bearing}` }) : null,
-  ]);
-}
-
-function crewRoster(members) {
-  return h('section', { class: 'venture-card CrewRoster' }, [
-    h('h3', { text: 'Crew' }),
-    h('div', { class: 'venture-list' }, members.map(m => h('div', { class: 'venture-row' }, [
-      h('span', { text: m.username }),
-      h('span', { class: 'venture-muted', text: crewStatusLabel(m) }),
-    ]))),
-  ]);
-}
-
-function crewStatusLabel(member) {
-  if (member.role === 'captain') return 'Captain';
-  const status = String(member.invitation_status || member.status || 'accepted').toLowerCase();
-  if (status === 'pending') return 'Shipmate · invited';
-  if (status === 'accepted') return 'Shipmate · accepted';
-  if (status === 'declined') return 'Shipmate · declined';
-  if (status === 'revoked') return 'Shipmate · revoked';
-  if (status === 'expired') return 'Shipmate · expired';
-  return 'Shipmate';
-}
-
-function sourceCard(sources, qid) {
-  const counts = sources.reduce((acc, s) => {
-    const st = s.index_status?.index_state || s.index_state || 'not_indexed';
-    if (st === 'ready' || st === 'indexed') acc.ready++;
-    else if (st === 'queued' || st === 'running' || st === 'indexing') acc.indexing++;
-    else if (st === 'failed' || st === 'partial') acc.attention++;
-    return acc;
-  }, { ready: 0, indexing: 0, attention: 0 });
-  const aggregate = `${counts.ready} ready · ${counts.indexing} indexing · ${counts.attention} needs attention`;
-  const statusText = (s) => {
-    const idx = s.index_status || {};
-    const state = idx.index_state || s.index_state || 'not_indexed';
-    const chunks = idx.chunk_count || 0;
-    const job = idx.current_job || {};
-    const safeErr = job.safe_error_message || idx.warning || '';
-    const errCode = job.error_code ? ` (${job.error_code})` : '';
-    if (state === 'running' || state === 'queued' || state === 'indexing') {
-      const total = job.progress_total || 0;
-      const done = job.progress_completed || 0;
-      const pct = total ? Math.round((done / total) * 100) : 0;
-      if (job.error_code && state === 'queued') return `◌ Retrying · ${safeErr || 'Waiting to retry'}${errCode}`;
-      return total ? `◌ Indexing · ${pct}% · ${done} / ${total}` : `◌ Indexing`;
-    }
-    if (state === 'ready' || state === 'indexed') return `● Ready · ${chunks} chunks`;
-    if (state === 'failed') return `△ Needs attention · ${safeErr || 'Indexing failed'}${errCode}`;
-    if (state === 'partial') return `△ Partial · ${chunks} chunks`;
-    return `○ Not indexed`;
-  };
-  const action = (label, source, endpoint) => h('button', { class: 'venture-btn', type: 'button', text: label, onclick: async () => {
-    await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(source.id)}/${endpoint}`, { method: 'POST', credentials: 'same-origin' });
-    await renderRightRail();
-  } });
-  const bibleBookRows = (s) => (s.index_status?.books || []).map(book => h('div', { class: 'venture-row' }, [
-    h('span', { text: book.book_name }),
-    h('span', { class: 'venture-muted', text: bibleStateLabel(book.state) }),
-    caps.can_manage_sources ? h('span', { class: 'venture-source-actions' }, [
-      (book.state === 'failed') ? h('button', { class: 'venture-btn', type: 'button', text: 'Retry failed book', onclick: () => reindexBibleBook(qid, s.id, book.book_id) }) : null,
-      (book.state === 'indexed') ? h('button', { class: 'venture-btn', type: 'button', text: 'Re-index book', onclick: () => reindexBibleBook(qid, s.id, book.book_id) }) : null,
-    ]) : null,
-  ]));
-  return h('section', { class: 'venture-card QuestSourceCard' }, [
-    h('h3', { text: 'Quest Sources' }),
-    h('div', { class: 'venture-muted', text: aggregate }),
-    h('div', { class: 'venture-list' }, sources.map(s => h('div', { class: 'venture-row' }, [
-      h('span', { text: s.display_name }),
-      h('span', { class: 'venture-muted', text: `${s.access_mode} · ${statusText(s)}` }),
-      caps.can_manage_sources ? h('span', { class: 'venture-source-actions' }, s.source_type === 'bible' ? [
-        h('button', { class: 'venture-btn', type: 'button', text: 'Add books', onclick: () => openBibleBookManager(qid, s) }),
-        s.status === 'paused' ? action('Resume', s, 'resume') : action('Pause', s, 'pause'),
-      ] : [
-        action('Refresh', s, 'refresh'),
-        (s.index_status?.index_state === 'failed') ? action('Retry', s, 'retry') : null,
-        action('Reindex', s, 'reindex'),
-        s.status === 'paused' ? action('Resume', s, 'resume') : action('Pause', s, 'pause'),
-      ]) : null,
-      s.source_type === 'bible' ? h('div', { class: 'venture-full-span venture-list' }, bibleBookRows(s)) : null,
-    ]))),
-    caps.can_manage_sources ? h('button', { class: 'venture-btn', type: 'button', text: 'Refresh Sources', onclick: async () => {
-      for (const s of sources) await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(s.id)}/refresh`, { method: 'POST', credentials: 'same-origin' });
-      await renderRightRail();
-    } }) : null,
-  ]);
+  if (state === 'ready' || state === 'indexed') return `● Ready · ${chunks} chunks`;
+  if (state === 'failed') return `△ Needs attention · ${safeError || 'Indexing failed'}${errorCode}`;
+  if (state === 'partial') return `△ Partial · ${chunks} chunks`;
+  return '○ Not indexed';
 }
 
 function bibleStateLabel(state) {
-  const labels = { queued: 'Queued', indexing: 'Indexing', indexed: 'Indexed', partial: 'Partial', failed: 'Failed', paused: 'Paused' };
-  return labels[state] || state || 'Queued';
-}
-
-async function reindexBibleBook(qid, sourceId, bookId) {
-  await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(sourceId)}/bible/books/${encodeURIComponent(bookId)}/reindex`, { method: 'POST', credentials: 'same-origin' });
-  await renderRightRail();
-}
-
-async function openBibleBookManager(qid, source) {
-  const testament = source.configuration?.testament;
-  if (!testament) return;
-  const catalog = await getJson(`/api/venture/bible/catalog?testament=${encodeURIComponent(testament)}`);
-  const selected = new Set((source.index_status?.books || []).map(b => b.book_id));
-  const backdrop = h('div', { class: 'venture-modal-backdrop', 'data-bible-books': 'true' });
-  const modal = h('div', { class: 'venture-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Add Bible books' });
-  const list = h('div', { class: 'venture-check-list' });
-  (catalog.books || []).forEach(book => {
-    list.appendChild(h('label', { class: 'venture-check-row', 'data-book-name': book.name.toLowerCase() }, [
-      h('input', { type: 'checkbox', name: 'bible_books_add', value: book.book_id, disabled: selected.has(book.book_id) }),
-      h('span', { text: `${book.name}${selected.has(book.book_id) ? ' · already selected' : ''}` }),
-    ]));
-  });
-  const count = h('span', { class: 'venture-muted', text: '0 selected' });
-  const sync = () => { count.textContent = `${selectedCheckboxValues(modal, 'bible_books_add').length} selected`; };
-  modal.appendChild(h('h2', { text: 'Add books' }));
-  modal.appendChild(h('div', { class: 'venture-source-actions' }, [
-    h('input', { type: 'search', placeholder: 'Search books', oninput: e => {
-      const q = String(e.target.value || '').toLowerCase();
-      list.querySelectorAll('.venture-check-row').forEach(row => { row.hidden = q && !row.dataset.bookName.includes(q); });
-    } }),
-    h('button', { class: 'venture-btn', type: 'button', text: 'Select all books', onclick: () => { list.querySelectorAll('input:not(:disabled)').forEach(i => { i.checked = true; }); sync(); } }),
-    h('button', { class: 'venture-btn', type: 'button', text: 'Clear selection', onclick: () => { list.querySelectorAll('input').forEach(i => { i.checked = false; }); sync(); } }),
-    count,
-  ]));
-  if (!catalog.select_all?.bulk_full_testament_import_enabled) modal.appendChild(h('div', { class: 'venture-muted', text: 'Full-testament imports are disabled until an administrator enables BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT or configures a permitted bulk corpus source.' }));
-  list.addEventListener('change', sync);
-  modal.appendChild(list);
-  modal.appendChild(h('div', { class: 'venture-modal-actions' }, [
-    h('button', { class: 'venture-btn', type: 'button', text: 'Cancel', onclick: () => closeVentureModal(modal, backdrop) }),
-    h('button', { class: 'venture-btn primary', type: 'button', text: 'Index selected books', onclick: async () => {
-      const books = selectedCheckboxValues(modal, 'bible_books_add');
-      if (!books.length) return;
-      const mode = selected.size === 0 && books.length === (catalog.books || []).length ? 'all_books' : 'manual_selection';
-      if (mode === 'all_books') {
-        const ok = window.confirm(`${testament === 'old' ? 'Old Testament' : 'New Testament'}\n${catalog.book_count} selected books\nTranslation: WEB\n\nIndexing runs as staged background work and can be paused and resumed.`);
-        if (!ok) return;
-      }
-      const res = await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/sources/${encodeURIComponent(source.id)}/bible/books`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ translation: 'web', selection_mode: mode, books }),
-      });
-      if (!res.ok) showVentureError((await res.json().catch(() => ({}))).detail || 'Unable to queue Bible books.');
-      closeVentureModal(modal, backdrop);
-      await renderRightRail();
-    } }),
-  ]));
-  backdrop.addEventListener('click', () => closeVentureModal(modal, backdrop));
-  document.body.appendChild(backdrop);
-  document.body.appendChild(modal);
-}
-
-function artifactReviewQueue(qid, proposals = []) {
-  const pending = proposals.filter(p => p.status === 'pending_review');
-  return h('section', { class: 'venture-card ArtifactReviewQueue' }, [
-    h('h3', { text: 'Artifact Review' }),
-    !pending.length ? h('div', { class: 'venture-muted', text: 'No pending drafts.' }) : null,
-    ...pending.map(p => h('div', { class: 'venture-row' }, [
-      h('span', { text: p.title }),
-      h('button', { class: 'venture-btn', type: 'button', text: 'Review', onclick: () => openArtifactDraft(p.id) }),
-    ])),
-  ]);
-}
-
-function artifactShelf(artifacts) {
-  const docs = artifacts.documents || [];
-  const gallery = artifacts.gallery || [];
-  return h('section', { class: 'venture-card ArtifactShelf' }, [
-    h('h3', { text: 'Quest Artifacts' }),
-    ...docs.map(d => h('div', { class: 'venture-row ArtifactCard' }, [
-      h('span', { text: d.title }),
-      h('button', { class: 'venture-btn', type: 'button', text: 'Open', onclick: () => openQuestArtifact(d.id) }),
-    ])),
-    ...gallery.map(g => h('div', { class: 'venture-row ArtifactCard' }, [h('span', { text: g.prompt || g.filename })])),
-    (!docs.length && !gallery.length) ? h('div', { class: 'venture-muted', text: 'No published Artifacts yet.' }) : null,
-  ]);
-}
-
-function showVentureError(message) {
-  if (window.uiModule?.showError) window.uiModule.showError(message);
-  else if (window.showError) window.showError(message);
-  else window.dispatchEvent(new CustomEvent('odysseus:toast', { detail: { type: 'error', message } }));
-}
-
-async function openQuestArtifact(documentId) {
-  if (!documentId) {
-    showVentureError('This Quest Artifact is missing its document link.');
-    return;
-  }
-  try {
-    const imported = window.documentModule ? null : await import('./document.js');
-    const documentModule = window.documentModule || imported?.default || imported;
-    if (!documentModule?.loadDocument) throw new Error('Document module unavailable.');
-    await documentModule.loadDocument(documentId);
-    documentModule.openPanel?.();
-    documentModule.switchToDoc?.(documentId);
-  } catch (err) {
-    showVentureError(err?.message || 'Unable to open this Quest Artifact.');
-  }
-}
-
-function closeQuestDocumentPanelForSessionChange(nextSessionId, previousSessionId) {
-  if (!caps?.is_venture) return;
-  if (!previousSessionId && !nextSessionId) return;
-  const prevWasQuest = previousSessionId && questSessionIds.has(String(previousSessionId));
-  const nextIsQuest = nextSessionId && questSessionIds.has(String(nextSessionId));
-  if (!prevWasQuest && !nextIsQuest) return;
-  if (String(previousSessionId || '') === String(nextSessionId || '')) return;
-  if (window.documentModule?.isPanelOpen?.()) {
-    window.documentModule.closePanel?.();
-  }
+  return ({ queued: 'Queued', indexing: 'Indexing', indexed: 'Indexed', partial: 'Partial', failed: 'Failed', paused: 'Paused' })[state] || state || 'Queued';
 }
 
 function synthesisStatusText(job) {
@@ -737,577 +116,116 @@ function synthesisStatusText(job) {
   return `Synthesis status: ${job.status}`;
 }
 
-function argoStatusCard(qid, memory, synthesisJobs = []) {
-  const latestJob = synthesisJobs[0] || null;
-  return h('section', { class: 'venture-card ArgoStatusCard' }, [
-    h('h3', { text: 'Argo Status' }),
-    h('div', { class: 'venture-muted', text: `${memory.length} Voyage Memory entries visible.` }),
-    caps.can_review_artifacts ? h('div', { class: 'venture-muted', text: synthesisStatusText(latestJob) }) : null,
-    caps.can_view_quest_memory ? h('button', { class: 'venture-btn', type: 'button', text: 'View Voyage Memory', onclick: () => openVoyageMemory(qid) }) : null,
-    caps.can_review_artifacts ? h('button', { class: 'venture-btn', type: 'button', text: 'Distill Insight', onclick: async (event) => {
-      const btn = event.currentTarget;
-      if (btn) {
-        btn.disabled = true;
-        btn.textContent = 'Queued...';
-      }
-      try {
-        await fetch(`${API_BASE}/api/quests/${encodeURIComponent(qid)}/argo-synthesis/run`, { method: 'POST', credentials: 'same-origin' });
-      } finally {
-        await renderRightRail();
-      }
-    } }) : null,
-    latestJob?.artifact_proposal_id ? h('button', { class: 'venture-btn', type: 'button', text: 'Review Latest Draft', onclick: () => openArtifactDraft(latestJob.artifact_proposal_id) }) : null,
-  ]);
+function directList(container) {
+  return Array.from(container.children).find(child => child.classList?.contains('venture-list')) || null;
 }
 
-async function openVoyageMemory(qid) {
-  if (!qid || !caps?.can_view_quest_memory) return;
-  const data = await getJson(`/api/quests/${encodeURIComponent(qid)}/memory`);
-  const entries = data?.memory || [];
-  document.querySelectorAll('.VoyageMemoryWindow, .venture-modal-backdrop[data-voyage-memory]').forEach(el => el.remove());
-  const backdrop = h('div', { class: 'venture-modal-backdrop', 'data-voyage-memory': 'true' });
-  const modal = h('div', { class: 'venture-modal VoyageMemoryWindow', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Voyage Memory' });
-  modal.appendChild(h('h2', { text: 'Voyage Memory' }));
-  modal.appendChild(h('div', { class: 'venture-muted', text: 'Quest-local memory for this Voyage Log.' }));
-  const list = h('div', { class: 'venture-memory-list' });
-  if (!entries.length) {
-    list.appendChild(h('div', { class: 'venture-muted', text: 'No Voyage Memory entries yet.' }));
-  } else {
-    entries.forEach(entry => {
-      const citationText = voyageMemoryCitationText(entry);
-      list.appendChild(h('article', { class: 'venture-memory-entry' }, [
-        h('div', { class: 'venture-memory-entry-head' }, [
-          h('div', { class: 'venture-memory-title', text: entry.title || 'Untitled memory' }),
-          h('div', { class: 'venture-memory-meta', text: [entry.category, entry.state, entry.visibility, entry.confidence].filter(Boolean).join(' · ') }),
-        ]),
-        h('div', { class: 'venture-memory-content', text: entry.content || '' }),
-        citationText ? h('div', { class: 'venture-memory-meta', text: `Evidence: ${citationText}` }) : null,
-        entry.pinned ? h('div', { class: 'venture-memory-meta', text: 'Pinned' }) : null,
-      ]));
+function sourceRowFor(sourceList, displayName) {
+  return Array.from(sourceList?.children || []).find(row => (
+    row.classList?.contains('venture-row')
+    && row.children[0]?.textContent?.trim() === String(displayName || '').trim()
+  ));
+}
+
+function updateSourcesCard(card, sources) {
+  if (!card) return;
+  card.dataset.argoLiveReady = 'true';
+  card.setAttribute('aria-live', 'polite');
+  const counts = (sources || []).reduce((all, source) => {
+    const state = source.index_status?.index_state || source.index_state || 'not_indexed';
+    if (state === 'ready' || state === 'indexed') all.ready += 1;
+    else if (state === 'queued' || state === 'running' || state === 'indexing') all.indexing += 1;
+    else if (state === 'failed' || state === 'partial') all.attention += 1;
+    return all;
+  }, { ready: 0, indexing: 0, attention: 0 });
+  const summary = Array.from(card.children).find(child => child.classList?.contains('venture-muted'));
+  if (summary) summary.textContent = `${counts.ready} ready · ${counts.indexing} indexing · ${counts.attention} needs attention`;
+
+  const list = directList(card);
+  (sources || []).forEach(source => {
+    const row = sourceRowFor(list, source.display_name);
+    if (!row) return;
+    const status = Array.from(row.children).find(child => child.classList?.contains('venture-muted'));
+    if (status) status.textContent = `${source.access_mode} · ${sourceStatusText(source)}`;
+
+    const bookList = row.querySelector('.venture-full-span.venture-list');
+    (source.index_status?.books || []).forEach(book => {
+      const bookRow = sourceRowFor(bookList, book.book_name);
+      if (!bookRow) return;
+      const bookStatus = Array.from(bookRow.children).find(child => child.classList?.contains('venture-muted'));
+      if (bookStatus) bookStatus.textContent = bibleStateLabel(book.state);
     });
-  }
-  modal.appendChild(list);
-  modal.appendChild(h('div', { class: 'venture-modal-actions' }, [
-    h('button', { class: 'venture-btn', type: 'button', text: 'Close', onclick: () => { modal.remove(); backdrop.remove(); } }),
-  ]));
-  backdrop.addEventListener('click', () => { modal.remove(); backdrop.remove(); });
-  document.body.appendChild(backdrop);
-  document.body.appendChild(modal);
+  });
 }
 
-function voyageMemoryCitationText(entry) {
-  const evidence = Array.isArray(entry?.evidence) ? entry.evidence : [];
-  if (evidence.length) {
-    return evidence.slice(0, 4).map(item => {
-      if (!item || typeof item !== 'object') return String(item || '');
-      const label = item.label || item.source || item.specific_source || item.id || '';
-      const locator = item.locator || item.location || '';
-      const id = item.id ? `[${item.id}]` : '';
-      return [id, label, locator].filter(Boolean).join(' ');
-    }).filter(Boolean).join(' · ');
-  }
-  const citations = Array.isArray(entry?.citations) ? entry.citations : [];
-  if (citations.length) return citations.slice(0, 6).map(c => `[${c}]`).join(' · ');
-  const refs = Array.isArray(entry?.evidence_chunk_refs) ? entry.evidence_chunk_refs : [];
-  return refs.slice(0, 4).map(ref => String(ref || '')).filter(Boolean).join(' · ');
+function updateArgoStatusCard(card, status) {
+  if (!card) return;
+  card.dataset.argoLiveReady = 'true';
+  card.setAttribute('aria-live', 'polite');
+  const muted = Array.from(card.children).filter(child => child.classList?.contains('venture-muted'));
+  if (muted[0]) muted[0].textContent = `${Number(status?.memory_count || 0)} Voyage Memory entries visible.`;
+  if (muted[1]) muted[1].textContent = synthesisStatusText((status?.jobs || [])[0] || null);
 }
 
-function closeVentureModal(modal, backdrop) {
-  modal?.remove();
-  backdrop?.remove();
-}
-
-async function launchRegularChatFromWizard(modal, backdrop, status) {
-  let created = false;
-  if (window.createDirectChatFromPreferredModel) {
-    created = !!await window.createDirectChatFromPreferredModel();
-  } else if (window.sessionModule?.createDirectChat) {
-    const res = await fetch(`${API_BASE}/api/default-chat`, { credentials: 'same-origin' });
-    if (res.ok) {
-      const dc = await res.json().catch(() => null);
-      if (dc?.endpoint_url && dc?.model) {
-        await window.sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, { source: 'venture-session-wizard' });
-        created = true;
-      }
-    }
-  }
-  if (created && window.sessionModule?.hasPendingChat?.() && window.sessionModule?.materializePendingSession) {
-    await window.sessionModule.materializePendingSession({ source: 'venture-session-wizard', openInFullView: true });
-  }
-  if (created || window.sessionModule?.getCurrentSessionId?.()) {
-    closeVentureModal(modal, backdrop);
-  } else if (status) {
-    status.textContent = 'Unable to start a regular chat.';
-  }
-}
-
-function selectedCheckboxValues(root, name) {
-  return Array.from(new Set(Array.from(root.querySelectorAll(`input[name="${name}"]:checked`))
-    .map(input => input.value)
-    .filter(Boolean)));
-}
-
-function sourceDisplayName(type, config, emailAccountsById) {
-  if (type === 'bible') return config.testament === 'old' ? 'Old Test Bible' : 'New Test Bible';
-  if (type === 'website') return config.urls?.length === 1 ? config.urls[0] : 'Website evidence';
-  if (type === 'file') return config.files?.length === 1 ? config.files[0].name : 'Selected files';
-  if (type === 'youtube') return config.video_urls?.length === 1 ? config.video_urls[0] : 'YouTube evidence';
-  if (type === 'email') {
-    const names = (config.account_ids || [config.account_id])
-      .map(id => emailAccountsById.get(id)?.name || emailAccountsById.get(id)?.from_address || id)
-      .filter(Boolean);
-    return names.length === 1 ? names[0] : 'Email evidence';
-  }
-  return 'Quest Source';
-}
-
-async function uploadQuestFiles(files) {
-  const form = new FormData();
-  files.forEach(file => form.append('files', file));
-  const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', credentials: 'same-origin', body: form });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'File upload failed.');
-  const data = await res.json();
-  return data.files || [];
-}
-
-async function buildSourcePayload(modal, emailAccountsById) {
-  const type = modal.querySelector('[name="source_type"]')?.value || 'website';
-  if (type === 'bible_old' || type === 'bible_new') {
-    const testament = type === 'bible_old' ? 'old' : 'new';
-    const books = selectedCheckboxValues(modal, 'bible_books');
-    if (!books.length) throw new Error('Select at least one Bible book.');
-    const total = Number(modal.querySelector('[data-bible-total]')?.dataset.bibleTotal || '0');
-    const bulkEnabled = modal.querySelector('[data-bible-bulk-enabled]')?.dataset.bibleBulkEnabled === 'true';
-    const selectionMode = total && books.length === total ? 'all_books' : 'manual_selection';
-    if (selectionMode === 'all_books') {
-      const ok = window.confirm(`${testament === 'old' ? 'Old Testament' : 'New Testament'}\n${books.length} selected books\nTranslation: WEB\n\nIndexing runs as staged background work and can be paused and resumed.`);
-      if (!ok) throw new Error('Full-testament indexing was cancelled.');
-      if (!bulkEnabled) throw new Error('Full-testament imports are disabled. The installation administrator must set BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT=true or configure a permitted bulk corpus source.');
-    }
-    const config = {
-      datasource_key: testament === 'old' ? 'old-test-bible' : 'new-test-bible',
-      testament,
-      default_translation: 'web',
-      versioning_mode: 'append_only',
-      selected_books: books,
-      selection_mode: selectionMode,
-      summary: `${books.length} ${testament === 'old' ? 'Old Testament' : 'New Testament'} book${books.length === 1 ? '' : 's'}`,
-    };
-    return { type: 'bible', config, extraSources: [] };
-  }
-  if (type === 'website') {
-    const urls = String(modal.querySelector('[name="source_urls"]')?.value || '')
-      .split(/\n+/)
-      .map(v => v.trim())
-      .filter(Boolean);
-    if (!urls.length) throw new Error('Add at least one website URL.');
-    const config = { urls, url: urls[0], summary: urls.join('\n') };
-    return { type, config, extraSources: [] };
-  }
-  if (type === 'file') {
-    const files = Array.from(modal.querySelector('[name="source_files"]')?.files || []);
-    if (!files.length) throw new Error('Select at least one file.');
-    const uploaded = await uploadQuestFiles(files);
-    const fileRefs = uploaded.map(file => ({
-      upload_id: file.id,
-      name: file.name,
-      size: file.size,
-      type: file.mime || 'application/octet-stream',
-      hash: file.hash,
-      uploaded_at: file.uploaded_at,
-    }));
-    const config = {
-      files: fileRefs,
-      upload_ids: fileRefs.map(file => file.upload_id),
-      upload_id: fileRefs[0]?.upload_id,
-      references: fileRefs.map(file => file.name),
-      summary: fileRefs.map(file => file.name).join(', '),
-    };
-    return { type, config, extraSources: [] };
-  }
-  if (type === 'youtube') {
-    const urls = String(modal.querySelector('[name="youtube_urls"]')?.value || '')
-      .split(/\n+/)
-      .map(v => v.trim())
-      .filter(Boolean);
-    if (!urls.length) throw new Error('Add at least one YouTube URL.');
-    const config = { video_urls: urls, include_description: true, include_chapters: true, allow_generated_captions: false, summary: urls.join('\n') };
-    return { type, config, extraSources: [] };
-  }
-  if (type === 'email') {
-    const accountIds = selectedCheckboxValues(modal, 'email_accounts');
-    if (!accountIds.length) throw new Error('Select at least one configured email account.');
-    const baseConfig = id => ({
-      account_id: id,
-      account_ids: accountIds,
-      scope: { mailbox: 'INBOX', query: 'in:anywhere' },
-    });
-    return {
-      type,
-      config: baseConfig(accountIds[0]),
-      extraSources: accountIds.slice(1).map(id => ({
-        source_type: 'email',
-        source_mode: 'dynamic',
-        refresh_strategy: 'scheduled',
-        access_mode: 'captain_only',
-        display_name: sourceDisplayName('email', { account_id: id }, emailAccountsById),
-        configuration: baseConfig(id),
-      })),
-    };
-  }
-  throw new Error('Choose a Quest Source type.');
-}
-
-function renderCheckboxList(container, items, name, emptyText, labelFor) {
-  container.innerHTML = '';
-  if (!items.length) {
-    container.appendChild(h('div', { class: 'venture-muted', text: emptyText }));
+async function refreshLivePanels() {
+  if (liveRefreshInFlight || document.hidden) return;
+  const rail = document.getElementById('venture-right-rail');
+  const sourcesCard = rail?.querySelector('.QuestSourceCard');
+  const argoCard = rail?.querySelector('.ArgoStatusCard');
+  const questId = selectedQuestId();
+  if (!rail || !questId || (!sourcesCard && !argoCard)) {
+    stopLivePolling();
     return;
   }
-  items.forEach(item => {
-    const value = String(item.id || item.username || '');
-    container.appendChild(h('label', { class: 'venture-check-row' }, [
-      h('input', { type: 'checkbox', name, value }),
-      h('span', { text: labelFor(item) }),
-    ]));
-  });
-}
 
-async function loadWizardOptions(modal) {
-  const [emailData, userData] = await Promise.all([
-    getJson('/api/email/accounts'),
-    getJson('/api/auth/users'),
-  ]);
-  const emails = (emailData?.accounts || []).filter(account => account.enabled !== false);
-  const users = (userData?.users || []).filter(user => !user.is_admin);
-  const emailList = modal.querySelector('[data-email-list]');
-  const shipmateList = modal.querySelector('[data-shipmate-list]');
-  renderCheckboxList(emailList, emails, 'email_accounts', 'No configured email accounts available.', account => account.name || account.from_address || account.imap_user || account.id);
-  renderCheckboxList(shipmateList, users, 'shipmates', 'No regular users available.', user => user.username);
-  return new Map(emails.map(account => [String(account.id), account]));
-}
-
-function syncQuestWizardSourcePanel(modal) {
-  const type = modal.querySelector('[name="source_type"]')?.value || 'website';
-  modal.querySelectorAll('[data-source-panel]').forEach(panel => {
-    panel.hidden = panel.dataset.sourcePanel !== type && !(panel.dataset.sourcePanel === 'bible' && (type === 'bible_old' || type === 'bible_new'));
-  });
-  if (type === 'bible_old' || type === 'bible_new') loadBibleCatalogIntoModal(modal, type === 'bible_old' ? 'old' : 'new');
-}
-
-async function loadBibleCatalogIntoModal(modal, testament) {
-  const panel = modal.querySelector('[data-source-panel="bible"]');
-  if (!panel || panel.dataset.loadedTestament === testament) return;
-  panel.dataset.loadedTestament = testament;
-  const data = await getJson(`/api/venture/bible/catalog?testament=${encodeURIComponent(testament)}`);
-  const books = data.books || [];
-  const recommended = new Set((data.recommended_books || []).map(b => b.book_id));
-  const bulkEnabled = !!data.select_all?.bulk_full_testament_import_enabled;
-  panel.querySelector('[data-bible-total]').dataset.bibleTotal = String(books.length);
-  panel.querySelector('[data-bible-bulk-enabled]').dataset.bibleBulkEnabled = bulkEnabled ? 'true' : 'false';
-  panel.querySelector('[data-bible-bulk-message]').textContent = bulkEnabled ? '' : 'Full-testament imports are disabled until an administrator enables BIBLE_API_ALLOW_FULL_TESTAMENT_IMPORT or configures a permitted bulk corpus source.';
-  const renderList = (root, items) => {
-    root.innerHTML = '';
-    items.forEach(book => root.appendChild(h('label', { class: 'venture-check-row', 'data-book-name': book.name.toLowerCase() }, [
-      h('input', { type: 'checkbox', name: 'bible_books', value: book.book_id }),
-      h('span', { text: book.name }),
-    ])));
-  };
-  renderList(panel.querySelector('[data-bible-recommended]'), books.filter(b => recommended.has(b.book_id)));
-  renderList(panel.querySelector('[data-bible-all]'), books);
-  const syncCount = () => {
-    const count = selectedCheckboxValues(panel, 'bible_books').length;
-    panel.querySelector('[data-bible-count]').textContent = `${count} selected`;
-  };
-  panel.querySelectorAll('input[name="bible_books"]').forEach(input => input.addEventListener('change', () => {
-    panel.querySelectorAll(`input[name="bible_books"][value="${CSS.escape(input.value)}"]`).forEach(peer => { peer.checked = input.checked; });
-    syncCount();
-  }));
-  panel.querySelector('[data-bible-search]').oninput = event => {
-    const q = String(event.target.value || '').toLowerCase();
-    panel.querySelectorAll('[data-bible-all] .venture-check-row').forEach(row => { row.hidden = q && !row.dataset.bookName.includes(q); });
-  };
-  panel.querySelector('[data-bible-select-all]').onclick = () => {
-    panel.querySelectorAll('input[name="bible_books"]').forEach(input => { input.checked = true; });
-    syncCount();
-  };
-  panel.querySelector('[data-bible-clear]').onclick = () => {
-    panel.querySelectorAll('input[name="bible_books"]').forEach(input => { input.checked = false; });
-    syncCount();
-  };
-  syncCount();
-}
-
-function syncSelectedFiles(modal) {
-  const list = modal.querySelector('[data-file-list]');
-  if (!list) return;
-  const files = Array.from(modal.querySelector('[name="source_files"]')?.files || []);
-  list.innerHTML = '';
-  files.forEach(file => list.appendChild(h('div', { class: 'venture-muted', text: `${file.name} · ${Math.ceil(file.size / 1024)} KB` })));
-}
-
-async function createQuestFromWizard(modal, status, emailAccountsById) {
-  const title = String(modal.querySelector('[name="title"]')?.value || '').trim();
-  const goal = String(modal.querySelector('[name="exploration_goal"]')?.value || '').trim();
-  if (!title) throw new Error('Quest title is required.');
-  if (!goal) throw new Error('Goal is required.');
-  const { type, config, extraSources } = await buildSourcePayload(modal, emailAccountsById);
-  const displayName = sourceDisplayName(type, config, emailAccountsById);
-  const payload = {
-    title,
-    exploration_goal: goal,
-      source: {
-        source_type: type,
-      source_mode: (type === 'email') ? 'dynamic' : 'static',
-      refresh_strategy: type === 'email' ? 'scheduled' : (type === 'document' ? 'event' : 'manual'),
-      access_mode: type === 'email' ? 'captain_only' : 'shared_read',
-      display_name: displayName,
-      configuration: config,
-    },
-    shipmates: selectedCheckboxValues(modal, 'shipmates'),
-  };
-  const res = await fetch(`${API_BASE}/api/quests`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Quest creation failed.');
-  const data = await res.json();
-  const questId = data.quest?.id;
-  if (!questId) throw new Error('Quest creation did not return a Quest ID.');
-  for (const source of extraSources) {
-    const sourceRes = await fetch(`${API_BASE}/api/quests/${encodeURIComponent(questId)}/sources`, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(source),
-    });
-    if (!sourceRes.ok && status) {
-      status.textContent = 'Quest created, but one additional email source could not be added.';
-    }
+  liveRefreshInFlight = true;
+  try {
+    const [sourcesPayload, argoStatus] = await Promise.all([
+      sourcesCard ? getJson(`/api/quests/${encodeURIComponent(questId)}/sources`) : Promise.resolve(null),
+      argoCard ? getJson(`/api/quests/${encodeURIComponent(questId)}/argo-status`) : Promise.resolve(null),
+    ]);
+    if (questId !== selectedQuestId()) return;
+    const sources = sourcesPayload?.sources || [];
+    updateSourcesCard(sourcesCard, sources);
+    updateArgoStatusCard(argoCard, argoStatus || {});
+    syncLivePolling(questId, sources, argoStatus || {});
+  } finally {
+    liveRefreshInFlight = false;
   }
-  currentQuestId = questId;
-  questSessionIds.add(String(questId));
-  publishQuestRegistry();
-  history.replaceState(null, '', `#${questId}`);
-  await window.sessionModule?.loadSessions?.();
-  await window.sessionModule?.selectSession?.(questId);
-  window.sessionControlModule?.viewFullConversation?.(questId);
-  window.dispatchEvent(new CustomEvent('odysseus:session-materialized', {
-    detail: { sessionId: questId, name: title, openInFullView: true },
-  }));
-  await renderRightRail();
 }
 
-function openSessionWizard() {
-  if (!caps?.can_create_quest) return;
-  installStyles();
-  document.querySelectorAll('.QuestCreationWizard, .venture-modal-backdrop[data-venture-session-wizard]').forEach(el => el.remove());
-  const backdrop = h('div', { class: 'venture-modal-backdrop', 'data-venture-session-wizard': 'true' });
-  const modal = h('form', { class: 'venture-modal QuestCreationWizard', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Create session' });
-  modal.innerHTML = `
-    <h2>Create Session</h2>
-    <div class="venture-choice-grid" role="radiogroup" aria-label="Session type">
-      <label class="venture-choice"><input type="radio" name="session_type" value="chat" checked><strong>Regular chat</strong><span class="venture-muted">Start a chat session without Quest configuration.</span></label>
-      <label class="venture-choice"><input type="radio" name="session_type" value="quest"><strong>Quest</strong><span class="venture-muted">Launch an evidence-guided Venture Quest.</span></label>
-    </div>
-    <div data-chat-fields>
-      <div class="venture-muted">Regular chats use the existing chat workspace and do not require Quest setup.</div>
-    </div>
-    <div data-quest-fields hidden>
-      <div class="venture-form-grid">
-        <div>
-          <label>Quest title</label>
-          <input name="title" autocomplete="off">
-        </div>
-        <div>
-          <label>Predefined source</label>
-          <select name="source_type">
-            <option value="website">Website</option>
-            <option value="file">File</option>
-            <option value="email">Email</option>
-            <option value="youtube">YouTube</option>
-            <option value="bible_old">Old Test Bible</option>
-            <option value="bible_new">New Test Bible</option>
-          </select>
-        </div>
-        <div class="venture-full-span">
-          <label>Goal</label>
-          <textarea name="exploration_goal"></textarea>
-        </div>
-      </div>
-      <div class="venture-source-panel" data-source-panel="website">
-        <label>Website URLs</label>
-        <textarea name="source_urls" placeholder="https://example.com/research&#10;https://example.com/context"></textarea>
-      </div>
-      <div class="venture-source-panel" data-source-panel="file" hidden>
-        <label>Files from disk</label>
-        <input type="file" name="source_files" multiple>
-        <div class="venture-file-list" data-file-list></div>
-      </div>
-      <div class="venture-source-panel" data-source-panel="email" hidden>
-        <label>Configured emails</label>
-        <div class="venture-check-list" data-email-list><div class="venture-muted">Loading email accounts...</div></div>
-      </div>
-      <div class="venture-source-panel" data-source-panel="youtube" hidden>
-        <label>YouTube URLs</label>
-        <textarea name="youtube_urls" placeholder="https://www.youtube.com/watch?v=..."></textarea>
-      </div>
-      <div class="venture-source-panel" data-source-panel="bible" hidden>
-        <div class="venture-source-actions">
-          <input type="search" data-bible-search placeholder="Search books">
-          <button type="button" class="venture-btn" data-bible-select-all>Select all books</button>
-          <button type="button" class="venture-btn" data-bible-clear>Clear selection</button>
-          <span class="venture-muted" data-bible-count>0 selected</span>
-        </div>
-        <div class="venture-muted" data-bible-bulk-message></div>
-        <div data-bible-total data-bible-total="0"></div>
-        <div data-bible-bulk-enabled data-bible-bulk-enabled="false"></div>
-        <label>Recommended books</label>
-        <div class="venture-check-list" data-bible-recommended><div class="venture-muted">Loading Bible catalog...</div></div>
-        <label>All books</label>
-        <div class="venture-check-list" data-bible-all><div class="venture-muted">Loading Bible catalog...</div></div>
-      </div>
-      <label>Shipmates</label>
-      <div class="venture-check-list" data-shipmate-list><div class="venture-muted">Loading regular users...</div></div>
-    </div>
-    <div class="venture-modal-actions">
-      <button type="button" class="venture-btn" data-cancel>Cancel</button>
-      <button type="submit" class="venture-btn primary" data-submit>Create</button>
-    </div>
-    <div class="venture-muted" aria-live="polite"></div>
-  `;
-  document.body.appendChild(backdrop);
-  document.body.appendChild(modal);
-  let emailAccountsById = new Map();
-  const status = modal.querySelector('[aria-live]');
-  const submit = modal.querySelector('[data-submit]');
-  const syncType = () => {
-    const isQuest = modal.querySelector('[name="session_type"]:checked')?.value === 'quest';
-    modal.querySelector('[data-chat-fields]').hidden = isQuest;
-    modal.querySelector('[data-quest-fields]').hidden = !isQuest;
-    submit.textContent = isQuest ? 'Launch Quest' : 'Start Chat';
-  };
-  modal.querySelectorAll('[name="session_type"]').forEach(input => input.addEventListener('change', syncType));
-  modal.querySelector('[name="source_type"]').addEventListener('change', () => syncQuestWizardSourcePanel(modal));
-  modal.querySelector('[name="source_files"]').addEventListener('change', () => syncSelectedFiles(modal));
-  modal.querySelector('[data-cancel]').addEventListener('click', () => closeVentureModal(modal, backdrop));
-  backdrop.addEventListener('click', () => closeVentureModal(modal, backdrop));
-  modal.addEventListener('submit', async e => {
-    e.preventDefault();
-    submit.disabled = true;
-    status.textContent = '';
-    try {
-      const type = modal.querySelector('[name="session_type"]:checked')?.value || 'chat';
-      if (type === 'chat') {
-        await launchRegularChatFromWizard(modal, backdrop, status);
-      } else {
-        await createQuestFromWizard(modal, status, emailAccountsById);
-        closeVentureModal(modal, backdrop);
-      }
-    } catch (err) {
-      status.textContent = err?.message || 'Session creation failed.';
-    } finally {
-      submit.disabled = false;
-    }
-  });
-  syncType();
-  syncQuestWizardSourcePanel(modal);
-  loadWizardOptions(modal).then(map => { emailAccountsById = map; }).catch(() => {
-    status.textContent = 'Some setup options could not be loaded.';
-  });
-  setTimeout(() => modal.querySelector('[name="session_type"]')?.focus(), 0);
+function queueLiveRefresh() {
+  if (refreshQueued) return;
+  refreshQueued = true;
+  window.setTimeout(() => {
+    refreshQueued = false;
+    refreshLivePanels().catch(() => {});
+  }, 0);
 }
 
-window.argosVentureOpenSessionWizard = openSessionWizard;
-
-async function openArtifactDraft(proposalId) {
-  const data = await getJson(`/api/library/artifact-drafts/${encodeURIComponent(proposalId)}`);
-  const draft = data?.draft;
-  if (!draft) return;
-  const modal = h('div', { class: 'venture-modal ArtifactDraftPreview' });
-  modal.innerHTML = `<h2></h2><pre style="white-space:pre-wrap;max-height:52vh;overflow:auto;"></pre><div class="venture-modal-actions"><button class="venture-btn" data-close>Close</button><button class="venture-btn" data-decline>Decline</button><button class="venture-btn primary" data-publish>Publish to Quest</button></div><div class="venture-muted" aria-live="polite"></div>`;
-  modal.querySelector('h2').textContent = draft.title;
-  modal.querySelector('pre').textContent = draft.document?.content || draft.summary || '';
-  modal.querySelector('[data-close]').addEventListener('click', () => modal.remove());
-  modal.querySelector('[data-decline]').addEventListener('click', async () => {
-    await fetch(`${API_BASE}/api/quests/${encodeURIComponent(draft.session_id)}/artifact-proposals/${encodeURIComponent(draft.id)}/decline`, { method: 'POST', credentials: 'same-origin' });
-    modal.remove(); renderRightRail();
+function installLivePanelObserver() {
+  if (observerInstalled) return;
+  observerInstalled = true;
+  const observer = new MutationObserver(mutations => {
+    const shouldRefresh = mutations.some(mutation => Array.from(mutation.addedNodes).some(node => {
+      if (node.nodeType !== Node.ELEMENT_NODE) return false;
+      const element = node;
+      const card = element.matches?.('.QuestSourceCard, .ArgoStatusCard')
+        ? element
+        : element.querySelector?.('.QuestSourceCard, .ArgoStatusCard');
+      return Boolean(card && card.dataset.argoLiveReady !== 'true');
+    }));
+    if (shouldRefresh) queueLiveRefresh();
   });
-  modal.querySelector('[data-publish]').addEventListener('click', async () => {
-    await fetch(`${API_BASE}/api/quests/${encodeURIComponent(draft.session_id)}/artifact-proposals/${encodeURIComponent(draft.id)}/publish`, { method: 'POST', credentials: 'same-origin' });
-    modal.remove(); renderRightRail();
-  });
-  document.body.appendChild(modal);
-}
-
-async function initVenture() {
-  caps = await loadCapabilities();
-  window.argosVentureCapabilities = caps;
-  if (!caps?.is_venture) return;
-  document.body.classList.add('argos-venture', caps.role === 'captain' ? 'venture-captain' : 'venture-shipmate');
-  installStyles();
-  applyTerminology();
-  await refreshQuestRegistry();
-  hideVentureNewChatShortcuts();
-  installShipmateCaptureGuards();
-  hardDisableShipmateControls();
-  setInterval(() => {
-    hideVentureNewChatShortcuts();
-    hardDisableShipmateControls();
-  }, 1000);
-  setInterval(() => {
-    syncActiveQuestHistory().catch(() => {});
-  }, 4000);
-  await renderRightRail();
-  syncActiveQuestHistory().catch(() => {});
-  window.addEventListener('hashchange', () => {
-    closeQuestDocumentPanelForSessionChange(selectedQuestId(), currentQuestId);
-    const qid = selectedQuestId();
-    forceQuestFullConversation(qid);
-    loadQuest(qid);
-  });
-  document.addEventListener('odysseus:session-selected', e => {
-    const nextId = e.detail?.sessionId || e.detail?.id || selectedQuestId();
-    closeQuestDocumentPanelForSessionChange(nextId, e.detail?.previousSessionId || currentQuestId);
-    forceQuestFullConversation(nextId);
-    setTimeout(() => forceQuestFullConversation(nextId), 0);
-    loadQuest(nextId);
-  });
-  window.addEventListener('odysseus:session-selected', e => {
-    const nextId = e.detail?.sessionId || e.detail?.id || selectedQuestId();
-    closeQuestDocumentPanelForSessionChange(nextId, e.detail?.previousSessionId || currentQuestId);
-    forceQuestFullConversation(nextId);
-    setTimeout(() => forceQuestFullConversation(nextId), 0);
-    loadQuest(nextId);
-  });
-  document.addEventListener('odysseus:new-chat-shown', () => {
-    closeQuestDocumentPanelForSessionChange('', currentQuestId);
-    teardownQuestRail();
-  });
+  observer.observe(document.body, { childList: true, subtree: true });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) syncActiveQuestHistory().catch(() => {});
+    if (!document.hidden) refreshLivePanels().catch(() => {});
   });
-  window.addEventListener('argos-venture:quest-membership-updated', async e => {
-    await refreshQuestRegistry();
-    await loadQuest(e.detail?.questId || selectedQuestId());
-  });
-  document.addEventListener('odysseus:workspace-tab-activated', e => {
-    if (e.detail?.kind === 'session') loadQuest(e.detail?.sessionId || selectedQuestId());
-    else renderRightRail();
-  });
-  document.addEventListener('odysseus:mission-stream-start', e => {
-    const sid = e.detail?.sessionId || selectedQuestId();
-    setTimeout(() => enforceQuestSessionView(sid), 0);
-  });
-  window.addEventListener('argos-venture:review-artifact-draft', e => openArtifactDraft(e.detail?.proposalId));
+  document.addEventListener('odysseus:session-selected', () => queueLiveRefresh());
+  document.addEventListener('odysseus:workspace-tab-activated', () => queueLiveRefresh());
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initVenture, { once: true });
-} else {
-  initVenture();
-}
+installLivePanelObserver();
+queueLiveRefresh();
 
-export default { initVenture };
+export default legacy;
