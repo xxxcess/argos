@@ -13,6 +13,16 @@ from fastapi import BackgroundTasks, HTTPException, Request
 
 from routes import venture_routes_legacy as _legacy
 from routes.venture_routes_legacy import *  # noqa: F401,F403
+from src.venture_artifact_quality_v2 import (
+    artifact_display_title,
+    install_artifact_quality_contract,
+    is_displayable_memory,
+)
+
+# Route modules are imported during app construction, before background workers begin.
+# Installing here makes the stricter Artifact contract apply to both foreground and
+# asynchronous synthesis jobs without expanding the legacy route surface.
+install_artifact_quality_contract()
 
 
 def _source_index_status(db, row: _legacy.QuestSource) -> dict:
@@ -149,7 +159,7 @@ def _key_point_count(proposal: _legacy.QuestArtifactProposal | None) -> int:
 
 
 def _artifact_document_payload(document, proposal: _legacy.QuestArtifactProposal | None) -> dict:
-    title = (proposal.title if proposal and proposal.title else document.title) or "Untitled Artifact"
+    title = artifact_display_title(document, proposal, _legacy._json_loads)
     return {
         "id": document.id,
         "proposal_id": proposal.id if proposal else None,
@@ -207,11 +217,24 @@ def _queue_artifact_memory_job(db, *, quest_id: str, proposal: _legacy.QuestArti
     return job.id
 
 
+def _visible_memory_rows(db, quest_id: str, role: str):
+    query = db.query(_legacy.QuestMemoryEntry).filter(
+        _legacy.QuestMemoryEntry.session_id == quest_id,
+        _legacy.QuestMemoryEntry.state != "retired",
+    )
+    if role != "captain":
+        query = query.filter(_legacy.QuestMemoryEntry.visibility == "quest_shared")
+    rows = query.order_by(_legacy.QuestMemoryEntry.pinned.desc(), _legacy.QuestMemoryEntry.updated_at.desc()).all()
+    return [row for row in rows if is_displayable_memory(row)]
+
+
 def setup_venture_routes(session_manager):
     router = _legacy.setup_venture_routes(session_manager)
     _remove_route(router, "/api/quests/{quest_id}/sources", "GET")
     _remove_route(router, "/api/quests/{quest_id}/sources/{source_id}/index-status", "GET")
     _remove_route(router, "/api/quests/{quest_id}/artifacts", "GET")
+    _remove_route(router, "/api/quests/{quest_id}/memory", "GET")
+    _remove_route(router, "/api/quests/{quest_id}/memory/{memory_id}", "GET")
     _remove_route(router, "/api/quests/{quest_id}/artifact-proposals/{proposal_id}/publish", "POST")
 
     @router.get("/api/quests/{quest_id}/sources")
@@ -260,19 +283,42 @@ def setup_venture_routes(session_manager):
         role = _legacy.get_quest_role(user, quest_id)
         db = _legacy.SessionLocal()
         try:
-            memory = db.query(_legacy.QuestMemoryEntry).filter(
-                _legacy.QuestMemoryEntry.session_id == quest_id,
-                _legacy.QuestMemoryEntry.state != "retired",
-            )
-            if role != "captain":
-                memory = memory.filter(_legacy.QuestMemoryEntry.visibility == "quest_shared")
+            memory = _visible_memory_rows(db, quest_id, role)
             jobs = []
             if role == "captain":
                 rows = db.query(_legacy.QuestSynthesisJob).filter(
                     _legacy.QuestSynthesisJob.quest_id == quest_id,
                 ).order_by(_legacy.QuestSynthesisJob.requested_at.desc()).limit(5).all()
                 jobs = [_legacy._synthesis_job_to_safe_dict(row) for row in rows]
-            return {"memory_count": memory.count(), "jobs": jobs}
+            return {"memory_count": len(memory), "jobs": jobs}
+        finally:
+            db.close()
+
+    @router.get("/api/quests/{quest_id}/memory")
+    def list_memory(request: Request, quest_id: str):
+        _legacy.require_venture_runtime()
+        user = _legacy.require_quest_member(request, quest_id)
+        role = _legacy.get_quest_role(user, quest_id)
+        db = _legacy.SessionLocal()
+        try:
+            return {"memory": [_legacy._memory_to_dict(row) for row in _visible_memory_rows(db, quest_id, role)]}
+        finally:
+            db.close()
+
+    @router.get("/api/quests/{quest_id}/memory/{memory_id}")
+    def get_memory(request: Request, quest_id: str, memory_id: str):
+        _legacy.require_venture_runtime()
+        user = _legacy.require_quest_member(request, quest_id)
+        role = _legacy.get_quest_role(user, quest_id)
+        db = _legacy.SessionLocal()
+        try:
+            row = db.query(_legacy.QuestMemoryEntry).filter(
+                _legacy.QuestMemoryEntry.id == memory_id,
+                _legacy.QuestMemoryEntry.session_id == quest_id,
+            ).first()
+            if not row or (role != "captain" and row.visibility != "quest_shared") or not is_displayable_memory(row):
+                raise HTTPException(404, "Memory not found")
+            return {"memory": _legacy._memory_to_dict(row)}
         finally:
             db.close()
 
@@ -309,10 +355,7 @@ def setup_venture_routes(session_manager):
                 _legacy.GalleryImage.is_active == True,  # noqa: E712
             ).all()
             return {
-                "documents": [
-                    _artifact_document_payload(document, proposal_by_document.get(document.id))
-                    for document in documents
-                ],
+                "documents": [_artifact_document_payload(document, proposal_by_document.get(document.id)) for document in documents],
                 "gallery": [{"id": image.id, "filename": image.filename, "prompt": image.prompt} for image in images],
             }
         finally:
@@ -320,7 +363,7 @@ def setup_venture_routes(session_manager):
 
     @router.post("/api/quests/{quest_id}/artifact-proposals/{proposal_id}/publish")
     def publish_artifact_proposal(request: Request, quest_id: str, proposal_id: str, background_tasks: BackgroundTasks):
-        """Publish an Artifact, then create memory exclusively from its key points."""
+        """Publish an Artifact, then create Memory only from its Revelation lines."""
         _legacy.require_venture_runtime()
         captain = _legacy.require_quest_captain(request, quest_id)
         db = _legacy.SessionLocal()
@@ -331,9 +374,7 @@ def setup_venture_routes(session_manager):
             ).with_for_update().first()
             if not proposal:
                 raise HTTPException(404, "Artifact proposal not found")
-            document = db.query(_legacy.Document).filter(
-                _legacy.Document.id == proposal.document_id,
-            ).first()
+            document = db.query(_legacy.Document).filter(_legacy.Document.id == proposal.document_id).first()
             if not document:
                 raise HTTPException(404, "Artifact Draft not found")
 
@@ -357,7 +398,8 @@ def setup_venture_routes(session_manager):
 
             document.session_id = quest_id
             document.is_active = True
-            document.title = proposal.title or document.title
+            document.title = artifact_display_title(document, proposal, _legacy._json_loads)
+            proposal.title = document.title
             proposal.status = "published"
             proposal.visibility = "quest_shared"
             proposal.reviewed_at = proposal.published_at = _legacy.utcnow_naive()
