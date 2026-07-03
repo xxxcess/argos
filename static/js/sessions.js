@@ -95,7 +95,14 @@ async function _applyDefaultChatModelToSession(sessionId, meta) {
 }
 
 function _showNewChatUi({ focus = true } = {}) {
+  const previousSessionId = currentSessionId;
   history.replaceState(null, '', window.location.pathname);
+  currentSessionId = null;
+  try {
+    document.dispatchEvent(new CustomEvent('odysseus:new-chat-shown', {
+      detail: { previousSessionId }
+    }));
+  } catch (_) {}
   document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
     el.classList.remove('active-session', 'active');
   });

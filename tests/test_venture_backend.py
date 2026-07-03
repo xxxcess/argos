@@ -353,8 +353,42 @@ def test_captain_requested_discussion_synthesis_creates_review_draft(monkeypatch
     proposal = client.get(f"/api/quests/{quest_id}/artifact-proposals/{proposal_id}").json()["proposal"]
     assert proposal["status"] == "pending_review"
     assert proposal["visibility"] == "captain_private"
+    assert "Milestone Report" in proposal["document"]["content"]
+    assert "Evidence supporting this milestone" in proposal["document"]["content"]
     assert "Captain discussion" in proposal["document"]["content"]
     assert "[D1]" in proposal["document"]["content"]
+
+
+def test_quest_human_message_persists_author_role_at_send(monkeypatch):
+    client, SessionLocal, _app, sm, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    sess = sm.get_session(quest_id)
+
+    from routes.chat_helpers import PreprocessedMessage, add_user_message
+
+    class _ChatHandler:
+        def update_session_name_if_needed(self, *_args, **_kwargs):
+            return None
+
+    add_user_message(
+        sess,
+        _ChatHandler(),
+        PreprocessedMessage(
+            enhanced_message="Captain decision",
+            user_content="Captain decision",
+            text_for_context="Captain decision",
+            youtube_transcripts=[],
+            attachment_meta=[],
+        ),
+        user="ada",
+        session_id=quest_id,
+    )
+
+    meta = sess.history[-1].metadata
+    assert meta["author_type"] == "human"
+    assert meta["author_username"] == "ada"
+    assert meta["author_role_at_send"] == "captain"
+    assert meta["venture_quest"] is True
 
 
 def test_venture_tool_policy_allowlist_blocks_generic_and_mcp_tools():
@@ -405,6 +439,7 @@ def test_artifact_draft_private_until_publish_without_generic_shared_memory(monk
 
     app.state.test_user = "ada"
     assert client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal_id}/publish").status_code == 200
+    assert client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal_id}/publish").json()["already_published"] is True
 
     db = SessionLocal()
     try:
@@ -414,12 +449,49 @@ def test_artifact_draft_private_until_publish_without_generic_shared_memory(monk
             QuestMemoryEntry.session_id == quest_id,
             QuestMemoryEntry.category == "artifact_reference",
         ).count() == 0
+        jobs = db.query(QuestSynthesisJob).filter(
+            QuestSynthesisJob.quest_id == quest_id,
+            QuestSynthesisJob.trigger == "artifact_revision",
+            QuestSynthesisJob.artifact_proposal_id == proposal_id,
+        ).all()
+        assert len(jobs) == 1
+        activity = db.query(ChatMessage).filter(ChatMessage.session_id == quest_id, ChatMessage.role == "system").order_by(ChatMessage.timestamp.desc()).first()
+        assert "background_task" in (activity.meta_data or "")
     finally:
         db.close()
 
     app.state.test_user = "mara"
     docs = client.get(f"/api/quests/{quest_id}/artifacts").json()["documents"]
     assert [d["id"] for d in docs] == [doc_id]
+
+
+def test_artifact_memory_synthesis_noop_preserves_publication(monkeypatch):
+    client, SessionLocal, _app, *_ = _client(monkeypatch)
+    quest_id = client.post("/api/quests", json=_quest_payload()).json()["quest"]["id"]
+    proposal = client.post(
+        f"/api/quests/{quest_id}/artifact-proposals",
+        json={"title": "No New Memory", "summary": "Reference only.", "evidence_refs": ["source:v1"]},
+    ).json()["proposal"]
+    client.post(f"/api/quests/{quest_id}/artifact-proposals/{proposal['id']}/publish")
+    db = SessionLocal()
+    try:
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.artifact_proposal_id == proposal["id"]).one()
+        job_id = job.id
+        doc_id = db.query(QuestArtifactProposal).filter(QuestArtifactProposal.id == proposal["id"]).one().document_id
+    finally:
+        db.close()
+
+    from src.venture_synthesis import process_synthesis_job
+    asyncio.run(process_synthesis_job(job_id))
+
+    db = SessionLocal()
+    try:
+        assert db.query(Document).filter(Document.id == doc_id).one().is_active is True
+        job = db.query(QuestSynthesisJob).filter(QuestSynthesisJob.id == job_id).one()
+        assert job.status == "completed"
+        assert "No new durable memory" in job.result_json
+    finally:
+        db.close()
 
 
 def test_quest_memory_isolation_and_visibility(monkeypatch):

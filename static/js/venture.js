@@ -6,7 +6,10 @@ let currentQuestId = null;
 let currentQuestCapabilities = null;
 const questSessionIds = new Set();
 const questHistorySignatures = new Map();
-let questSourcePollTimer = null;
+let railRenderEpoch = 0;
+let railPollTimer = null;
+let railPollQuestId = null;
+const QUEST_RAIL_HIDDEN_KEY = 'argos-venture:quest-rail-hidden';
 
 const captainOnlySelectors = [
   '#workspace-new-tab', '#rail-new-session', '#new-session-btn', '#overflow-attach-btn', '#overflow-doc-btn',
@@ -79,14 +82,13 @@ function installStyles() {
   style.id = 'venture-style';
   style.textContent = `
     body.argos-venture #current-meta::before { content: "Voyage Log · "; opacity: .75; }
-    .venture-right-rail { --venture-rail-width: min(360px, 34vw); position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: var(--venture-rail-width); min-width: 280px; max-width: calc(100vw - var(--icon-rail-w, 0px)); z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow-x:hidden; overflow-y:auto; padding: 12px; box-sizing: border-box; transition: transform 160ms cubic-bezier(0.22, 0.61, 0.36, 1); overflow-wrap:anywhere; }
-    .venture-right-rail.collapsed { transform: translateX(calc(-100% + 38px)); overflow:hidden; }
+    .venture-right-rail { --venture-rail-width: min(360px, 34vw); position: fixed; left: var(--icon-rail-w, 0px); right: auto; top: var(--workspace-shell-h, 0px); bottom: 0; width: var(--venture-rail-width); min-width: 280px; max-width: calc(100vw - var(--icon-rail-w, 0px)); z-index: 20; background: var(--panel, #151515); border-right: 1px solid var(--border); overflow-x:hidden; overflow-y:auto; padding: 12px; box-sizing: border-box; overflow-wrap:anywhere; }
+    .venture-rail-show { position: fixed; left: calc(var(--icon-rail-w, 0px) + 10px); top: calc(var(--workspace-shell-h, 0px) + 10px); z-index: 21; border:1px solid var(--border); background:var(--panel, #151515); color:var(--fg); border-radius:6px; padding:6px 9px; font:inherit; font-size:12px; cursor:pointer; box-shadow:0 8px 24px rgba(0,0,0,.22); }
     .venture-rail-header { position: sticky; top: 0; z-index: 2; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 0 8px; background:var(--panel, #151515); }
     .venture-rail-title { font-size:12px; font-weight:700; opacity:.75; min-width:0; overflow-wrap:anywhere; }
-    .venture-rail-toggle { width: 30px; height: 30px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:18px; line-height:1; }
-    .venture-right-rail.collapsed .venture-rail-title, .venture-right-rail.collapsed .venture-card, .venture-right-rail.collapsed .venture-muted, .venture-right-rail.collapsed .venture-list { visibility:hidden; }
+    .venture-rail-actions { display:flex; align-items:center; gap:6px; }
+    .venture-rail-toggle { border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 6px; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; font:inherit; font-size:12px; line-height:1; padding:6px 8px; }
     body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: var(--venture-chat-offset, min(360px, 34vw)); }
-    body.argos-venture.venture-quest-rail-collapsed #chat-container { margin-left: 38px; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-command-bar { display:none!important; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible #mission-composer-slot { display:none!important; }
     body.argos-venture.venture-shipmate.mission-dashboard-visible .mission-dashboard-header { display:none!important; }
@@ -150,10 +152,15 @@ function installStyles() {
     .venture-check-row { display:flex!important; align-items:center; gap:8px; margin:0!important; opacity:1!important; }
     .venture-file-list { margin-top:6px; display:grid; gap:4px; }
     .venture-full-span { grid-column:1 / -1; }
+    .voyage-timeline-event, .voyage-activity-card { margin:10px 0; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:color-mix(in srgb, var(--panel) 92%, var(--fg) 3%); font-size:12px; line-height:1.45; }
+    .voyage-timeline-event { border-left:3px solid color-mix(in srgb, var(--fg) 40%, transparent); }
+    .voyage-activity-card { border-left:3px solid color-mix(in srgb, var(--accent, var(--fg)) 55%, transparent); }
+    .voyage-card-title { font-weight:700; margin-bottom:3px; }
+    .voyage-card-meta { opacity:.68; white-space:pre-wrap; }
     @media (max-width: 900px) { .venture-right-rail { width:min(86vw, 360px); } }
     @media (max-width: 900px) { body.argos-venture.venture-quest-rail-visible #chat-container { margin-left: min(86vw, 360px); } }
     @media (max-width: 720px) { .venture-choice-grid, .venture-form-grid { grid-template-columns:1fr; } }
-    @media (max-width: 720px) { body.argos-venture.venture-quest-rail-visible #chat-container, body.argos-venture.venture-quest-rail-collapsed #chat-container { margin-left:0; } }
+    @media (max-width: 720px) { body.argos-venture.venture-quest-rail-visible #chat-container { margin-left:0; } }
   `;
   document.head.appendChild(style);
 }
@@ -198,8 +205,16 @@ function hardDisableShipmateControls() {
 
 function setRailLayoutState(visible, collapsed = false) {
   document.body.classList.toggle('venture-quest-rail-visible', !!visible && !collapsed);
-  document.body.classList.toggle('venture-quest-rail-collapsed', !!visible && !!collapsed);
+  document.body.classList.toggle('venture-quest-rail-collapsed', false);
   document.documentElement.style.setProperty('--venture-chat-offset', visible && !collapsed ? 'min(360px, 34vw)' : '0px');
+}
+
+function isQuestRailHidden() {
+  try { return localStorage.getItem(QUEST_RAIL_HIDDEN_KEY) === '1'; } catch (_) { return false; }
+}
+
+function setQuestRailHidden(hidden) {
+  try { localStorage.setItem(QUEST_RAIL_HIDDEN_KEY, hidden ? '1' : '0'); } catch (_) {}
 }
 
 function hideVentureNewChatShortcuts() {
@@ -335,53 +350,105 @@ async function syncActiveQuestHistory() {
   await window.sessionModule?.selectSession?.(qid, { keepSidebar: true });
 }
 
-async function renderRightRail() {
-  if (!caps?.is_venture) return;
-  installStyles();
-  const qid = selectedQuestId();
-  let rail = document.getElementById('venture-right-rail');
-  if (!qid || !questSessionIds.has(String(qid))) {
-    currentQuestCapabilities = null;
-    applyQuestCapabilities();
-    rail?.remove();
-    setRailLayoutState(false);
+function stopQuestRailPolling() {
+  if (railPollTimer) {
+    clearInterval(railPollTimer);
+    railPollTimer = null;
+  }
+  railPollQuestId = null;
+}
+
+function questRailHasActiveWork(sources, synthesisJobs) {
+  return (sources || []).some(s => s.index_status?.has_active_job)
+    || (synthesisJobs || []).some(j => ['queued', 'running'].includes(j.status));
+}
+
+function syncQuestRailPolling(qid, sources, synthesisJobs) {
+  const shouldPoll = !!qid && questRailHasActiveWork(sources, synthesisJobs);
+  if (!shouldPoll) {
+    stopQuestRailPolling();
     return;
   }
+  if (railPollTimer && railPollQuestId === qid) return;
+  stopQuestRailPolling();
+  railPollQuestId = qid;
+  railPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    if (selectedQuestId() !== railPollQuestId) {
+      stopQuestRailPolling();
+      return;
+    }
+    renderRightRail().catch(() => {});
+  }, 4000);
+}
+
+function teardownQuestRail() {
+  railRenderEpoch++;
+  currentQuestCapabilities = null;
+  applyQuestCapabilities();
+  stopQuestRailPolling();
+  document.getElementById('venture-right-rail')?.remove();
+  document.getElementById('venture-rail-show')?.remove();
+  setRailLayoutState(false);
+}
+
+function ensureRailShowButton(qid) {
+  let btn = document.getElementById('venture-rail-show');
+  if (!qid) {
+    btn?.remove();
+    return null;
+  }
+  if (!btn) {
+    btn = h('button', {
+      id: 'venture-rail-show',
+      class: 'venture-rail-show',
+      type: 'button',
+      text: 'Show Quest panel',
+      onclick: async () => {
+        setQuestRailHidden(false);
+        await renderRightRail();
+      },
+    });
+    document.body.appendChild(btn);
+  }
+  return btn;
+}
+
+function ensureSingleQuestRail() {
+  const rails = Array.from(document.querySelectorAll('#venture-right-rail'));
+  rails.slice(1).forEach(node => node.remove());
+  let rail = rails[0];
   if (!rail) {
     rail = h('aside', { id: 'venture-right-rail', class: 'venture-right-rail', 'aria-label': 'Quest context' });
     document.body.appendChild(rail);
   }
-  rail.innerHTML = '';
-  setRailLayoutState(true, rail.classList.contains('collapsed'));
-  const toggle = h('button', {
-    class: 'venture-rail-toggle',
-    type: 'button',
-    title: rail.classList.contains('collapsed') ? 'Expand Quest context' : 'Collapse Quest context',
-    'aria-label': rail.classList.contains('collapsed') ? 'Expand Quest context' : 'Collapse Quest context',
-    text: rail.classList.contains('collapsed') ? '›' : '‹',
-    onclick: () => {
-      rail.classList.toggle('collapsed');
-      const collapsed = rail.classList.contains('collapsed');
-      toggle.textContent = collapsed ? '›' : '‹';
-      toggle.title = collapsed ? 'Expand Quest context' : 'Collapse Quest context';
-      toggle.setAttribute('aria-label', toggle.title);
-      setRailLayoutState(true, collapsed);
-    },
-  });
-  rail.appendChild(h('div', { class: 'venture-rail-header' }, [
-    h('div', { class: 'venture-rail-title', text: 'Quest Context' }),
-    toggle,
-  ]));
-  const quest = await getJson(`/api/quests/${encodeURIComponent(qid)}`);
-  if (!quest?.quest) {
-    currentQuestCapabilities = null;
-    applyQuestCapabilities();
-    rail.remove();
+  return rail;
+}
+
+async function renderRightRail() {
+  if (!caps?.is_venture) return;
+  installStyles();
+  const epoch = ++railRenderEpoch;
+  const qid = selectedQuestId();
+  if (!qid || !questSessionIds.has(String(qid))) {
+    teardownQuestRail();
+    return;
+  }
+  if (isQuestRailHidden()) {
+    stopQuestRailPolling();
+    document.getElementById('venture-right-rail')?.remove();
+    ensureRailShowButton(qid);
     setRailLayoutState(false);
     return;
   }
+  document.getElementById('venture-rail-show')?.remove();
+  const quest = await getJson(`/api/quests/${encodeURIComponent(qid)}`);
+  if (!quest?.quest) {
+    if (epoch === railRenderEpoch) teardownQuestRail();
+    return;
+  }
   if (!currentQuestCapabilities || currentQuestId !== qid) await loadQuestCapabilities(qid);
-  const [bearing, roster, sources, artifacts, memory, synthesisJobs] = await Promise.all([
+  const settled = await Promise.allSettled([
     getJson(`/api/quests/${encodeURIComponent(qid)}/bearing`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/roster`),
     getJson(`/api/quests/${encodeURIComponent(qid)}/sources`),
@@ -389,24 +456,41 @@ async function renderRightRail() {
     caps.can_view_quest_memory ? getJson(`/api/quests/${encodeURIComponent(qid)}/memory`) : Promise.resolve(null),
     caps.can_review_artifacts ? getJson(`/api/quests/${encodeURIComponent(qid)}/argo-synthesis/jobs`) : Promise.resolve(null),
   ]);
+  if (epoch !== railRenderEpoch) return;
+  const [bearing, roster, sources, artifacts, memory, synthesisJobs] = settled.map(r => r.status === 'fulfilled' ? r.value : null);
   const sourceRows = sources?.sources || [];
-  const activeSynthesis = (synthesisJobs?.jobs || []).some(j => ['queued', 'running'].includes(j.status));
-  if (sourceRows.some(s => s.index_status?.has_active_job) || activeSynthesis) {
-    if (!questSourcePollTimer) {
-      questSourcePollTimer = setInterval(() => {
-        if (!document.hidden) renderRightRail().catch(() => {});
-      }, 4000);
-    }
-  } else if (questSourcePollTimer) {
-    clearInterval(questSourcePollTimer);
-    questSourcePollTimer = null;
+  const jobs = synthesisJobs?.jobs || [];
+  syncQuestRailPolling(qid, sourceRows, jobs);
+  const rail = ensureSingleQuestRail();
+  const hide = h('button', {
+    class: 'venture-rail-toggle',
+    type: 'button',
+    title: 'Hide panel',
+    'aria-label': 'Hide Quest panel',
+    text: 'Hide panel',
+    onclick: async () => {
+      setQuestRailHidden(true);
+      await renderRightRail();
+    },
+  });
+  const children = [
+    h('div', { class: 'venture-rail-header' }, [
+      h('div', { class: 'venture-rail-title', text: quest.quest?.title || 'Quest Context' }),
+      h('div', { class: 'venture-rail-actions' }, [hide]),
+    ]),
+    currentBearingCard(bearing?.bearing || {}),
+    crewRoster(roster?.members || []),
+  ];
+  if (caps.can_manage_sources || sourceRows.length) children.push(sourceCard(sourceRows, qid));
+  if (caps.can_review_artifacts) {
+    const proposals = await getJson(`/api/quests/${encodeURIComponent(qid)}/artifact-proposals`);
+    if (epoch !== railRenderEpoch) return;
+    children.push(artifactReviewQueue(qid, proposals?.proposals || []));
   }
-  rail.appendChild(currentBearingCard(bearing?.bearing || {}));
-  rail.appendChild(crewRoster(roster?.members || []));
-  if (caps.can_manage_sources || sourceRows.length) rail.appendChild(sourceCard(sourceRows, qid));
-  if (caps.can_review_artifacts) rail.appendChild(artifactReviewQueue(qid));
-  rail.appendChild(artifactShelf(artifacts || { documents: [], gallery: [] }));
-  rail.appendChild(argoStatusCard(qid, memory?.memory || [], synthesisJobs?.jobs || []));
+  children.push(artifactShelf(artifacts || { documents: [], gallery: [] }));
+  children.push(argoStatusCard(qid, memory?.memory || [], jobs));
+  rail.replaceChildren(...children);
+  setRailLayoutState(true, false);
 }
 
 function currentBearingCard(b) {
@@ -491,20 +575,16 @@ function sourceCard(sources, qid) {
   ]);
 }
 
-function artifactReviewQueue(qid) {
-  const box = h('section', { class: 'venture-card ArtifactReviewQueue' }, [h('h3', { text: 'Artifact Review' }), h('div', { class: 'venture-muted', text: 'Loading...' })]);
-  getJson(`/api/quests/${encodeURIComponent(qid)}/artifact-proposals`).then(data => {
-    const proposals = data?.proposals || [];
-    box.innerHTML = '<h3>Artifact Review</h3>';
-    if (!proposals.length) box.appendChild(h('div', { class: 'venture-muted', text: 'No pending drafts.' }));
-    proposals.filter(p => p.status === 'pending_review').forEach(p => {
-      box.appendChild(h('div', { class: 'venture-row' }, [
-        h('span', { text: p.title }),
-        h('button', { class: 'venture-btn', type: 'button', text: 'Review', onclick: () => openArtifactDraft(p.id) }),
-      ]));
-    });
-  });
-  return box;
+function artifactReviewQueue(qid, proposals = []) {
+  const pending = proposals.filter(p => p.status === 'pending_review');
+  return h('section', { class: 'venture-card ArtifactReviewQueue' }, [
+    h('h3', { text: 'Artifact Review' }),
+    !pending.length ? h('div', { class: 'venture-muted', text: 'No pending drafts.' }) : null,
+    ...pending.map(p => h('div', { class: 'venture-row' }, [
+      h('span', { text: p.title }),
+      h('button', { class: 'venture-btn', type: 'button', text: 'Review', onclick: () => openArtifactDraft(p.id) }),
+    ])),
+  ]);
 }
 
 function artifactShelf(artifacts) {
@@ -514,11 +594,46 @@ function artifactShelf(artifacts) {
     h('h3', { text: 'Quest Artifacts' }),
     ...docs.map(d => h('div', { class: 'venture-row ArtifactCard' }, [
       h('span', { text: d.title }),
-      h('button', { class: 'venture-btn', type: 'button', text: 'Open', onclick: () => window.dispatchEvent(new CustomEvent('odysseus:open-document', { detail: { id: d.id } })) }),
+      h('button', { class: 'venture-btn', type: 'button', text: 'Open', onclick: () => openQuestArtifact(d.id) }),
     ])),
     ...gallery.map(g => h('div', { class: 'venture-row ArtifactCard' }, [h('span', { text: g.prompt || g.filename })])),
     (!docs.length && !gallery.length) ? h('div', { class: 'venture-muted', text: 'No published Artifacts yet.' }) : null,
   ]);
+}
+
+function showVentureError(message) {
+  if (window.uiModule?.showError) window.uiModule.showError(message);
+  else if (window.showError) window.showError(message);
+  else window.dispatchEvent(new CustomEvent('odysseus:toast', { detail: { type: 'error', message } }));
+}
+
+async function openQuestArtifact(documentId) {
+  if (!documentId) {
+    showVentureError('This Quest Artifact is missing its document link.');
+    return;
+  }
+  try {
+    const imported = window.documentModule ? null : await import('./document.js');
+    const documentModule = window.documentModule || imported?.default || imported;
+    if (!documentModule?.loadDocument) throw new Error('Document module unavailable.');
+    await documentModule.loadDocument(documentId);
+    documentModule.openPanel?.();
+    documentModule.switchToDoc?.(documentId);
+  } catch (err) {
+    showVentureError(err?.message || 'Unable to open this Quest Artifact.');
+  }
+}
+
+function closeQuestDocumentPanelForSessionChange(nextSessionId, previousSessionId) {
+  if (!caps?.is_venture) return;
+  if (!previousSessionId && !nextSessionId) return;
+  const prevWasQuest = previousSessionId && questSessionIds.has(String(previousSessionId));
+  const nextIsQuest = nextSessionId && questSessionIds.has(String(nextSessionId));
+  if (!prevWasQuest && !nextIsQuest) return;
+  if (String(previousSessionId || '') === String(nextSessionId || '')) return;
+  if (window.documentModule?.isPanelOpen?.()) {
+    window.documentModule.closePanel?.();
+  }
 }
 
 function synthesisStatusText(job) {
@@ -958,8 +1073,24 @@ async function initVenture() {
   }, 4000);
   await renderRightRail();
   syncActiveQuestHistory().catch(() => {});
-  window.addEventListener('hashchange', () => loadQuest(selectedQuestId()));
-  window.addEventListener('odysseus:session-selected', e => loadQuest(e.detail?.id || selectedQuestId()));
+  window.addEventListener('hashchange', () => {
+    closeQuestDocumentPanelForSessionChange(selectedQuestId(), currentQuestId);
+    loadQuest(selectedQuestId());
+  });
+  document.addEventListener('odysseus:session-selected', e => {
+    const nextId = e.detail?.sessionId || e.detail?.id || selectedQuestId();
+    closeQuestDocumentPanelForSessionChange(nextId, e.detail?.previousSessionId || currentQuestId);
+    loadQuest(nextId);
+  });
+  window.addEventListener('odysseus:session-selected', e => {
+    const nextId = e.detail?.sessionId || e.detail?.id || selectedQuestId();
+    closeQuestDocumentPanelForSessionChange(nextId, e.detail?.previousSessionId || currentQuestId);
+    loadQuest(nextId);
+  });
+  document.addEventListener('odysseus:new-chat-shown', () => {
+    closeQuestDocumentPanelForSessionChange('', currentQuestId);
+    teardownQuestRail();
+  });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) syncActiveQuestHistory().catch(() => {});
   });

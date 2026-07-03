@@ -2200,6 +2200,17 @@ export function addMessage(role, content, modelName, metadata) {
     var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
 
+    const voyageCard = buildVoyageCard(role, textRaw, metadata);
+    if (voyageCard) {
+      if (metadata?.event_id) {
+        Array.from(box.querySelectorAll('[data-voyage-event-id]'))
+          .filter(el => el.dataset.voyageEventId === String(metadata.event_id))
+          .forEach(el => el.remove());
+      }
+      box.appendChild(voyageCard);
+      return voyageCard;
+    }
+
     // --- Agent multi-bubble reconstruction from saved metadata ---
     if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {
       const roundTexts = metadata.round_texts || [];
@@ -2390,7 +2401,7 @@ export function addMessage(role, content, modelName, metadata) {
     const isCompacted = metadata?.compacted;
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? _assistantName() : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    var _roleText = ventureRoleLabel(role, metadata) || (role === 'user' ? 'You' : (isSlash || isCompacted) ? _assistantName() : modelRouteLabel(replyModels.requestedModel, resolvedModel));
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
     }
@@ -2667,6 +2678,98 @@ export function addMessage(role, content, modelName, metadata) {
     console.error('Error in addMessage:', error);
     if (uiModule) uiModule.showError('Failed to add message: ' + error.message);
   }
+}
+
+function currentViewerUsername() {
+  try { return localStorage.getItem('odysseus-auth-user') || ''; } catch (_) { return ''; }
+}
+
+function ventureRoleName(role) {
+  if (role === 'captain') return 'Captain';
+  if (role === 'shipmate') return 'Shipmate';
+  return role ? String(role) : '';
+}
+
+function ventureRoleLabel(role, metadata) {
+  if (role === 'assistant' && metadata?.venture_quest) return 'Argo';
+  if (role !== 'user') return '';
+  if (metadata?.author_type !== 'human') {
+    try {
+      const sid = window.sessionModule?.getCurrentSessionId?.();
+      if (document.body.classList.contains('argos-venture') && window.argosVentureIsQuestSession?.(sid)) {
+        return 'Quest member';
+      }
+    } catch (_) {}
+    return '';
+  }
+  const username = String(metadata.author_username || metadata.author_display_name || '').trim();
+  const roleName = ventureRoleName(metadata.author_role_at_send);
+  if (!username && !roleName) return 'Quest member';
+  const parts = [username || 'Quest member', roleName].filter(Boolean);
+  if (username && currentViewerUsername() && username.toLowerCase() === currentViewerUsername().toLowerCase()) {
+    parts.push('you');
+  }
+  return parts.join(' · ');
+}
+
+function formatVoyageDuration(startedAt, completedAt) {
+  if (!startedAt || !completedAt) return '';
+  const start = Date.parse(startedAt);
+  const end = Date.parse(completedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '';
+  const seconds = Math.round((end - start) / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.round(seconds / 60)}m`;
+}
+
+function buildVoyageCard(role, content, metadata = {}) {
+  if (!metadata || !metadata.event_type) return null;
+  const isActivity = metadata.presentation === 'background_task';
+  const isTimeline = role === 'system' || metadata.presentation === 'timeline_event';
+  if (!isActivity && !isTimeline) return null;
+  const card = document.createElement('div');
+  card.className = isActivity ? 'voyage-activity-card' : 'voyage-timeline-event';
+  if (metadata.event_id) card.dataset.voyageEventId = String(metadata.event_id);
+  const title = document.createElement('div');
+  title.className = 'voyage-card-title';
+  const status = String(metadata.status || '').replace(/_/g, ' ');
+  const baseTitle = metadata.title || String(metadata.event_type || 'Voyage event').replace(/_/g, ' ');
+  if (isActivity) {
+    const done = ['completed', 'skipped'].includes(metadata.status) ? ' complete' : '';
+    title.textContent = `${baseTitle}${done}`;
+  } else {
+    title.textContent = baseTitle;
+  }
+  card.appendChild(title);
+  const lines = [];
+  if (metadata.subject) lines.push(metadata.subject);
+  if (isActivity) {
+    const progress = metadata.progress || {};
+    const bits = [];
+    if (status) bits.push(status);
+    if (progress.total) {
+      const pct = Math.round(((progress.completed || 0) / progress.total) * 100);
+      bits.push(`${pct}%`);
+      bits.push(`${progress.completed || 0} / ${progress.total} ${progress.unit || ''}`.trim());
+    }
+    const duration = formatVoyageDuration(metadata.started_at, metadata.completed_at);
+    if (duration) bits.push(`completed in ${duration}`);
+    if (bits.length) lines.push(bits.join(' · '));
+    if (metadata.result && typeof metadata.result === 'object') {
+      const resultBits = Object.entries(metadata.result).slice(0, 3).map(([k, v]) => `${String(k).replace(/_/g, ' ')}: ${v}`);
+      if (resultBits.length) lines.push(resultBits.join(' · '));
+    }
+    if (metadata.safe_error) lines.push(metadata.safe_error);
+  } else {
+    const text = String(content || '').trim();
+    if (text && text !== title.textContent) lines.push(text);
+  }
+  if (metadata.started_at && !metadata.completed_at) lines.push(`Started ${new Date(metadata.started_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`);
+  const meta = document.createElement('div');
+  meta.className = 'voyage-card-meta';
+  meta.textContent = lines.filter(Boolean).join('\n');
+  card.appendChild(meta);
+  return card;
 }
 
 const chatRenderer = {

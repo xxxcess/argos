@@ -395,15 +395,21 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             # UI treats identically to "no docs" and silently masks
             # auth failures.
             from src.runtime_profile import is_venture_runtime
+            is_quest_session = False
             if is_venture_runtime():
-                from src.venture_auth import require_quest_member
-                require_quest_member(request, session_id)
+                from core.database import QuestBearing
+                is_quest_session = db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+                if is_quest_session:
+                    from src.venture_auth import require_quest_member
+                    require_quest_member(request, session_id)
+                else:
+                    _get_session_or_404(db, session_id, user)
             else:
                 _get_session_or_404(db, session_id, user)
             q = db.query(Document).filter(
                 Document.session_id == session_id
             )
-            if user and not is_venture_runtime():
+            if user and not is_quest_session:
                 q = q.filter(or_(Document.owner == user, Document.owner.is_(None)))
             docs = q.order_by(Document.created_at.desc()).all()
             return [_doc_to_dict(d) for d in docs]

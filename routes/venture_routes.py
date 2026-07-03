@@ -55,7 +55,7 @@ SOURCE_ACCESS_MODES = {"captain_only", "shared_read", "shared_summaries"}
 SOURCE_STATUSES = {"active", "paused", "error", "archived"}
 INVITE_STATUSES = {"pending", "accepted", "declined", "revoked", "expired"}
 MEMORY_VISIBILITIES = {"captain_private", "quest_shared"}
-MEMORY_STATES = {"provisional", "confirmed", "stale", "superseded", "retired"}
+MEMORY_STATES = {"provisional", "confirmed", "stale", "contradicted", "superseded", "retired"}
 MEMORY_CATEGORIES = {
     "bearing",
     "decision",
@@ -81,6 +81,17 @@ def _json_loads(value: str | None, fallback):
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True)
+
+
+def _timeline_meta(event_type: str, *, title: str | None = None, event_id: str | None = None, **fields) -> str:
+    payload = {
+        "event_type": event_type,
+        "presentation": "timeline_event",
+        "event_id": event_id or f"{event_type}:{uuid.uuid4().hex}",
+        "title": title or event_type.replace("_", " ").title(),
+        **fields,
+    }
+    return _json_dumps(payload)
 
 
 def _user_is_admin(request: Request, username: str) -> bool:
@@ -656,7 +667,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                 if sess:
                     sess.name = body.title
             row.updated_at = utcnow_naive()
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content="Current Bearing updated.", meta_data=_json_dumps({"event_type": "current_bearing_updated", "actor": captain})))
+            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content="Current Bearing updated.", meta_data=_timeline_meta("current_bearing_updated", title="Bearing changed", actor=captain)))
             db.commit()
             return {"bearing": _bearing_to_dict(row)}
         except Exception:
@@ -717,7 +728,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             resource_id=inv.id,
             actions=[],
         )
-        db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"{invitee} was invited to the Quest.", meta_data=_json_dumps({"event_type": "shipmate_invited", "actor": captain})))
+        db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"{invitee} was invited to the Quest.", meta_data=_timeline_meta("shipmate_invited", title="Shipmate invited", actor=captain, subject=invitee)))
         return inv
 
     @router.post("/api/quests/{quest_id}/invitations", status_code=202)
@@ -789,9 +800,9 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
                     inv = db.query(QuestInvitation).filter(QuestInvitation.id == invitation_id, QuestInvitation.invitee_username == user).first()
                     inv.status = "accepted"
                     inv.responded_at = now
-                db.add(ChatMessage(id=uuid.uuid4().hex, session_id=inv.session_id, role="system", content=f"{user} joined the Quest.", meta_data=_json_dumps({"event_type": "shipmate_joined", "actor": user})))
+                db.add(ChatMessage(id=uuid.uuid4().hex, session_id=inv.session_id, role="system", content=f"{user} joined the Quest.", meta_data=_timeline_meta("shipmate_joined", title="Shipmate joined", actor=user, subject=user)))
             else:
-                db.add(ChatMessage(id=uuid.uuid4().hex, session_id=inv.session_id, role="system", content=f"{user} declined the Quest invitation.", meta_data=_json_dumps({"event_type": "shipmate_declined", "actor": user})))
+                db.add(ChatMessage(id=uuid.uuid4().hex, session_id=inv.session_id, role="system", content=f"{user} declined the Quest invitation.", meta_data=_timeline_meta("shipmate_declined", title="Invitation declined", actor=user, subject=user)))
             _notify(db, user, f"quest-invite:{inv.id}", state="resolved", title="Quest invitation resolved", message=f"You {status} the invitation.", actions=[])
             _notify(db, inv.invited_by, f"quest-invite-progress:{inv.id}", category="inbox", state="resolved", title=f"{user} {status} your invitation", message=f"{user} {status} your invitation to {quest.name if quest else 'the Quest'}.", resource_type="quest_invitation", resource_id=inv.id, actions=[])
             db.commit()
@@ -864,7 +875,7 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             db.add(row)
             if source_mode == "dynamic":
                 db.add(QuestSourceCheckpoint(id=uuid.uuid4().hex, quest_source_id=row.id, cursor=str(body.configuration.get("initial_cursor") or "")))
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Source connected: {body.display_name}", meta_data=_json_dumps({"event_type": "source_connected", "source_id": row.id, "actor": captain})))
+            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Source connected: {body.display_name}", meta_data=_timeline_meta("source_connected", title="Source connected", source_id=row.id, actor=captain, subject=body.display_name)))
             from src.quest_indexing import enqueue_index_job, job_to_dict
             job = enqueue_index_job(db, row, trigger="source_connected", created_by=captain)
             db.commit()
@@ -1073,24 +1084,39 @@ def setup_venture_routes(session_manager: SessionManager) -> APIRouter:
             db.close()
 
     def _proposal_document_content(body: ProposalCreate) -> str:
-        evidence = "\n".join(f"- {item}" for item in body.evidence_refs) or "- Evidence reference pending"
-        return f"""# {body.title}
-
-## What changed or was discovered
-{body.summary or 'A possible Quest finding was identified from scoped evidence.'}
-
-## Why it matters
-This may affect the Quest's Current Bearing and should be reviewed by the Captain.
-
-## Evidence
-{evidence}
-
-## Confidence and uncertainty
-Confidence: low until the Captain reviews the underlying source evidence. Unsupported conclusions must not be treated as confirmed.
-
-## Recommended next bearing
-Review the cited evidence, validate the pattern, and decide whether to publish this as a Quest Artifact.
-"""
+        rows = []
+        evidence_blocks = []
+        for idx, item in enumerate(body.evidence_refs or [], 1):
+            evidence_id = f"E{idx}"
+            label = str(item).strip()
+            if not label:
+                continue
+            evidence_blocks.append(f"### Evidence reference {idx}\n{body.summary or 'Captain-supplied Artifact draft claim.'} [{evidence_id}]\n\n- **[{evidence_id}] {label}**")
+            rows.append(f"| {evidence_id} | {label} |  | Draft claim |")
+        sections = [
+            f"# Milestone Report - {body.title}",
+            "",
+            "**Quest:** Pending Quest context  ",
+            "**Current Bearing:** Pending Captain review  ",
+            "**Report status:** draft  ",
+            "**Evidence window:** unspecified",
+            "",
+            "## What changed",
+            body.summary or "Captain-supplied Artifact draft pending evidence review.",
+        ]
+        if evidence_blocks:
+            sections.extend(["", "## Evidence supporting this milestone", "", "\n\n".join(evidence_blocks)])
+        sections.extend([
+            "",
+            "## Confidence and limits",
+            "Confidence: low. This draft includes only supplied evidence references; missing quotes, locators, timestamps, and URLs were intentionally not fabricated.",
+            "",
+            "## Recommended next bearing",
+            "1. Review the cited evidence and add specific source locators before publishing.",
+        ])
+        if rows:
+            sections.extend(["", "## Evidence index", "", "| ID | Specific source | Locator | Supports |", "|---|---|---|---|", *rows])
+        return "\n".join(sections) + "\n"
 
     @router.post("/api/quests/{quest_id}/artifact-proposals", status_code=201)
     def create_artifact_proposal(request: Request, quest_id: str, body: ProposalCreate):
@@ -1115,7 +1141,7 @@ Review the cited evidence, validate the pattern, and decide whether to publish t
             proposal = QuestArtifactProposal(id=uuid.uuid4().hex, session_id=quest_id, document_id=doc.id, captain_username=captain, artifact_type=body.artifact_type, title=body.title, summary=body.summary, evidence_refs_json=_json_dumps(body.evidence_refs), evidence_fingerprint=fp, source_version_refs_json=_json_dumps(body.source_version_refs))
             db.add(proposal)
             _notify(db, captain, f"artifact-proposal:{proposal.id}", category="inbox", state="action_required", title="New Artifact Draft ready", message="Argo identified a possible pattern from newly scoped Quest evidence.", resource_type="quest_artifact_proposal", resource_id=proposal.id, actions=[{"id": "review", "label": "Review Draft", "style": "secondary"}, {"id": "publish", "label": "Publish to Quest", "style": "primary"}, {"id": "decline", "label": "Decline", "style": "secondary"}])
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content="Artifact Draft created for Captain review.", meta_data=_json_dumps({"event_type": "artifact_draft_created", "proposal_id": proposal.id, "actor": "argo"})))
+            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content="Artifact Draft created for Captain review.", meta_data=_timeline_meta("artifact_draft_created", title="Artifact draft created", proposal_id=proposal.id, actor="argo")))
             db.commit()
             return {"proposal": _proposal_to_dict(proposal, include_document=True)}
         except Exception:
@@ -1169,7 +1195,47 @@ Review the cited evidence, validate the pattern, and decide whether to publish t
             row.status = "published"
             row.visibility = "quest_shared"
             row.reviewed_at = row.published_at = utcnow_naive()
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Artifact published: {row.title}", meta_data=_json_dumps({"event_type": "artifact_published", "proposal_id": row.id, "document_id": doc.id, "actor": captain})))
+            publish_event_id = f"artifact_published:{doc.id}"
+            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Quest Artifact published: {row.title}", meta_data=_timeline_meta("artifact_published", title="Artifact published", event_id=publish_event_id, proposal_id=row.id, document_id=doc.id, actor=captain, subject=row.title)))
+            existing_memory_job = db.query(QuestSynthesisJob).filter(
+                QuestSynthesisJob.quest_id == quest_id,
+                QuestSynthesisJob.trigger == "artifact_revision",
+                QuestSynthesisJob.artifact_proposal_id == row.id,
+            ).first()
+            if existing_memory_job is None:
+                memory_job = QuestSynthesisJob(
+                    id=uuid.uuid4().hex,
+                    quest_id=quest_id,
+                    trigger="artifact_revision",
+                    status="queued",
+                    created_by=captain,
+                    artifact_proposal_id=row.id,
+                    requested_at=utcnow_naive(),
+                    result_json=_json_dumps({
+                        "event_type": "memory_synthesis",
+                        "artifact_id": doc.id,
+                        "trigger_event_id": publish_event_id,
+                    }),
+                )
+                db.add(memory_job)
+                db.add(ChatMessage(
+                    id=uuid.uuid4().hex,
+                    session_id=quest_id,
+                    role="system",
+                    content=f"Memory synthesis queued for Artifact: {row.title}",
+                    meta_data=_json_dumps({
+                        "event_type": "memory_synthesis",
+                        "presentation": "background_task",
+                        "event_id": f"memory-synthesis:artifact:{doc.id}",
+                        "task_id": memory_job.id,
+                        "status": "queued",
+                        "title": "Memory synthesis",
+                        "subject": row.title,
+                        "artifact_id": doc.id,
+                        "quest_id": quest_id,
+                        "trigger_event_id": publish_event_id,
+                    }),
+                ))
             synth = _json_loads(row.synthesis_json, {})
             for candidate in (synth.get("memory_candidates") or [])[:3]:
                 category = candidate.get("category")
@@ -1224,7 +1290,7 @@ Review the cited evidence, validate the pattern, and decide whether to publish t
                 raise HTTPException(409, "Artifact proposal is not pending review")
             row.status = "declined"
             row.reviewed_at = row.declined_at = utcnow_naive()
-            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Artifact Draft declined: {row.title}", meta_data=_json_dumps({"event_type": "artifact_declined", "proposal_id": row.id, "actor": captain})))
+            db.add(ChatMessage(id=uuid.uuid4().hex, session_id=quest_id, role="system", content=f"Artifact Draft declined: {row.title}", meta_data=_timeline_meta("artifact_declined", title="Artifact draft declined", proposal_id=row.id, actor=captain, subject=row.title)))
             _notify(db, captain, f"artifact-proposal:{row.id}", state="resolved", title="Artifact Draft declined", message=f"Declined '{row.title}'.", actions=[])
             db.commit()
             return {"proposal": _proposal_to_dict(row)}

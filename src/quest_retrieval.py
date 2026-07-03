@@ -39,6 +39,20 @@ class QuestRetrievalResult:
             self.recall = []
 
 
+@dataclass(frozen=True)
+class QuestMemoryPolicy:
+    max_memories: int = 5
+    max_token_budget: int = 1800
+    similarity_threshold: float = 1.0
+    candidate_limit: int = 40
+    per_kind_diversity_cap: int = 2
+    minimum_evidence_score: float = 0.0
+    recency_decay: float = 0.12
+
+
+DEFAULT_MEMORY_POLICY = QuestMemoryPolicy()
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else [], sort_keys=True)
 
@@ -187,42 +201,86 @@ def retrieve_quest_memories(
     quest_id: str,
     requester: str | None,
     query: str,
-    limit: int = 3,
+    limit: int | None = None,
+    policy: QuestMemoryPolicy = DEFAULT_MEMORY_POLICY,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Retrieve Quest-local Voyage Memory, separate from generic user memory."""
 
     db = SessionLocal()
     try:
+        limit = limit or policy.max_memories
         role = get_quest_role(requester, quest_id)
         if role not in {"captain", "shipmate"}:
             return "", []
         q = db.query(QuestMemoryEntry).filter(QuestMemoryEntry.session_id == quest_id)
         if role == "captain":
-            q = q.filter(QuestMemoryEntry.state.in_(("confirmed", "provisional")))
+            q = q.filter(QuestMemoryEntry.state.in_(("confirmed", "provisional", "contradicted")))
         else:
             q = q.filter(
                 QuestMemoryEntry.state == "confirmed",
                 QuestMemoryEntry.visibility == "quest_shared",
             )
-        rows = q.order_by(QuestMemoryEntry.pinned.desc(), QuestMemoryEntry.updated_at.desc()).all()
+        rows = q.order_by(QuestMemoryEntry.pinned.desc(), QuestMemoryEntry.updated_at.desc()).limit(policy.candidate_limit).all()
         tokens = {t.lower() for t in re.findall(r"[a-z0-9]{3,}", query or "")}
+        explicit_ids = {t.upper() for t in re.findall(r"\bM[0-9A-Za-z_-]+\b", query or "")}
+        explicit_tags = {t.lower() for t in re.findall(r"#([a-z0-9_-]{2,})", query or "", re.I)}
         scored = []
         for row in rows:
-            hay = f"{row.title} {row.content} {row.category}".lower()
-            score = sum(1 for t in tokens if t in hay)
+            provenance = json.loads(row.provenance_json or "{}") if row.provenance_json else {}
+            tags = set(str(t).lower() for t in provenance.get("tags", []) if isinstance(provenance, dict))
+            hay = f"{row.id} {row.title} {row.content} {row.category} {' '.join(tags)}".lower()
+            score = float(sum(1 for t in tokens if t in hay))
+            if row.id.upper() in explicit_ids or any(row.id.upper().endswith(e[1:]) for e in explicit_ids):
+                score += 10
+            if explicit_tags & tags:
+                score += 6
             if row.pinned:
+                score += 3 + float(row.pinned)
+            if row.state == "confirmed":
                 score += 2
-            if score > 0 or row.pinned:
+            elif row.state == "provisional":
+                score += 0.5
+            elif row.state == "contradicted":
+                score += 1 if {"contradiction", "conflict", "risk", "wrong"}.intersection(tokens) else -2
+            evidence_refs = _json_dumps(json.loads(row.evidence_chunk_refs_json or "[]") if row.evidence_chunk_refs_json else [])
+            if evidence_refs and evidence_refs != "[]":
+                score += 1.5
+            if row.artifact_id:
+                score += 1
+            if score >= policy.similarity_threshold or row.pinned:
                 scored.append((score, row))
         scored.sort(key=lambda item: (item[0], item[1].updated_at or item[1].created_at), reverse=True)
-        selected = [row for _score, row in scored[:limit]]
+        selected = []
+        per_kind: dict[str, int] = {}
+        used_chars = 0
+        for _score, row in scored:
+            kind_count = per_kind.get(row.category, 0)
+            if kind_count >= policy.per_kind_diversity_cap and not row.pinned:
+                continue
+            row_chars = len(row.title or "") + len(row.content or "") + 120
+            if selected and used_chars + row_chars > policy.max_token_budget:
+                continue
+            selected.append(row)
+            used_chars += row_chars
+            per_kind[row.category] = kind_count + 1
+            if len(selected) >= limit:
+                break
         if not selected:
             return "", []
-        lines = ["Relevant Voyage Memory. Treat as distilled guidance, not primary source evidence."]
+        lines = [
+            "[Quest Recall Context]",
+            "",
+            "Relevant memories:",
+        ]
         used = []
         for idx, row in enumerate(selected, 1):
-            state_label = "provisional " if row.state == "provisional" else ""
-            lines.append(f"[M{idx}] {state_label}{row.category}: {row.title}\n{row.content}")
+            evidence_refs = json.loads(row.evidence_chunk_refs_json or "[]") if row.evidence_chunk_refs_json else []
+            evidence_note = ""
+            if evidence_refs:
+                evidence_note = f"\n  Evidence: {', '.join(str(x) for x in evidence_refs[:3])}."
+            elif row.artifact_id:
+                evidence_note = f"\n  Evidence: Artifact {row.artifact_id}."
+            lines.append(f"- [M{idx}] {row.state.title()} {row.category}: {row.title}\n  {row.content}{evidence_note}")
             used.append({
                 "label": f"M{idx}",
                 "id": row.id,
@@ -233,7 +291,18 @@ def retrieve_quest_memories(
                 "confidence": row.confidence,
                 "artifact_id": row.artifact_id,
                 "artifact_revision_number": row.artifact_revision_number,
+                "evidence_chunk_refs": evidence_refs,
             })
-        return "\n\n".join(lines), used
+        lines.extend([
+            "",
+            "Instructions:",
+            "- Treat recalled memory as scoped context, not unchallengeable truth.",
+            "- Prefer direct evidence over derived memory.",
+            "- State uncertainty for provisional, stale, or contradictory memory.",
+            "- Cite underlying evidence, not memory IDs, in factual responses.",
+            "- Never reveal inaccessible memory.",
+            "[/Quest Recall Context]",
+        ])
+        return "\n".join(lines), used
     finally:
         db.close()

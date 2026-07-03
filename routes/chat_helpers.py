@@ -370,11 +370,49 @@ async def preprocess(
     )
 
 
-def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False):
+def _quest_author_metadata(user: str | None, session_id: str | None) -> dict | None:
+    if not user or not session_id:
+        return None
+    try:
+        from core.database import QuestBearing
+        from src.runtime_profile import is_venture_runtime
+        if not is_venture_runtime():
+            return None
+        db = SessionLocal()
+        try:
+            is_quest = db.query(QuestBearing.session_id).filter(QuestBearing.session_id == session_id).first() is not None
+        finally:
+            db.close()
+        if not is_quest:
+            return None
+        from src.venture_auth import get_quest_role
+        role = get_quest_role(user, session_id)
+        if role not in {"captain", "shipmate"}:
+            return None
+        return {
+            "venture_quest": True,
+            "author_type": "human",
+            "author_username": user,
+            "author_display_name": user,
+            "author_role_at_send": role,
+        }
+    except Exception:
+        logger.debug("Quest author metadata detection failed for session %s", session_id, exc_info=True)
+        return None
+
+
+def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False, user: str | None = None, session_id: str | None = None):
     """Add user message to session history and update session name.
     In incognito mode, still add to in-memory history (for conversation context)
     but skip session name update (which would persist)."""
-    user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
+    user_meta = {}
+    if preprocessed.attachment_meta:
+        user_meta["attachments"] = preprocessed.attachment_meta
+    quest_meta = _quest_author_metadata(user, session_id)
+    if quest_meta:
+        user_meta.update(quest_meta)
+    if not user_meta:
+        user_meta = None
     sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
     if not incognito:
         chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
@@ -606,16 +644,18 @@ async def build_chat_context(
         allow_tool_preprocessing=allow_tool_preprocessing,
     )
 
-    # Add user message to history
-    add_user_message(sess, chat_handler, preprocessed, incognito=incognito)
+    # Resolve owner-scoped prefs/context. Browser requests keep the cookie user;
+    # bearer-token chat requests use the token owner instead of the "api" sentinel.
+    user = effective_user(request)
+
+    # Add user message to history after resolving the authenticated user so
+    # Quest author metadata is derived server-side from membership.
+    add_user_message(sess, chat_handler, preprocessed, incognito=incognito, user=user, session_id=session_id)
 
     # Fire events
     if not incognito:
         fire_message_event(request, webhook_manager, session_id, sess, message, compare_mode)
 
-    # Resolve owner-scoped prefs/context. Browser requests keep the cookie user;
-    # bearer-token chat requests use the token owner instead of the "api" sentinel.
-    user = effective_user(request)
     uprefs = load_prefs_for_user(user)
     casual_low_signal = _is_casual_low_signal(message)
     is_quest = False

@@ -31,7 +31,7 @@ from core.database import (
 
 logger = logging.getLogger(__name__)
 
-JOB_STATUSES = {"queued", "running", "created", "updated", "no_insight", "failed", "cancelled"}
+JOB_STATUSES = {"queued", "running", "created", "updated", "completed", "no_insight", "failed", "cancelled"}
 JOB_TRIGGERS = {"grounded_response", "captain_requested", "artifact_revision"}
 TERMINAL_STATUSES = {"created", "updated", "no_insight", "failed", "cancelled"}
 MAX_OBSERVATIONS = 8
@@ -201,10 +201,12 @@ def build_evidence_pack(db, job: QuestSynthesisJob) -> tuple[dict[str, Any], dic
         item = {
             "label": label,
             "source_name": source.display_name,
+            "source_type": source.source_type,
             "locator": chunk.locator,
             "text": text,
             "chunk_id": chunk.id,
             "source_version_id": chunk.source_version_id,
+            "captured_at": chunk.version.captured_at.isoformat() + "Z" if getattr(chunk, "version", None) and chunk.version.captured_at else None,
         }
         labels[label] = item
         source_items.append(item)
@@ -412,43 +414,89 @@ def validate_synthesis_json(data: dict[str, Any], labels: dict[str, Any]) -> dic
     return out
 
 
+def _first_sentence(text: str, limit: int = 240) -> str:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    if not clean:
+        return ""
+    match = re.search(r"(.{20,}?[.!?])\s", clean)
+    return (match.group(1) if match else clean[:limit]).strip()[:limit]
+
+
+def _specific_source_label(label: str, item: dict[str, Any]) -> str:
+    if label.startswith("S"):
+        parts = [item.get("source_name") or "Quest source", item.get("locator")]
+        return " - ".join(str(p) for p in parts if p)
+    if label.startswith("D"):
+        return f"{item.get('speaker', 'Quest discussion')} - {item.get('locator', 'Voyage Log')}"
+    return label
+
+
 def render_artifact_markdown(synth: dict[str, Any], labels: dict[str, Any]) -> str:
-    obs = "\n".join(
-        f"- {o['text']} [{', '.join(o['citations'])}]"
-        for o in synth.get("observations", [])
-    ) or "- No evidence-backed observations."
-    questions = "\n".join(f"- {q}" for q in synth.get("open_questions", [])) or "- No explicit limits supplied."
-    next_steps = "\n".join(f"{idx}. {step}" for idx, step in enumerate(synth.get("recommended_next_bearing", []), 1)) or "1. Review the cited evidence."
-    source_lines = []
-    for label, item in labels.items():
-        if not label.startswith("S"):
+    cited_labels = []
+    for obs in synth.get("observations", []):
+        for citation in obs.get("citations", []):
+            if citation in labels and citation not in cited_labels:
+                cited_labels.append(citation)
+    evidence_times = [
+        item.get("captured_at")
+        for label, item in labels.items()
+        if label in cited_labels and isinstance(item, dict) and item.get("captured_at")
+    ]
+    evidence_window = "unspecified"
+    if evidence_times:
+        evidence_window = f"{min(evidence_times)}-{max(evidence_times)}"
+    lines = [
+        f"# Milestone Report - {synth['title']}",
+        "",
+        f"**Quest:** {synth.get('quest_title') or 'Quest'}  ",
+        f"**Current Bearing:** {synth.get('current_bearing') or 'See Voyage Log'}  ",
+        "**Report status:** draft  ",
+        f"**Evidence window:** {evidence_window}",
+        "",
+        "## What changed",
+        synth["key_finding"],
+        "",
+        "## Evidence supporting this milestone",
+    ]
+    for idx, obs in enumerate(synth.get("observations", []), 1):
+        citations = [c for c in obs.get("citations", []) if c in labels]
+        if not citations:
             continue
-        source_lines.append(f"- [{label}] {item.get('source_name', 'Quest source')} - {item.get('locator', '')}")
-    for label, item in labels.items():
-        if not label.startswith("D"):
-            continue
-        source_lines.append(f"- [{label}] {item.get('speaker', 'Quest discussion')} - {item.get('locator', 'Quest discussion')}")
-    source_trail = "\n".join(source_lines) or "- No source trail."
-    return f"""# {synth['title']}
-
-## Key finding
-{synth['key_finding']}
-
-## Evidence-backed observations
-{obs}
-
-## Interpretation
-{synth.get('interpretation') or 'Inference: Captain review is required before relying on this Artifact.'}
-
-## Open questions and limits
-{questions}
-
-## Recommended next bearing
-{next_steps}
-
-## Source trail
-{source_trail}
-"""
+        claim_title = obs.get("kind", "claim").replace("_", " ").title()
+        lines.extend(["", f"### {claim_title} {idx}", f"{obs['text']} [{citations[0]}]"])
+        for citation in citations:
+            item = labels[citation]
+            quote = _first_sentence(item.get("text") or obs["text"], 220)
+            if quote:
+                lines.extend(["", f"> \"{quote}\"", f"- **[{citation}] {_specific_source_label(citation, item)}**"])
+            meta = [
+                item.get("source_type") or item.get("kind") or "voyage",
+                item.get("locator"),
+                f"Captured {item.get('captured_at')}" if item.get("captured_at") else None,
+            ]
+            meta_line = " · ".join(str(x) for x in meta if x)
+            if meta_line:
+                lines.append(meta_line)
+    if synth.get("interpretation"):
+        lines.extend(["", "## Why this matters", synth["interpretation"]])
+    questions = [q for q in synth.get("open_questions", []) if str(q).strip()]
+    if questions:
+        lines.extend(["", "## Tension or contradiction to resolve", "\n".join(f"- {q}" for q in questions)])
+    lines.extend(["", "## Confidence and limits", f"Confidence: {synth.get('confidence', 'low')}. Claims are limited to the evidence cited above."])
+    next_steps = [s for s in synth.get("recommended_next_bearing", []) if str(s).strip()]
+    if next_steps:
+        lines.extend(["", "## Recommended next bearing", "\n".join(f"{i}. {step}" for i, step in enumerate(next_steps, 1))])
+    index_rows = []
+    for citation in cited_labels:
+        item = labels[citation]
+        supports = []
+        for obs in synth.get("observations", []):
+            if citation in obs.get("citations", []):
+                supports.append(obs.get("text", "")[:80])
+        index_rows.append(f"| {citation} | {_specific_source_label(citation, item)} | {item.get('locator', '')} | {'; '.join(supports)} |")
+    if index_rows:
+        lines.extend(["", "## Evidence index", "", "| ID | Specific source | Locator | Supports |", "|---|---|---|---|", *index_rows])
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _fingerprint(synth: dict[str, Any], chunk_ids: list[str]) -> str:
@@ -464,6 +512,15 @@ def persist_synthesis_result(db, job: QuestSynthesisJob, synth: dict[str, Any], 
     quest = db.query(DbSession).filter(DbSession.id == job.quest_id).first()
     if not quest:
         raise ValueError("quest_not_found")
+    bearing = db.query(QuestBearing).filter(QuestBearing.session_id == job.quest_id).first()
+    if bearing:
+        synth = {
+            **synth,
+            "quest_title": quest.name,
+            "current_bearing": bearing.current_summary or bearing.next_bearing or bearing.exploration_goal or bearing.title,
+        }
+    else:
+        synth = {**synth, "quest_title": quest.name}
     chunk_ids = [item["chunk_id"] for item in labels.values() if isinstance(item, dict) and item.get("chunk_id")]
     fp = _fingerprint(synth, chunk_ids)
     existing = db.query(QuestArtifactProposal).filter(
@@ -582,6 +639,11 @@ async def process_synthesis_job(job_id: str) -> None:
         job.started_at = job.started_at or utcnow_naive()
         job.attempt_count = (job.attempt_count or 0) + 1
         db.commit()
+        if job.trigger == "artifact_revision":
+            result = _process_artifact_memory_synthesis(db, job)
+            db.commit()
+            logger.debug("[venture-memory-synthesis] %s", result)
+            return
         pack, labels = build_evidence_pack(db, job)
         source_count = len([k for k in labels if k.startswith("S")])
         discussion_count = len([k for k in labels if k.startswith("D")])
@@ -616,6 +678,89 @@ async def process_synthesis_job(job_id: str) -> None:
         logger.info("Quest synthesis job %s failed: %s", job_id, exc)
     finally:
         db.close()
+
+
+def _process_artifact_memory_synthesis(db, job: QuestSynthesisJob) -> dict[str, Any]:
+    prop = db.query(QuestArtifactProposal).filter(
+        QuestArtifactProposal.id == job.artifact_proposal_id,
+        QuestArtifactProposal.quest_id == job.quest_id if hasattr(QuestArtifactProposal, "quest_id") else QuestArtifactProposal.session_id == job.quest_id,
+    ).first()
+    if not prop or prop.status != "published":
+        job.status = "failed"
+        job.finished_at = utcnow_naive()
+        job.safe_error_code = "artifact_not_published"
+        job.safe_error_message = "Memory synthesis could not find the published Artifact."
+        return {"changed_memory_ids": [], "reason": "artifact_not_published"}
+    synth = _loads(prop.synthesis_json, {})
+    candidates = synth.get("memory_candidates") if isinstance(synth, dict) else []
+    changed = []
+    source_versions = _loads(prop.source_version_refs_json, [])
+    evidence_chunks = _loads(prop.evidence_chunk_refs_json, [])
+    for candidate in (candidates or [])[:MAX_MEMORY_CANDIDATES]:
+        if not isinstance(candidate, dict):
+            continue
+        title = str(candidate.get("title") or prop.title).strip()[:120]
+        content = str(candidate.get("content") or "").strip()[:500]
+        if not title or not content:
+            continue
+        category = str(candidate.get("category") or "finding")
+        if category not in {"finding", "decision", "risk", "open_question", "constraint", "next_step", "contradiction"}:
+            category = "finding"
+        existing = db.query(QuestMemoryEntry).filter(
+            QuestMemoryEntry.session_id == job.quest_id,
+            QuestMemoryEntry.artifact_id == prop.id,
+            QuestMemoryEntry.title == title,
+            QuestMemoryEntry.content == content,
+        ).first()
+        if existing:
+            continue
+        mem = QuestMemoryEntry(
+            id=uuid.uuid4().hex,
+            session_id=job.quest_id,
+            category=category,
+            visibility="quest_shared",
+            state="confirmed",
+            title=title,
+            content=content,
+            confidence=candidate.get("confidence") if candidate.get("confidence") in {"low", "medium", "high"} else "medium",
+            provenance_json=_dumps({"artifact_proposal_id": prop.id, "citations": candidate.get("citations") or [], "trigger_job_id": job.id}),
+            source_version_refs_json=_dumps(source_versions),
+            evidence_chunk_refs_json=_dumps(evidence_chunks),
+            artifact_id=prop.id,
+            artifact_revision_number=prop.revision_number,
+            claim_key=prop.claim_key,
+            created_by="argo",
+        )
+        db.add(mem)
+        changed.append(mem.id)
+    job.status = "completed"
+    job.finished_at = utcnow_naive()
+    summary = (
+        f"{len(changed)} durable memory entr{'y' if len(changed) == 1 else 'ies'} created from the published Artifact."
+        if changed else "No new durable memory; published Artifact confirmed existing Quest context."
+    )
+    job.result_json = _dumps({"changed_memory_ids": changed, "safe_summary": summary, "reason": "completed" if changed else "no_op"})
+    doc_id = prop.document_id
+    db.add(ChatMessage(
+        id=uuid.uuid4().hex,
+        session_id=job.quest_id,
+        role="system",
+        content=summary,
+        meta_data=_dumps({
+            "event_type": "memory_synthesis",
+            "presentation": "background_task",
+            "event_id": f"memory-synthesis:artifact:{doc_id}",
+            "task_id": job.id,
+            "status": "completed",
+            "title": "Memory synthesis",
+            "subject": prop.title,
+            "completed_at": job.finished_at.isoformat() + "Z" if job.finished_at else None,
+            "result": {"changed_memory_count": len(changed), "summary": summary},
+            "artifact_id": doc_id,
+            "quest_id": job.quest_id,
+        }),
+    ))
+    return {"changed_memory_ids": changed, "safe_summary": summary}
 
 
 def _claim_next_job() -> str | None:
