@@ -155,7 +155,18 @@ def enqueue_bible_book_job(
 
 
 def enqueue_next_bible_book_job_if_idle(db, source: QuestSource) -> QuestIndexJob | None:
-    if source.source_type != "bible" or has_active_bible_book_job(db, source.id):
+    """Queue the earliest remaining Bible selection after a terminal handoff.
+
+    The session factory intentionally disables autoflush. A terminal state set
+    immediately before this function therefore remains invisible to the active
+    job query unless it is explicitly flushed. Without this boundary, the just
+    completed book is still seen as ``running`` and every later selection stays
+    queued forever.
+    """
+    if source.source_type != "bible" or source.status != "active":
+        return None
+    db.flush()
+    if has_active_bible_book_job(db, source.id):
         return None
     selection = db.query(QuestBibleBookSelection).filter(
         QuestBibleBookSelection.source_id == source.id,
