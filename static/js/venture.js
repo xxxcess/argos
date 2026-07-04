@@ -1,15 +1,16 @@
 // Venture resource controller.
 //
-// The legacy module renders the initial Quest rail.  This controller blocks its
-// expensive full-rail/history polling and replaces it with one compact status
-// request only while indexing or synthesis is active.
+// The legacy module renders the initial Quest rail. This controller blocks its
+// expensive full-rail/history polling and replaces it with compact Quest status
+// probes plus an explicit Artifact review queue.
 
 const API_BASE = window.API_BASE || '';
 const LEGACY_POLL_MS = 4000;
+const QUEST_STATUS_PROBE_MS = 8000;
 const nativeSetInterval = window.setInterval.bind(window);
 const nativeClearInterval = window.clearInterval.bind(window);
 
-// Compatibility firewall for legacy's two full-refresh timers.  It is installed
+// Compatibility firewall for legacy's two full-refresh timers. It is installed
 // before importing the legacy module and only suppresses the known 4s callbacks;
 // every other application's timer remains untouched.
 if (!window.__argosVenturePollingFirewallInstalled) {
@@ -64,7 +65,7 @@ async function getJson(url, key, { replace = true } = {}) {
   }
 }
 
-async function postJson(url, payload) {
+async function postJson(url, payload = {}) {
   const response = await fetch(`${API_BASE}${url}`, {
     method: 'POST',
     credentials: 'same-origin',
@@ -88,20 +89,25 @@ function stopPolling() {
 }
 
 function syncPolling(questId, payload) {
-  if (!questId || !activeWork(payload)) {
+  if (!questId) {
     stopPolling();
     return;
   }
-  if (state.timer && state.questId === questId) return;
+  const delay = activeWork(payload) ? LEGACY_POLL_MS : QUEST_STATUS_PROBE_MS;
+  if (state.timer && state.questId === questId && state.pollDelay === delay) return;
   stopPolling();
   state.questId = questId;
+  state.pollDelay = delay;
+  // Keep a low-cost idle probe alive. Agent-originated tool calls do not always
+  // emit a browser event, so an idle panel otherwise never learns that a draft
+  // moved from queued to reviewable.
   state.timer = nativeSetInterval(() => {
     if (document.hidden || selectedQuestId() !== state.questId) {
       if (selectedQuestId() !== state.questId) stopPolling();
       return;
     }
     refreshCompactStatus().catch(() => {});
-  }, LEGACY_POLL_MS);
+  }, delay);
 }
 
 function sourceStatusText(source) {
@@ -185,23 +191,45 @@ async function openArtifact(documentId) {
   }
 }
 
-function createArtifactRow(artifact) {
+async function publishArtifact(questId, proposalId) {
+  if (!proposalId || state.managementBusy) return;
+  state.managementBusy = true;
+  try {
+    await postJson(`/api/quests/${encodeURIComponent(questId)}/artifact-proposals/${encodeURIComponent(proposalId)}/publish`);
+    await refreshCompactStatus();
+    queueArtifactRefresh(questId);
+  } catch (error) {
+    window.dispatchEvent(new CustomEvent('odysseus:toast', { detail: { type: 'error', message: error.message || 'Unable to publish this Artifact.' } }));
+  } finally {
+    state.managementBusy = false;
+  }
+}
+
+function createArtifactRow(artifact, questId, { review = false } = {}) {
   const row = document.createElement('div');
   row.className = 'venture-row ArtifactCard';
   const label = document.createElement('span');
   label.textContent = artifactTitle(artifact);
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'venture-btn';
-  button.textContent = 'Open';
-  button.addEventListener('click', () => openArtifact(artifact.id));
-  row.append(label, button);
-  if (artifact.key_point_count) {
-    const meta = document.createElement('div');
-    meta.className = 'venture-muted venture-full-span';
-    meta.textContent = `${artifact.key_point_count} key point${artifact.key_point_count === 1 ? '' : 's'} · ${artifact.status || 'published'}`;
-    row.append(meta);
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'venture-btn';
+  open.textContent = review ? 'Review' : 'Open';
+  open.addEventListener('click', () => openArtifact(artifact.document_id || artifact.id));
+  row.append(label, open);
+  if (review && artifact.proposal_id) {
+    const publish = document.createElement('button');
+    publish.type = 'button';
+    publish.className = 'venture-btn primary';
+    publish.textContent = 'Publish';
+    publish.disabled = state.managementBusy;
+    publish.addEventListener('click', () => publishArtifact(questId, artifact.proposal_id));
+    row.append(publish);
   }
+  const meta = document.createElement('div');
+  meta.className = 'venture-muted venture-full-span';
+  const count = Number(artifact.key_point_count || 0);
+  meta.textContent = `${review ? 'Awaiting Captain review' : 'Published'}${count ? ` · ${count} key point${count === 1 ? '' : 's'}` : ''}`;
+  row.append(meta);
   return row;
 }
 
@@ -211,16 +239,35 @@ async function refreshArtifactShelf(questId) {
   if (!shelf) return;
   const payload = await getJson(`/api/quests/${encodeURIComponent(questId)}/artifacts`, 'artifacts');
   if (!payload || selectedQuestId() !== questId) return;
+  const nodes = [];
   const heading = document.createElement('h3');
   heading.textContent = 'Quest Artifacts';
-  const rows = (payload.documents || []).map(createArtifactRow);
-  if (!rows.length && !(payload.gallery || []).length) {
+  nodes.push(heading);
+
+  const reviewQueue = payload.review_queue || [];
+  if (reviewQueue.length) {
+    const reviewHeading = document.createElement('div');
+    reviewHeading.className = 'venture-muted';
+    reviewHeading.textContent = 'Awaiting your review';
+    nodes.push(reviewHeading, ...reviewQueue.map(artifact => createArtifactRow(artifact, questId, { review: true })));
+  }
+
+  const documents = payload.documents || [];
+  if (documents.length) {
+    if (reviewQueue.length) {
+      const publishedHeading = document.createElement('div');
+      publishedHeading.className = 'venture-muted';
+      publishedHeading.textContent = 'Published Artifacts';
+      nodes.push(publishedHeading);
+    }
+    nodes.push(...documents.map(artifact => createArtifactRow(artifact, questId)));
+  } else if (!reviewQueue.length && !(payload.gallery || []).length) {
     const empty = document.createElement('div');
     empty.className = 'venture-muted';
-    empty.textContent = 'No published Artifacts yet.';
-    rows.push(empty);
+    empty.textContent = 'No Artifacts yet.';
+    nodes.push(empty);
   }
-  shelf.replaceChildren(heading, ...rows);
+  shelf.replaceChildren(...nodes);
 }
 
 function queueArtifactRefresh(questId) {
@@ -275,8 +322,11 @@ async function renderManagementCard(questId) {
   heading.textContent = 'Manage Quest';
   const summary = document.createElement('div');
   summary.className = 'venture-muted';
-  const active = (payload.jobs || []).filter(job => ['queued', 'running'].includes(job.status));
-  summary.textContent = active.length ? `${active.length} synthesis job${active.length === 1 ? '' : 's'} active.` : 'Synthesis is idle.';
+  const jobs = payload.jobs || [];
+  const active = jobs.filter(job => ['queued', 'running'].includes(job.status));
+  summary.textContent = active.length
+    ? `${active.length} synthesis job${active.length === 1 ? '' : 's'} active.`
+    : synthesisText(jobs[0]);
   const actions = document.createElement('div');
   actions.className = 'venture-source-actions';
   actions.append(managementButton('Synthesize Artifact', 'synthesize_artifact', questId));
@@ -320,7 +370,10 @@ function queueRefresh() {
     state.refreshQueued = false;
     refreshCompactStatus().catch(() => {});
     const questId = selectedQuestId();
-    if (questId) renderManagementCard(questId).catch(() => {});
+    if (questId) {
+      renderManagementCard(questId).catch(() => {});
+      refreshArtifactShelf(questId).catch(() => {});
+    }
   });
 }
 
