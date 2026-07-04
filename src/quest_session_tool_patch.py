@@ -76,6 +76,13 @@ def _register_schema_and_tag() -> None:
         pass
 
 
+def _is_quest_memory_add(block, session_id: str | None) -> bool:
+    if block.tool_type != "manage_memory" or not session_id:
+        return False
+    lines = (block.content or "").split("\n", 1)
+    return bool(lines and lines[0].strip().lower() == "add")
+
+
 def install_quest_session_tool() -> None:
     """Install once after agent_tools has loaded schemas and the dispatcher."""
     import src.tool_execution as execution
@@ -91,6 +98,21 @@ def install_quest_session_tool() -> None:
     original_manage_quest = implementations.do_manage_quest
 
     async def execute_impl(block, session_id=None, disabled_tools=None, owner=None, progress_cb=None, tool_policy=None):
+        # Quest insight must be preserved through the Artifact-first path.
+        # Do not let a model bypass provenance by writing generic memory from an
+        # active Quest turn.
+        if _is_quest_memory_add(block, session_id):
+            try:
+                from src.venture_auth import get_quest_role
+                if get_quest_role(owner, session_id) in {"captain", "shipmate"}:
+                    return "manage_memory: QUEST SCOPE", {
+                        "error": "Quest facts must be captured through a cited Artifact. Use manage_quest_session remember_bible_passage (or synthesize an Artifact), then publish it before Voyage Memory is created.",
+                        "scope": "quest_artifact_first",
+                        "exit_code": 1,
+                    }
+            except Exception:
+                pass
+
         # Block direct and MCP-backed external Bible lookup before either
         # dispatcher can substitute web material for selected Quest evidence.
         if block.tool_type in {"web_search", "web_fetch"}:
