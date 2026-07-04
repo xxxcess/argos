@@ -18,7 +18,9 @@ def _normalize_action(value) -> str:
         "retrieve_bible": "retrieve_bible_passage",
         "request_passage": "request_bible_passage",
         "remember_passage": "remember_bible_passage",
-        "synthesize_artifact": "remember_bible_passage",
+        "request_synthesis": "synthesize_artifact",
+        "synthesis_artifact": "synthesize_artifact",
+        "synthesis_memory": "synthesize_memory",
     }.get(action, action)
 
 
@@ -31,12 +33,15 @@ def _quest_workflow_request(content: str) -> str | None:
         return None
     action = _normalize_action(args.get("action"))
     if action not in {
+        "status",
         "list_sources",
         "inspect_source",
         "search_bible",
         "retrieve_bible_passage",
         "request_bible_passage",
         "remember_bible_passage",
+        "synthesize_artifact",
+        "synthesize_memory",
     }:
         return None
     args["action"] = action
@@ -60,15 +65,16 @@ def _register_schema_and_tag() -> None:
         from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS, ToolIndex
 
         description = (
-            "Scoped Venture Quest Bible management. Resolve a Quest source, retrieve an exact indexed "
-            "Bible passage, search selected Quest Bible evidence by topic, queue a missing selected book, "
-            "or create an Artifact-review request from a retrieved passage. Never substitutes web passages "
-            "for Quest evidence."
+            "Scoped Venture Quest Bible and synthesis management. Resolve a Quest source, retrieve an exact "
+            "indexed Bible passage, search selected Quest Bible evidence by topic, queue a missing selected "
+            "book, create an Artifact-review request from a retrieved passage, or run explicit Artifact and "
+            "published-Artifact Memory synthesis. Never substitutes web passages for Quest evidence."
         )
         BUILTIN_TOOL_DESCRIPTIONS["manage_quest_session"] = description
         ToolIndex._KEYWORD_HINTS[frozenset({
             "quest", "bible", "scripture", "verse", "gospel", "word of god", "word was god",
             "john", "john the baptist", "remember this", "take note", "add passage",
+            "artifact synthesis", "memory synthesis",
         })] = {"manage_quest_session"}
     except Exception:
         # Discovery is a convenience; schema/dispatcher registration is the
