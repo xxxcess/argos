@@ -42,12 +42,16 @@ def install_route_performance_patch() -> None:
         ).scalar() or 0)
 
     def visible_memory_page(db, quest_id: str, role: str, limit: int):
+        # Fetch a bounded multiple instead of the full ledger. This absorbs a
+        # small cluster of legacy rows that fail the stricter Python quality
+        # test without letting them hide later valid revelations.
+        fetch_limit = min(max(limit * 4, limit + 1), 400)
         rows = visible_memory_query(db, quest_id, role).order_by(
             legacy.QuestMemoryEntry.pinned.desc(),
             legacy.QuestMemoryEntry.updated_at.desc(),
-        ).limit(limit + 1).all()
-        rows = [row for row in rows if optimized.is_displayable_memory(row)]
-        return rows[:limit], len(rows) > limit
+        ).limit(fetch_limit).all()
+        visible = [row for row in rows if optimized.is_displayable_memory(row)]
+        return visible[:limit], len(rows) == fetch_limit
 
     def detailed_source_payload(db, source, role: str) -> dict:
         key = ("venture-source-status", source.session_id, role)
