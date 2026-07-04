@@ -10,6 +10,7 @@ import './localImageEndpointRecovery.js';
 import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 import './streamRecoveryComposerGuard.js';
+import './meetingBrief.js';
 
 // ── Key constants ──
 export const KEYS = {
@@ -99,7 +100,6 @@ export function remove(key) {
 }
 
 // ── Toggle state helpers ──
-
 export function loadToggleState() {
   return getJSON(KEYS.TOGGLES, {});
 }
