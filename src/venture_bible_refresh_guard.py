@@ -75,9 +75,9 @@ def _selection_state(db, source) -> str:
     selections = _selected_books(db, source)
     active = _active_book_job(db, source)
     states = {str(row.state or "") for row in selections}
-    if active and active.status == "running" or "indexing" in states:
+    if (active and active.status == "running") or "indexing" in states:
         return "indexing"
-    if active and active.status == "queued" or "queued" in states:
+    if (active and active.status == "queued") or "queued" in states:
         return "queued"
     if "failed" in states:
         return "partial" if "indexed" in states else "failed"
@@ -249,10 +249,12 @@ def install_bible_refresh_guard() -> None:
 
     def source_index_status(row):
         if getattr(row, "source_type", None) == "bible":
-            from core.database import SessionLocal
+            from core.database import QuestSource, SessionLocal
+
             db = SessionLocal()
             try:
-                if reconcile_bible_source_state(db, row):
+                current = db.query(QuestSource).filter(QuestSource.id == row.id).first()
+                if current and reconcile_bible_source_state(db, current):
                     db.commit()
             except Exception:
                 db.rollback()
