@@ -7,6 +7,11 @@ from fastapi import Request
 from routes import venture_routes_legacy as _legacy
 from routes.venture_routes_optimized import setup_venture_routes as _optimized_setup
 from src.quest_session_management import request_artifact_synthesis
+from src.venture_synthesis_execution_guard import install_synthesis_execution_guard
+
+# The optimized facade installs bounded evidence and atomic queue claiming.
+# This final guard rejects any stale direct-call path that did not own a claim.
+install_synthesis_execution_guard()
 
 
 def _remove_route(router, path: str, method: str) -> None:
