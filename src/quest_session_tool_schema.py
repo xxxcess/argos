@@ -10,8 +10,9 @@ QUEST_SESSION_TOOL_SCHEMA = {
         "to resolve source ids. Use search_bible for a topic within indexed Quest Bible evidence, "
         "retrieve_bible_passage for an exact reference already indexed, and request_bible_passage to queue "
         "a missing selected Bible book. Use remember_bible_passage to queue a Captain-reviewable Artifact; "
-        "Voyage Memory is created only after the Artifact is published. Do not use web search as a substitute "
-        "for a scoped Quest Bible source unless the Captain explicitly asks to leave Quest scope."
+        "Voyage Memory is created only after the Artifact is published. Captain actions also include compact "
+        "status, synthesize_artifact, and synthesize_memory from a published Artifact. Do not use web search "
+        "as a substitute for a scoped Quest Bible source unless the Captain explicitly asks to leave Quest scope."
     ),
     "parameters": {
         "type": "object",
@@ -19,12 +20,15 @@ QUEST_SESSION_TOOL_SCHEMA = {
             "action": {
                 "type": "string",
                 "enum": [
+                    "status",
                     "list_sources",
                     "inspect_source",
                     "search_bible",
                     "retrieve_bible_passage",
                     "request_bible_passage",
                     "remember_bible_passage",
+                    "synthesize_artifact",
+                    "synthesize_memory",
                 ],
                 "description": "Quest action. Mutating actions require Captain membership.",
             },
@@ -38,11 +42,15 @@ QUEST_SESSION_TOOL_SCHEMA = {
             },
             "reference": {
                 "type": "string",
-                "description": "Canonical Bible reference, e.g. John 1:1-14. Required for retrieve/request/remember actions.",
+                "description": "Canonical Bible reference, e.g. John 1:1-14. Required for retrieve/request; optional for remember when a prior Quest passage is available.",
             },
             "query": {
                 "type": "string",
                 "description": "Topic query for search_bible, e.g. 'what does John say the Word is'.",
+            },
+            "artifact_proposal_id": {
+                "type": "string",
+                "description": "Published Artifact proposal id for synthesize_memory. Omit to use the latest published Artifact.",
             },
         },
         "required": ["action"],
