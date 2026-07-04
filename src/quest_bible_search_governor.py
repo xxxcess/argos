@@ -7,11 +7,37 @@ import re
 from sqlalchemy import func, or_
 
 
+def _preferred_johannine_references(query: str) -> list[str]:
+    """Return narrow canonical passages for high-confidence Johannine intents."""
+    lower = (query or "").lower()
+    gospel_john = bool(re.search(r"\b(?:gospel of\s+)?john\b", lower)) and not bool(
+        re.search(r"\b(?:1|first|i)\s+john\b", lower)
+    )
+    if not gospel_john:
+        return []
+    if "word" in lower and "god" in lower:
+        # The Fourth Gospel's direct opening answer, not a related use of
+        # "words of God" in John 3:34.
+        return ["John 1:1-14", "John 17:17"]
+    if "jesus" in lower and ("baptist" in lower or "john the baptist" in lower):
+        # Jesus' direct assessment in the Fourth Gospel.
+        return ["John 5:33-35"]
+    return []
+
+
 def install_bounded_bible_search() -> None:
     import src.quest_bible_workflow as workflow
 
     if getattr(workflow, "_bounded_bible_search_installed", False):
         return
+
+    def make_passage(found: dict, source):
+        return {
+            **found,
+            "source_id": source.id,
+            "source_name": source.display_name,
+            "speaker_provenance": "Scripture text; do not attribute speech to Jesus unless the retrieved passage itself identifies direct speech.",
+        }
 
     def search_indexed_bible(db, *, quest_id: str, role: str | None, query: str, source_id: str | None = None, limit: int = 4):
         source, ambiguous = workflow._source_by_handle(db, quest_id, role, source_id)
@@ -20,6 +46,24 @@ def install_bounded_bible_search() -> None:
         sources = [source] if source else workflow._sources(db, quest_id, role)
         if not sources:
             return {"status": "no_bible_source"}
+
+        preferred = _preferred_johannine_references(query)
+        if preferred:
+            direct = []
+            for bible_source in sources:
+                for reference in preferred:
+                    found = workflow._exact_passage(
+                        db,
+                        quest_id=quest_id,
+                        source=bible_source,
+                        reference=reference,
+                    )
+                    if found.get("status") == "indexed":
+                        direct.append(make_passage(found, bible_source))
+                    if len(direct) >= max(1, min(limit, 4)):
+                        return {"status": "indexed", "passages": direct}
+            if direct:
+                return {"status": "indexed", "passages": direct}
 
         raw_terms = [
             term for term in re.findall(r"[a-z]{3,}", (query or "").lower())
@@ -30,6 +74,7 @@ def install_bounded_bible_search() -> None:
             if term in (query or "").lower() and term not in raw_terms:
                 raw_terms.append(term)
         raw_terms = list(dict.fromkeys(raw_terms))[:6]
+        requested_john = "john" in raw_terms and not bool(re.search(r"\b(?:1|first|i)\s+john\b", (query or "").lower()))
 
         candidates = []
         for bible_source in sources:
@@ -51,35 +96,42 @@ def install_bounded_bible_search() -> None:
                 workflow.BibleChapterCache.translation == translation,
                 workflow.BibleChapterCache.book_id.in_(indexed_ids),
             )
-            if raw_terms:
-                terms_filter = or_(*[
-                    func.lower(workflow.BibleVerse.text).like(f"%{term}%")
-                    for term in raw_terms
-                ])
-                rows = base.filter(terms_filter).order_by(
-                    workflow.BibleChapterCache.book_id,
+            terms_filter = or_(*[
+                func.lower(workflow.BibleVerse.text).like(f"%{term}%")
+                for term in raw_terms
+            ]) if raw_terms else None
+
+            # Search the named Gospel first. This preserves topic scope without
+            # hydrating all verses in a full New Testament Quest source.
+            row_sets = []
+            if requested_john and "JHN" in indexed_ids:
+                john_query = base.filter(workflow.BibleChapterCache.book_id == "JHN")
+                row_sets.append((john_query.filter(terms_filter) if terms_filter is not None else john_query).order_by(
                     workflow.BibleChapterCache.chapter_number,
                     workflow.BibleVerse.verse_number,
-                ).limit(250).all()
-            else:
-                rows = base.order_by(
-                    workflow.BibleChapterCache.book_id,
-                    workflow.BibleChapterCache.chapter_number,
-                    workflow.BibleVerse.verse_number,
-                ).limit(100).all()
-            for verse, chapter in rows:
-                score = workflow._score_verse(verse.text or "", set(raw_terms), query)
-                if score <= 0:
-                    continue
-                candidates.append({
-                    "score": score,
-                    "source": bible_source,
-                    "translation": translation,
-                    "book_id": chapter.book_id,
-                    "chapter": chapter.chapter_number,
-                    "verse": verse.verse_number,
-                    "text": verse.text or "",
-                })
+                ).limit(160).all())
+            general_query = base if not (requested_john and "JHN" in indexed_ids) else base.filter(
+                workflow.BibleChapterCache.book_id != "JHN"
+            )
+            row_sets.append((general_query.filter(terms_filter) if terms_filter is not None else general_query).order_by(
+                workflow.BibleChapterCache.book_id,
+                workflow.BibleChapterCache.chapter_number,
+                workflow.BibleVerse.verse_number,
+            ).limit(120).all())
+            for rows in row_sets:
+                for verse, chapter in rows:
+                    score = workflow._score_verse(verse.text or "", set(raw_terms), query)
+                    if score <= 0:
+                        continue
+                    candidates.append({
+                        "score": score,
+                        "source": bible_source,
+                        "translation": translation,
+                        "book_id": chapter.book_id,
+                        "chapter": chapter.chapter_number,
+                        "verse": verse.verse_number,
+                        "text": verse.text or "",
+                    })
 
         if not candidates:
             return {"status": "no_indexed_match"}
