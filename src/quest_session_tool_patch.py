@@ -52,6 +52,24 @@ def _register_schema_and_tag() -> None:
     agent_tools.TOOL_TAGS.add("manage_quest_session")
     if not any(item.get("function", {}).get("name") == "manage_quest_session" for item in schemas.FUNCTION_TOOL_SCHEMAS):
         schemas.FUNCTION_TOOL_SCHEMAS.append({"type": "function", "function": QUEST_SESSION_TOOL_SCHEMA})
+    try:
+        from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS, ToolIndex
+
+        description = (
+            "Scoped Venture Quest Bible management. Resolve a Quest source, retrieve an exact indexed "
+            "Bible passage, search selected Quest Bible evidence by topic, queue a missing selected book, "
+            "or create an Artifact-review request from a retrieved passage. Never substitutes web passages "
+            "for Quest evidence."
+        )
+        BUILTIN_TOOL_DESCRIPTIONS["manage_quest_session"] = description
+        ToolIndex._KEYWORD_HINTS[frozenset({
+            "quest", "bible", "scripture", "verse", "gospel", "word of god", "word was god",
+            "john", "john the baptist", "remember this", "take note", "add passage",
+        })] = {"manage_quest_session"}
+    except Exception:
+        # Discovery is a convenience; schema/dispatcher registration is the
+        # executable contract and must remain available without vector tooling.
+        pass
 
 
 def install_quest_session_tool() -> None:
