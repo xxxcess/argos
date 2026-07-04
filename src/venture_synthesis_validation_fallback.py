@@ -1,9 +1,10 @@
-"""Fallback for incomplete model synthesis output.
+"""Fallbacks that keep grounded Captain-requested Artifacts reviewable.
 
 A Quest synthesis request must not remain invisible merely because a model emits
-valid JSON with too few cited fields.  This guard falls back only to the
-existing deterministic, evidence-only Artifact builder and only when the
-conversation/source window can satisfy the Artifact contract.
+incomplete citation JSON or decides there is "no durable insight" after the
+Captain explicitly requested a reviewable Artifact. The fallback uses only the
+existing conversation/source evidence and still has to satisfy the Artifact
+validation contract.
 """
 
 from __future__ import annotations
@@ -47,6 +48,10 @@ def install_synthesis_validation_fallback() -> None:
         return
 
     original_validate = synthesis.validate_synthesis_json
+    original_persist = synthesis.persist_synthesis_result
+
+    def grounded_fallback(labels: dict):
+        return original_validate(synthesis._fallback_synthesis(_fallback_pack(labels)), labels)
 
     def validate(data, labels):
         try:
@@ -54,13 +59,24 @@ def install_synthesis_validation_fallback() -> None:
         except ValueError:
             if not _can_fallback(labels):
                 raise
-            fallback = synthesis._fallback_synthesis(_fallback_pack(labels))
-            return original_validate(fallback, labels)
+            return grounded_fallback(labels)
 
         if result.get("should_create") is False and result.get("reason") in _FALLBACK_REASONS and _can_fallback(labels):
-            fallback = synthesis._fallback_synthesis(_fallback_pack(labels))
-            return original_validate(fallback, labels)
+            return grounded_fallback(labels)
         return result
 
+    def persist(db, job, synth, labels):
+        # A Captain deliberately asked for a draft. When enough cited material
+        # exists, a local evidence-only draft is preferable to silently marking
+        # the job no_insight because a model chose a conservative false branch.
+        if (
+            job.trigger == "captain_requested"
+            and not synth.get("should_create")
+            and _can_fallback(labels)
+        ):
+            synth = grounded_fallback(labels)
+        return original_persist(db, job, synth, labels)
+
     synthesis.validate_synthesis_json = validate
+    synthesis.persist_synthesis_result = persist
     synthesis._validation_fallback_installed = True
