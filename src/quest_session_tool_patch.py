@@ -1,9 +1,8 @@
-"""Runtime extension for the captain-scoped ``manage_quest`` agent tool.
+"""Runtime extensions for Captain-scoped Venture Quest management tools.
 
-The repository already exposes ``manage_quest`` to the agent. This patch keeps
-its source and artifact actions while adding deliberate Artifact and published
-Artifact-to-Memory synthesis actions through the same idempotent queue used by
-the Quest panel.
+``manage_quest`` retains its legacy source/artifact actions and gains explicit
+synthesis actions. ``manage_quest_session`` is a compact dedicated tool for
+Quest status plus deliberate Artifact and Memory synthesis.
 """
 
 from __future__ import annotations
@@ -17,25 +16,27 @@ def _tool_args(content: Any) -> dict[str, Any]:
     return _parse_tool_args(content)
 
 
-async def do_manage_quest(content: str, owner: str | None = None, session_id: str | None = None) -> dict:
-    """Handle synthesis actions, then defer every legacy action unchanged."""
+def _normalize_action(value: Any) -> str:
+    action = str(value or "").strip().lower()
+    return {
+        "request_synthesis": "synthesize_artifact",
+        "synthesis_artifact": "synthesize_artifact",
+        "synthesis_memory": "synthesize_memory",
+    }.get(action, action)
+
+
+async def _run_quest_session_action(content: str, *, owner: str | None, session_id: str | None) -> dict:
     try:
         args = _tool_args(content)
     except ValueError:
         return {"error": "Invalid JSON arguments", "exit_code": 1}
 
-    action = str(args.get("action") or "").strip().lower()
-    action = {
-        "request_synthesis": "synthesize_artifact",
-        "synthesis_artifact": "synthesize_artifact",
-        "synthesis_memory": "synthesize_memory",
-    }.get(action, action)
-    if action not in {"synthesize_artifact", "synthesize_memory"}:
-        return await _ORIGINAL_DO_MANAGE_QUEST(content, owner=owner, session_id=session_id)
-
+    action = _normalize_action(args.get("action"))
+    if action not in {"status", "synthesize_artifact", "synthesize_memory"}:
+        return {"error": "manage_quest_session supports status, synthesize_artifact, or synthesize_memory.", "exit_code": 1}
     quest_id = str(args.get("quest_id") or session_id or "").strip()
     if not quest_id:
-        return {"error": "manage_quest requires an active Quest session", "exit_code": 1}
+        return {"error": "manage_quest_session requires an active Quest session", "exit_code": 1}
 
     from core.database import SessionLocal
     from routes import venture_routes_legacy as legacy
@@ -43,7 +44,7 @@ async def do_manage_quest(content: str, owner: str | None = None, session_id: st
     from src.venture_auth import get_quest_role
 
     if get_quest_role(owner, quest_id) != "captain":
-        return {"error": "manage_quest synthesis actions require Captain membership in the active Quest.", "exit_code": 1}
+        return {"error": "Quest session management requires Captain membership in the active Quest.", "exit_code": 1}
 
     db = SessionLocal()
     try:
@@ -57,18 +58,32 @@ async def do_manage_quest(content: str, owner: str | None = None, session_id: st
         )
         db.commit()
         return {
-            "output": result.get("message") or "Quest synthesis request accepted.",
+            "output": result.get("message") or "Quest session action accepted.",
             "quest_management": result,
             "exit_code": 0,
         }
     except Exception as exc:
         db.rollback()
-        return {"error": f"Quest synthesis request failed safely: {exc}", "exit_code": 1}
+        return {"error": f"Quest session action failed safely: {exc}", "exit_code": 1}
     finally:
         db.close()
 
 
-def _replace_schema() -> None:
+async def do_manage_quest(content: str, owner: str | None = None, session_id: str | None = None) -> dict:
+    """Handle synthesis aliases, then defer all legacy manage_quest actions."""
+    try:
+        args = _tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+    action = _normalize_action(args.get("action"))
+    if action not in {"synthesize_artifact", "synthesize_memory"}:
+        return await _ORIGINAL_DO_MANAGE_QUEST(content, owner=owner, session_id=session_id)
+    args["action"] = action
+    import json
+    return await _run_quest_session_action(json.dumps(args), owner=owner, session_id=session_id)
+
+
+def _replace_manage_quest_schema() -> None:
     import src.tool_schemas as schemas
 
     for entry in schemas.FUNCTION_TOOL_SCHEMAS:
@@ -98,21 +113,59 @@ def _replace_schema() -> None:
         break
 
 
+def _register_dedicated_schema() -> None:
+    import src.agent_tools as agent_tools
+    import src.tool_schemas as schemas
+    from src.quest_session_management import QUEST_MANAGEMENT_TOOL
+
+    agent_tools.TOOL_TAGS.add("manage_quest_session")
+    if not any(entry.get("function", {}).get("name") == "manage_quest_session" for entry in schemas.FUNCTION_TOOL_SCHEMAS):
+        schemas.FUNCTION_TOOL_SCHEMAS.append({"type": "function", "function": QUEST_MANAGEMENT_TOOL})
+
+
+def _install_dedicated_dispatcher(execution) -> None:
+    original_impl = execution._execute_tool_block_impl
+
+    async def execute_impl(block, session_id=None, disabled_tools=None, owner=None, progress_cb=None, tool_policy=None):
+        if block.tool_type == "manage_quest_session":
+            if disabled_tools and block.tool_type in disabled_tools:
+                return "manage_quest_session: BLOCKED", {"error": "Tool 'manage_quest_session' is disabled by user.", "exit_code": 1}
+            if tool_policy and tool_policy.blocks(block.tool_type):
+                return "manage_quest_session: BLOCKED", {"error": "Execution of tool 'manage_quest_session' is forbade by the active guide-only policy.", "exit_code": 1}
+            return "manage_quest_session", await _run_quest_session_action(
+                block.content,
+                owner=owner,
+                session_id=session_id,
+            )
+        return await original_impl(
+            block,
+            session_id=session_id,
+            disabled_tools=disabled_tools,
+            owner=owner,
+            progress_cb=progress_cb,
+            tool_policy=tool_policy,
+        )
+
+    execution._execute_tool_block_impl = execute_impl
+
+
 def _improve_tool_discovery() -> None:
-    """Ensure RAG selection retains manage_quest for Venture synthesis language."""
+    """Ensure RAG selection retains both Quest management tools for synthesis language."""
     try:
         from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS, ToolIndex
 
-        BUILTIN_TOOL_DESCRIPTIONS["manage_quest"] = (
-            "Captain-only Venture Quest session management. Inspect Quest status and sources, "
-            "open Artifacts, trigger a cited Artifact synthesis, or trigger Voyage Memory synthesis "
-            "from a published Artifact's revelations. Use for Quest, Voyage, Artifact, key point, "
+        description = (
+            "Captain-only Venture Quest session management. Inspect compact Quest status, "
+            "trigger a cited Artifact synthesis, or trigger Voyage Memory synthesis from a "
+            "published Artifact's revelations. Use for Quest, Voyage, Artifact, key point, "
             "memory synthesis, distill insight, and evidence-guided session requests."
         )
+        BUILTIN_TOOL_DESCRIPTIONS["manage_quest"] = description
+        BUILTIN_TOOL_DESCRIPTIONS["manage_quest_session"] = description
         ToolIndex._KEYWORD_HINTS[frozenset({
             "quest", "voyage", "artifact", "artifact synthesis", "synthesize artifact",
             "memory synthesis", "synthesize memory", "distill insight", "voyage memory",
-        })] = {"manage_quest"}
+        })] = {"manage_quest_session"}
     except Exception:
         # Tool discovery is an optimization; execution/schema registration must
         # remain available even when vector tooling is not configured.
@@ -120,7 +173,7 @@ def _improve_tool_discovery() -> None:
 
 
 def install_manage_quest_synthesis_actions() -> None:
-    """Patch the tool dispatcher/schema once after the agent facade loads."""
+    """Patch schema and dispatcher once after the agent facade has loaded."""
     global _ORIGINAL_DO_MANAGE_QUEST
     import src.tool_execution as execution
 
@@ -128,7 +181,9 @@ def install_manage_quest_synthesis_actions() -> None:
         return
     _ORIGINAL_DO_MANAGE_QUEST = execution.do_manage_quest
     execution.do_manage_quest = do_manage_quest
-    _replace_schema()
+    _replace_manage_quest_schema()
+    _register_dedicated_schema()
+    _install_dedicated_dispatcher(execution)
     _improve_tool_discovery()
     execution._venture_manage_quest_actions_installed = True
 
