@@ -1,14 +1,27 @@
-"""Small, startup-safe dispatcher extension for Venture Quest actions.
+"""Startup-safe dispatcher extensions for Venture Quest actions.
 
 The legacy ``manage_quest`` implementation remains available. This extension
-adds a deterministic ``manage_quest_session`` tool and routes Bible workflow
-aliases through it. It never assumes ``src.tool_execution`` exports a
-``do_manage_quest`` attribute.
+adds a deterministic ``manage_quest_session`` tool, routes Bible workflow
+aliases through it, and recovers the narrow bare-JSON action form emitted by
+some local models when native function calls are unavailable.
 """
 
 from __future__ import annotations
 
 import json
+
+
+_RAW_QUEST_ACTIONS = {
+    "list_sources",
+    "inspect_source",
+    "search_bible",
+    "retrieve_bible_passage",
+    "request_bible_passage",
+    "remember_bible_passage",
+    "status",
+    "synthesize_artifact",
+    "synthesize_memory",
+}
 
 
 def _normalize_action(value) -> str:
@@ -32,20 +45,87 @@ def _quest_workflow_request(content: str) -> str | None:
     if not isinstance(args, dict):
         return None
     action = _normalize_action(args.get("action"))
-    if action not in {
-        "status",
-        "list_sources",
-        "inspect_source",
-        "search_bible",
-        "retrieve_bible_passage",
-        "request_bible_passage",
-        "remember_bible_passage",
-        "synthesize_artifact",
-        "synthesize_memory",
-    }:
+    if action not in _RAW_QUEST_ACTIONS:
         return None
     args["action"] = action
     return json.dumps(args)
+
+
+def _raw_quest_json_block(text: str, tool_block):
+    """Convert a *whole-response* Quest action object into one safe tool call.
+
+    This intentionally does not scan prose for arbitrary JSON. It covers only
+    the local-model fallback seen in Venture where the complete assistant turn
+    is an object such as ``{"op":"retrieve_bible_passage","passage":"Matthew 1:18-25"}``.
+    """
+    if not isinstance(text, str):
+        return None
+    try:
+        payload = json.loads(text.strip())
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    allowed = {
+        "op", "action", "passage", "reference", "query", "source_id",
+        "quest_id", "artifact_proposal_id", "proposal_id", "translation",
+    }
+    if set(payload) - allowed:
+        return None
+    action = _normalize_action(payload.get("action") or payload.get("op"))
+    if action not in _RAW_QUEST_ACTIONS:
+        return None
+
+    args = {"action": action}
+    for key in ("source_id", "quest_id", "artifact_proposal_id", "proposal_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            args[key] = value.strip()
+
+    if action in {"retrieve_bible_passage", "request_bible_passage", "remember_bible_passage"}:
+        reference = payload.get("reference") or payload.get("passage") or payload.get("query")
+        if not isinstance(reference, str) or not reference.strip():
+            return None
+        args["reference"] = reference.strip()
+    elif action == "search_bible":
+        query = payload.get("query") or payload.get("passage") or payload.get("reference")
+        if not isinstance(query, str) or not query.strip():
+            return None
+        args["query"] = query.strip()
+
+    return tool_block("manage_quest_session", json.dumps(args))
+
+
+def _install_raw_quest_json_recovery() -> None:
+    """Patch parser exports before the agent loop imports them from the facade."""
+    import src.agent_tools as agent_tools
+    import src.tool_parsing as parsing
+
+    if getattr(parsing, "_venture_raw_quest_json_recovery_installed", False):
+        return
+    original_parse = parsing.parse_tool_blocks
+    original_strip = parsing.strip_tool_blocks
+
+    def parse_tool_blocks(text: str, skip_fenced: bool = False):
+        blocks = original_parse(text, skip_fenced=skip_fenced)
+        if blocks:
+            return blocks
+        block = _raw_quest_json_block(text, parsing.ToolBlock)
+        return [block] if block else []
+
+    def strip_tool_blocks(text: str, skip_fenced: bool = False):
+        if _raw_quest_json_block(text, parsing.ToolBlock):
+            return ""
+        return original_strip(text, skip_fenced=skip_fenced)
+
+    parsing.parse_tool_blocks = parse_tool_blocks
+    parsing.strip_tool_blocks = strip_tool_blocks
+    # agent_loop imports these facade attributes only after agent_tools finishes
+    # importing, so update both the implementation module and the public facade.
+    agent_tools.parse_tool_blocks = parse_tool_blocks
+    agent_tools.strip_tool_blocks = strip_tool_blocks
+    parsing._venture_raw_quest_json_recovery_installed = True
 
 
 def _register_schema_and_tag() -> None:
@@ -100,6 +180,7 @@ def install_quest_session_tool() -> None:
         return
 
     _register_schema_and_tag()
+    _install_raw_quest_json_recovery()
     install_bounded_bible_search()
     install_exact_bible_retrieval()
     original_execute = execution._execute_tool_block_impl
