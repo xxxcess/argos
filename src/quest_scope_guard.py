@@ -7,20 +7,30 @@ import re
 
 _BIBLE_TERMS = re.compile(
     r"\b(?:bible|scripture|verse|gospel|testament|john|matthew|mark|luke|acts|romans|"
-    r"genesis|exodus|psalm|psalms|revelation|word of god|word was god|jesus|baptist)\b",
+    r"genesis|exodus|psalm|psalms|revelation|word of god|word was god|logos|jesus|baptist|"
+    r"jhn|mat|mrk|luk|rev)\b",
     re.I,
 )
-_EXTERNAL_TERMS = re.compile(
-    r"\b(?:web|internet|online|browser|external|outside (?:the )?quest|bible gateway|biblehub)\b|https?://",
+_BIBLE_URL = re.compile(r"(?:biblegateway|biblehub|bible\.com|ebible\.org|biblestudytools)\.", re.I)
+_EXPLICIT_EXTERNAL_REQUEST = re.compile(
+    r"\b(?:search (?:the )?web|search (?:the )?internet|look (?:it )?up online|"
+    r"outside (?:the )?quest|external source|use bible gateway)\b",
     re.I,
 )
 
 
 def block_external_bible_lookup(*, session_id: str | None, owner: str | None, request_text: str) -> str | None:
-    """Return a bounded retry instruction when a Quest Bible source owns scope."""
-    if not session_id or not _BIBLE_TERMS.search(request_text or ""):
+    """Return a bounded retry instruction when a Quest Bible source owns scope.
+
+    A known external Bible URL is always blocked inside an active Quest unless a
+    caller uses an explicit opt-out route; tool-generated URLs are not evidence
+    of a Captain request to leave Quest scope.
+    """
+    text = request_text or ""
+    is_bible_request = bool(_BIBLE_TERMS.search(text) or _BIBLE_URL.search(text))
+    if not session_id or not is_bible_request:
         return None
-    if _EXTERNAL_TERMS.search(request_text or ""):
+    if _EXPLICIT_EXTERNAL_REQUEST.search(text) and not _BIBLE_URL.search(text):
         return None
     try:
         from core.database import QuestSource, SessionLocal
