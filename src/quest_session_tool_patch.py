@@ -91,6 +91,21 @@ def install_quest_session_tool() -> None:
     original_manage_quest = implementations.do_manage_quest
 
     async def execute_impl(block, session_id=None, disabled_tools=None, owner=None, progress_cb=None, tool_policy=None):
+        # Block direct and MCP-backed external Bible lookup before either
+        # dispatcher can substitute web material for selected Quest evidence.
+        if block.tool_type in {"web_search", "web_fetch"}:
+            try:
+                from src.quest_scope_guard import block_external_bible_lookup
+                blocked = block_external_bible_lookup(
+                    session_id=session_id,
+                    owner=owner,
+                    request_text=block.content,
+                )
+                if blocked:
+                    return f"{block.tool_type}: QUEST SCOPE", {"error": blocked, "scope": "quest_only", "exit_code": 1}
+            except Exception:
+                pass
+
         request = None
         if block.tool_type == "manage_quest_session":
             request = block.content
