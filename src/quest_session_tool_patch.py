@@ -47,9 +47,13 @@ def _register_schema_and_tag() -> None:
     """Register after agent_tools has completed its normal import sequence."""
     import src.agent_tools as agent_tools
     import src.tool_schemas as schemas
+    import src.tool_policy as tool_policy
     from src.quest_session_tool_schema import QUEST_SESSION_TOOL_SCHEMA
 
     agent_tools.TOOL_TAGS.add("manage_quest_session")
+    tool_policy.VENTURE_QUEST_ALLOWED_TOOLS = frozenset(
+        set(tool_policy.VENTURE_QUEST_ALLOWED_TOOLS) | {"manage_quest_session"}
+    )
     if not any(item.get("function", {}).get("name") == "manage_quest_session" for item in schemas.FUNCTION_TOOL_SCHEMAS):
         schemas.FUNCTION_TOOL_SCHEMAS.append({"type": "function", "function": QUEST_SESSION_TOOL_SCHEMA})
     try:
