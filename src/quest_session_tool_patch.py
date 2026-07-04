@@ -58,11 +58,13 @@ def install_quest_session_tool() -> None:
     """Install once after agent_tools has loaded schemas and the dispatcher."""
     import src.tool_execution as execution
     import src.tool_implementations as implementations
+    from src.quest_exact_bible_retrieval_patch import install_exact_bible_retrieval
 
     if getattr(execution, "_venture_quest_session_tool_installed", False):
         return
 
     _register_schema_and_tag()
+    install_exact_bible_retrieval()
     original_execute = execution._execute_tool_block_impl
     original_manage_quest = implementations.do_manage_quest
 
@@ -101,7 +103,7 @@ def install_quest_session_tool() -> None:
     execution._venture_quest_session_tool_installed = True
 
 
-# Compatibility name retained for existing agent_tools imports.  The previous
+# Compatibility name retained for existing agent_tools imports. The previous
 # version attempted to access execution.do_manage_quest and caused startup to
 # fail on Python 3.12.
 def install_manage_quest_synthesis_actions() -> None:
