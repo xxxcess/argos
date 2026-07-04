@@ -7,6 +7,17 @@ import json
 from typing import Any
 
 
+def _nudge_synthesis(job_id: str | None) -> None:
+    """Attempt a newly committed job immediately without bypassing its queue lease."""
+    if not job_id:
+        return
+    from src.venture_synthesis import process_synthesis_job
+
+    # ``process_synthesis_job`` is protected by the execution guard. If the
+    # persistent worker already claimed this job, this task exits harmlessly.
+    asyncio.create_task(process_synthesis_job(job_id))
+
+
 class ManageQuestSessionTool:
     async def execute(self, content: str, ctx: dict[str, Any]) -> dict:
         context = ctx if isinstance(ctx, dict) else {}
@@ -41,6 +52,8 @@ class ManageQuestSessionTool:
                     artifact_proposal_id=(args.get("artifact_proposal_id") or args.get("proposal_id")),
                 )
                 db.commit()
+                if result.get("queued"):
+                    _nudge_synthesis(result.get("job_id"))
                 return {
                     "output": result.get("message") or "Quest session action accepted.",
                     "quest_management": result,
@@ -60,9 +73,12 @@ class ManageQuestSessionTool:
                 content = json.dumps(args)
 
         from src.quest_bible_workflow import execute_quest_bible_action
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             execute_quest_bible_action,
             content,
             owner=context.get("owner"),
             session_id=context.get("session_id"),
         )
+        synthesis = result.get("synthesis_job") if isinstance(result.get("synthesis_job"), dict) else {}
+        _nudge_synthesis(synthesis.get("id"))
+        return result
