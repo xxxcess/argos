@@ -11,6 +11,7 @@ def install_route_performance_patch() -> None:
     if getattr(optimized, "_performance_patch_installed", False):
         return
     legacy = optimized._legacy
+    original_management_snapshot = optimized._management_snapshot
 
     def visible_memory_query(db, quest_id: str, role: str):
         query = db.query(legacy.QuestMemoryEntry).filter(
@@ -25,9 +26,9 @@ def install_route_performance_patch() -> None:
         generated_quality = and_(
             func.length(legacy.QuestMemoryEntry.title) >= 14,
             func.length(legacy.QuestMemoryEntry.content) >= 24,
-            func.lower(legacy.QuestMemoryEntry.title).notin_((
-                "insight", "insights", "summary", "artifact", "quest artifact", "1",
-            )),
+            func.lower(legacy.QuestMemoryEntry.title).notin_(
+                ("insight", "insights", "summary", "artifact", "quest artifact", "1")
+            ),
         )
         return query.filter(or_(
             legacy.QuestMemoryEntry.artifact_id == None,  # noqa: E711
@@ -90,7 +91,15 @@ def install_route_performance_patch() -> None:
             "last_processed_at": source.last_processed_at.isoformat() + "Z" if source.last_processed_at else None,
         }
 
+    def management_snapshot(db, quest_id: str, role: str) -> dict:
+        snapshot = original_management_snapshot(db, quest_id, role)
+        if role == "captain":
+            from src.venture_runtime_metrics import process_pressure_snapshot
+            snapshot["runtime"] = process_pressure_snapshot()
+        return snapshot
+
     optimized._visible_memory_count = visible_memory_count
     optimized._visible_memory_page = visible_memory_page
     optimized._detailed_source_payload = detailed_source_payload
+    optimized._management_snapshot = management_snapshot
     optimized._performance_patch_installed = True
