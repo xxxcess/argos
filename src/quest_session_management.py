@@ -78,19 +78,31 @@ def _get_published_proposal(db, legacy, quest_id: str, proposal_id: str | None):
 
 def request_artifact_synthesis(db, legacy, *, quest_id: str, captain: str) -> QuestManagementResult:
     """Request one deduplicated Captain-reviewable Artifact synthesis job."""
+    existing = db.query(legacy.QuestSynthesisJob).filter(
+        legacy.QuestSynthesisJob.quest_id == quest_id,
+        legacy.QuestSynthesisJob.trigger.in_(("grounded_response", "captain_requested")),
+        legacy.QuestSynthesisJob.status.in_(("queued", "running")),
+    ).order_by(legacy.QuestSynthesisJob.requested_at.desc()).first()
+    if existing:
+        return QuestManagementResult(
+            action="synthesize_artifact",
+            queued=False,
+            job_id=existing.id,
+            proposal_id=None,
+            message="An Artifact synthesis job is already active for this Quest.",
+        )
     job = _synthesis.enqueue_synthesis_job(
         db,
         quest_id=quest_id,
         trigger="captain_requested",
         created_by=captain,
     )
-    is_new = job.status == "queued" and not job.started_at and not job.artifact_proposal_id
     return QuestManagementResult(
         action="synthesize_artifact",
-        queued=is_new,
+        queued=True,
         job_id=job.id,
         proposal_id=None,
-        message="Artifact synthesis queued." if is_new else "An Artifact synthesis job is already active for this Quest.",
+        message="Artifact synthesis queued.",
     )
 
 
