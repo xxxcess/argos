@@ -93,12 +93,14 @@ def install_quest_session_tool() -> None:
     """Install once after agent_tools has loaded schemas and the dispatcher."""
     import src.tool_execution as execution
     import src.tool_implementations as implementations
+    from src.quest_bible_search_governor import install_bounded_bible_search
     from src.quest_exact_bible_retrieval_patch import install_exact_bible_retrieval
 
     if getattr(execution, "_venture_quest_session_tool_installed", False):
         return
 
     _register_schema_and_tag()
+    install_bounded_bible_search()
     install_exact_bible_retrieval()
     original_execute = execution._execute_tool_block_impl
     original_manage_quest = implementations.do_manage_quest
