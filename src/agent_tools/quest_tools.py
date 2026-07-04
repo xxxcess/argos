@@ -7,15 +7,19 @@ import json
 from typing import Any
 
 
-def _nudge_synthesis(job_id: str | None) -> None:
-    """Attempt a newly committed job immediately without bypassing its queue lease."""
-    if not job_id:
-        return
+async def _recover_then_nudge_synthesis(job_id: str) -> None:
+    """Reclaim stale work, then attempt this job through its atomic claim guard."""
     from src.venture_synthesis import process_synthesis_job
+    from src.venture_synthesis_reliability import recover_stale_synthesis_jobs
 
-    # ``process_synthesis_job`` is protected by the execution guard. If the
-    # persistent worker already claimed this job, this task exits harmlessly.
-    asyncio.create_task(process_synthesis_job(job_id))
+    await asyncio.to_thread(recover_stale_synthesis_jobs)
+    await process_synthesis_job(job_id)
+
+
+def _nudge_synthesis(job_id: str | None) -> None:
+    """Attempt a committed Quest job now without bypassing its queue lease."""
+    if job_id:
+        asyncio.create_task(_recover_then_nudge_synthesis(job_id))
 
 
 class ManageQuestSessionTool:
@@ -52,8 +56,9 @@ class ManageQuestSessionTool:
                     artifact_proposal_id=(args.get("artifact_proposal_id") or args.get("proposal_id")),
                 )
                 db.commit()
-                if result.get("queued"):
-                    _nudge_synthesis(result.get("job_id"))
+                # A duplicate request may return the existing queued job. Nudge
+                # it too: the atomic claim guard prevents duplicate execution.
+                _nudge_synthesis(result.get("job_id"))
                 return {
                     "output": result.get("message") or "Quest session action accepted.",
                     "quest_management": result,
