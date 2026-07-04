@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import BackgroundTasks, HTTPException, Request
@@ -27,7 +28,7 @@ from src.venture_synthesis_reliability import (
 )
 from src.venture_synthesis_validation_fallback import install_synthesis_validation_fallback
 
-# Install low-level guards before routes create or display work.  The workers
+# Install low-level guards before routes create or display work. The workers
 # remain idempotent: both legacy startup hooks and this facade may call start.
 ensure_venture_indexes()
 install_bible_refresh_guard()
@@ -54,15 +55,20 @@ def _remove_route(router, path: str, method: str) -> None:
     ]
 
 
-def _schedule_synthesis(background_tasks: BackgroundTasks | None, job_id: str | None) -> None:
-    """Give a newly queued job a deterministic immediate attempt.
+async def _recover_then_process_synthesis(job_id: str) -> None:
+    """Reclaim interrupted work before the guarded immediate attempt."""
+    await asyncio.to_thread(recover_stale_synthesis_jobs)
+    await process_synthesis_job(job_id)
 
-    The persistent worker remains the owner of the queue.  ``process_synthesis_job``
-    is guarded by an atomic claim, so this background nudge either wins once or
-    safely exits because the worker claimed the same job first.
+
+def _schedule_synthesis(background_tasks: BackgroundTasks | None, job_id: str | None) -> None:
+    """Nudge a queued or previously queued job after its commit.
+
+    The persistent worker remains the queue owner. The process function is
+    guarded by an atomic queued-to-running claim, so duplicate nudges are safe.
     """
     if background_tasks is not None and job_id:
-        background_tasks.add_task(process_synthesis_job, job_id)
+        background_tasks.add_task(_recover_then_process_synthesis, job_id)
 
 
 def _run_bible_action(
@@ -136,7 +142,7 @@ def setup_venture_routes(session_manager):
     @router.on_event("startup")
     async def start_venture_workers() -> None:
         # Reclaim old work before polling. This makes an interrupted previous
-        # run visible again without waiting for a 30-minute stale lease.
+        # run visible again without waiting for the normal stale lease.
         recover_obsolete_bible_jobs()
         recover_stale_synthesis_jobs()
         start_quest_index_worker(concurrency=1)
@@ -198,15 +204,31 @@ def setup_venture_routes(session_manager):
             ).first()
             if not source:
                 raise HTTPException(404, "Quest source not found")
+
+            # Preserve the legacy dynamic-email preflight. Bible sources are the
+            # only special case: they must queue selected book work, not a
+            # generic source refresh.
+            email_poll = None
+            if source.source_type == "email":
+                try:
+                    from src.venture_email import poll_email_source
+                    email_poll = poll_email_source(db, source)
+                except Exception:
+                    email_poll = {"changed": False, "error": "email_poll_unavailable"}
+
             job, created = _queue_source_work(db, source, captain=captain, trigger="manual_refresh")
             db.commit()
-            return {
+            payload = {
                 "accepted": True,
                 "reindexed_selected_books": source.source_type == "bible",
                 "already_active": not created,
                 "source": _legacy._source_to_dict(source, "raw"),
                 "index_job": job_to_dict(job),
             }
+            if email_poll is not None:
+                payload["email_poll"] = email_poll
+                payload["version_id"] = email_poll.get("version_id")
+            return payload
         except Exception:
             db.rollback()
             raise
@@ -272,7 +294,9 @@ def setup_venture_routes(session_manager):
                     proposal_id=payload.artifact_proposal_id,
                 )
             db.commit()
-            _schedule_synthesis(background_tasks, result.job_id if result.queued else None)
+            # A duplicate request may return an existing queued job. Re-nudge it
+            # rather than reporting progress that cannot resume until a restart.
+            _schedule_synthesis(background_tasks, result.job_id)
             return {"result": result.to_dict(), "management": _optimized._management_snapshot(db, quest_id, "captain")}
         except Exception:
             db.rollback()
@@ -289,7 +313,7 @@ def setup_venture_routes(session_manager):
         try:
             result = request_artifact_synthesis(db, _legacy, quest_id=quest_id, captain=captain)
             db.commit()
-            _schedule_synthesis(background_tasks, result.job_id if result.queued else None)
+            _schedule_synthesis(background_tasks, result.job_id)
             return {"result": result.to_dict(), "job_id": result.job_id}
         except Exception:
             db.rollback()
