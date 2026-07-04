@@ -9,6 +9,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# The original synthesis module intentionally imported a narrow set of database
+# models. The resource governor uses SQL-side previews, so make those two mapped
+# classes available on the module before the governor installs its overrides.
+import src.venture_synthesis as _synthesis
+from core.database import QuestSourceArtifact, QuestSourceVersion
+
+_synthesis.QuestSourceArtifact = QuestSourceArtifact
+_synthesis.QuestSourceVersion = QuestSourceVersion
+
 from src.venture_synthesis_governor import enqueue_artifact_memory_synthesis
 
 
@@ -69,9 +78,7 @@ def _get_published_proposal(db, legacy, quest_id: str, proposal_id: str | None):
 
 def request_artifact_synthesis(db, legacy, *, quest_id: str, captain: str) -> QuestManagementResult:
     """Request one deduplicated Captain-reviewable Artifact synthesis job."""
-    import src.venture_synthesis as synthesis
-
-    job = synthesis.enqueue_synthesis_job(
+    job = _synthesis.enqueue_synthesis_job(
         db,
         quest_id=quest_id,
         trigger="captain_requested",
