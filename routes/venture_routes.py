@@ -1,8 +1,8 @@
 """Public Venture route module.
 
-The optimized facade keeps the legacy route surface while replacing the
-high-churn Quest status, Artifact, Memory, and management endpoints.
+The governed facade retains the legacy route surface while replacing high-churn
+Quest reads and routing every synthesis action through the single worker queue.
 """
 
 from routes.venture_routes_legacy import *  # noqa: F401,F403
-from routes.venture_routes_optimized import setup_venture_routes
+from routes.venture_routes_governed import setup_venture_routes
