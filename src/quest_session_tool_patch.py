@@ -189,11 +189,15 @@ def install_manage_quest_synthesis_actions() -> None:
     """Patch schemas and dispatch once after the agent facade has loaded."""
     global _ORIGINAL_DO_MANAGE_QUEST
     import src.tool_execution as execution
+    from src.tool_implementations import do_manage_quest as original_manage_quest
 
     if getattr(execution, "_venture_manage_quest_actions_installed", False):
         return
-    _ORIGINAL_DO_MANAGE_QUEST = execution.do_manage_quest
-    execution.do_manage_quest = do_manage_quest
+    # ``do_manage_quest`` belongs to tool_implementations and is imported into
+    # the executor inside its dispatch function; it is not a module attribute on
+    # src.tool_execution. Keep the original for direct callers and intercept
+    # synthesis actions at the dispatcher boundary below.
+    _ORIGINAL_DO_MANAGE_QUEST = original_manage_quest
     _replace_manage_quest_schema()
     _register_dedicated_schema()
     _install_dispatcher(execution)
