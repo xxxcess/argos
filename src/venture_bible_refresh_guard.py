@@ -1,10 +1,11 @@
-"""Guard Rails for Bible-source indexing.
+"""Guard rails for Bible-source indexing.
 
-Bible sources are a collection of separately selected books.  The generic
+Bible sources are a collection of separately selected books. The generic
 ``refresh_source`` path used to enqueue a source-wide job with no book scope;
-the Bible adapter correctly rejected it as ``bible_scope_invalid``.  This
-module converts generic refresh/reindex/retry requests into selected-book work
-and repairs obsolete unscoped jobs without hiding genuine book failures.
+the Bible adapter correctly rejected it as ``bible_scope_invalid``. This module
+converts generic refreshes into a selected-book state check, reserves full work
+for explicit reindex/retry actions, and repairs obsolete unscoped jobs without
+hiding genuine book failures.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def _loads(value: str | None, fallback: Any = None) -> Any:
 
 
 def is_book_scoped_job(job: Any) -> bool:
-    """True only for a job that has a canonical Bible book selection scope."""
+    """True only for a job with canonical Bible selection scope."""
     scope = _loads(getattr(job, "scope_json", None), {})
     return (
         isinstance(scope, dict)
@@ -33,7 +34,7 @@ def is_book_scoped_job(job: Any) -> bool:
 
 
 def is_obsolete_unscoped_bible_job(job: Any) -> bool:
-    """Identify legacy generic Bible refreshes, not genuine book failures."""
+    """Identify legacy generic Bible refreshes, not genuine selected-book failures."""
     if is_book_scoped_job(job):
         return False
     return (
@@ -42,22 +43,41 @@ def is_obsolete_unscoped_bible_job(job: Any) -> bool:
     )
 
 
-def _selection_state(db, source) -> str:
-    from core.database import QuestBibleBookSelection, QuestIndexJob
+def _active_book_job(db, source):
+    from core.database import QuestIndexJob
 
-    selections = db.query(QuestBibleBookSelection).filter(
-        QuestBibleBookSelection.source_id == source.id,
-        QuestBibleBookSelection.active == True,  # noqa: E712
-    ).all()
-    active_jobs = db.query(QuestIndexJob).filter(
+    rows = db.query(QuestIndexJob).filter(
         QuestIndexJob.source_id == source.id,
         QuestIndexJob.status.in_(("queued", "running")),
-    ).all()
-    book_job_states = [job.status for job in active_jobs if is_book_scoped_job(job)]
+    ).order_by(QuestIndexJob.requested_at.asc()).all()
+    return next((job for job in rows if is_book_scoped_job(job)), None)
+
+
+def _latest_book_job(db, source):
+    from core.database import QuestIndexJob
+
+    rows = db.query(QuestIndexJob).filter(
+        QuestIndexJob.source_id == source.id,
+    ).order_by(QuestIndexJob.requested_at.desc()).limit(20).all()
+    return next((job for job in rows if is_book_scoped_job(job)), None)
+
+
+def _selected_books(db, source):
+    from core.database import QuestBibleBookSelection
+
+    return db.query(QuestBibleBookSelection).filter(
+        QuestBibleBookSelection.source_id == source.id,
+        QuestBibleBookSelection.active == True,  # noqa: E712
+    ).order_by(QuestBibleBookSelection.canonical_order.asc()).all()
+
+
+def _selection_state(db, source) -> str:
+    selections = _selected_books(db, source)
+    active = _active_book_job(db, source)
     states = {str(row.state or "") for row in selections}
-    if "running" in book_job_states or "indexing" in states:
+    if active and active.status == "running" or "indexing" in states:
         return "indexing"
-    if "queued" in book_job_states or "queued" in states:
+    if active and active.status == "queued" or "queued" in states:
         return "queued"
     if "failed" in states:
         return "partial" if "indexed" in states else "failed"
@@ -69,10 +89,10 @@ def _selection_state(db, source) -> str:
 
 
 def reconcile_bible_source_state(db, source) -> bool:
-    """Cancel only obsolete generic jobs and restore selected-book truth.
+    """Cancel obsolete generic jobs and restore selected-book truth.
 
-    Returns whether anything changed. A valid selected-book failure remains a
-    failure and still appears in Needs attention.
+    A valid selected-book failure remains a failure and still appears in Needs
+    attention. Only impossible source-wide Bible jobs are repaired.
     """
     from core.database import QuestIndexJob, utcnow_naive
 
@@ -100,9 +120,41 @@ def reconcile_bible_source_state(db, source) -> bool:
     return changed
 
 
-def queue_selected_bible_reindex(db, source, *, captain: str):
-    """Reindex active selected books one at a time using valid book scopes."""
-    from core.database import QuestBibleBookSelection, QuestIndexJob
+def refresh_selected_bible_source(db, source):
+    """Return current selected-book work without reimporting an indexed Bible.
+
+    Bible sources are static snapshots by translation. A regular refresh is a
+    status/reconciliation operation; it should not redownload all chapters just
+    because a model used the generic refresh action.
+    """
+    if getattr(source, "source_type", None) != "bible":
+        raise ValueError("not_a_bible_source")
+    if getattr(source, "status", None) != "active":
+        raise ValueError("bible_source_inactive")
+
+    reconcile_bible_source_state(db, source)
+    selections = _selected_books(db, source)
+    if not selections:
+        raise ValueError("bible_book_scope_required")
+    active = _active_book_job(db, source)
+    if active:
+        return active, False
+
+    # When a book has not completed, hand off only the first pending/failed
+    # selection. An explicit reindex remains the path that resets all books.
+    pending = next((row for row in selections if row.state != "indexed"), None)
+    if pending:
+        return queue_selected_bible_reindex(
+            db,
+            source,
+            captain=str(getattr(source, "captain_username", "") or ""),
+            selection_ids={pending.id},
+        )
+    return _latest_book_job(db, source), False
+
+
+def queue_selected_bible_reindex(db, source, *, captain: str, selection_ids: set[str] | None = None):
+    """Reindex selected books one at a time using valid book-scoped work."""
     from src.quest_indexing import enqueue_bible_book_job
 
     if getattr(source, "source_type", None) != "bible":
@@ -111,28 +163,22 @@ def queue_selected_bible_reindex(db, source, *, captain: str):
         raise ValueError("bible_source_inactive")
 
     reconcile_bible_source_state(db, source)
-    active = db.query(QuestIndexJob).filter(
-        QuestIndexJob.source_id == source.id,
-        QuestIndexJob.status.in_(("queued", "running")),
-    ).order_by(QuestIndexJob.requested_at.asc()).all()
-    current = next((job for job in active if is_book_scoped_job(job)), None)
+    current = _active_book_job(db, source)
     if current:
         return current, False
 
-    selections = db.query(QuestBibleBookSelection).filter(
-        QuestBibleBookSelection.source_id == source.id,
-        QuestBibleBookSelection.active == True,  # noqa: E712
-    ).order_by(QuestBibleBookSelection.canonical_order.asc()).all()
+    selections = _selected_books(db, source)
     if not selections:
         raise ValueError("bible_book_scope_required")
+    targets = [row for row in selections if selection_ids is None or row.id in selection_ids]
+    if not targets:
+        raise ValueError("bible_book_scope_required")
 
-    # A Bible source is immutable for a translation. "Refresh" therefore means
-    # an explicit selected-book reindex, never a source-wide fetch.
-    for selection in selections:
+    for selection in targets:
         selection.state = "queued"
         selection.completed_chapters = 0
         selection.last_error = None
-    first = selections[0]
+    first = targets[0]
     job = enqueue_bible_book_job(
         db,
         source,
@@ -179,16 +225,12 @@ def install_bible_refresh_guard() -> None:
     original_status = legacy._source_index_status
 
     def enqueue_index_job(db, source, *, trigger="manual_refresh", created_by=None, priority=100, scope=None):
-        # Every generic caller becomes safe for Bible sources, including legacy
-        # reindex/retry routes and agent tools that still use refresh_source.
+        # Generic callers are refresh-like. Do not turn a fully indexed static
+        # Bible source into an expensive full-Testament or full-book reimport.
         if getattr(source, "source_type", None) == "bible":
             parsed_scope = scope if isinstance(scope, dict) else _loads(scope, {})
             if parsed_scope.get("kind") != "bible_book_import":
-                job, _ = queue_selected_bible_reindex(
-                    db,
-                    source,
-                    captain=str(created_by or source.captain_username or ""),
-                )
+                job, _ = refresh_selected_bible_source(db, source)
                 return job
         return original_enqueue(
             db,
