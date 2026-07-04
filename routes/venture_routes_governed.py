@@ -8,11 +8,13 @@ from routes import venture_routes_legacy as _legacy
 from routes.venture_routes_optimized import setup_venture_routes as _optimized_setup
 from routes.venture_routes_performance_patch import install_route_performance_patch
 from src.quest_session_management import request_artifact_synthesis
+from src.venture_db_indexes import ensure_venture_indexes
 from src.venture_synthesis_execution_guard import install_synthesis_execution_guard
 
 # The optimized facade installs bounded evidence and atomic queue claiming.
 # These guards reject stale direct execution and remove remaining N+1/count
 # hydration before the application starts its background workers.
+ensure_venture_indexes()
 install_synthesis_execution_guard()
 install_route_performance_patch()
 
