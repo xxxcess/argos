@@ -1,8 +1,8 @@
 """Resource governor for Venture synthesis.
 
-The Venture worker is intentionally single-owner.  This module is installed by
+The Venture worker is intentionally single-owner. This module is installed by
 ``routes.venture_routes`` during application import and patches the existing
-synthesis module without changing its public contract.  It prevents duplicate
+synthesis module without changing its public contract. It prevents duplicate
 synthesis jobs, atomically claims work, and bounds conversation/source hydration
 before an LLM request is assembled.
 """
@@ -236,17 +236,24 @@ def _deduped_enqueue(synthesis, original, db, *, quest_id: str, trigger: str, cr
 
 
 def enqueue_artifact_memory_synthesis(db, *, quest_id: str, proposal, created_by: str, event_id: str) -> tuple[Any, bool]:
-    """Queue one memory extraction job for one published Artifact revision."""
+    """Queue one Memory extraction job per published Artifact revision."""
     import src.venture_synthesis as synthesis
 
-    existing = db.query(synthesis.QuestSynthesisJob).filter(
+    rows = db.query(synthesis.QuestSynthesisJob).filter(
         synthesis.QuestSynthesisJob.quest_id == quest_id,
         synthesis.QuestSynthesisJob.trigger == "artifact_revision",
         synthesis.QuestSynthesisJob.artifact_proposal_id == proposal.id,
         synthesis.QuestSynthesisJob.status.in_(("queued", "running", "completed")),
-    ).order_by(synthesis.QuestSynthesisJob.requested_at.desc()).first()
-    if existing:
-        return existing, False
+    ).order_by(synthesis.QuestSynthesisJob.requested_at.desc()).all()
+    for existing in rows:
+        # An active job consumes the latest published content when it executes,
+        # so queueing another one only increases contention. A completed job
+        # blocks only the same revision; a later revision must be extractable.
+        if existing.status in {"queued", "running"}:
+            return existing, False
+        target_revision = _json_loads(synthesis, existing.result_json, {}).get("artifact_revision")
+        if existing.status == "completed" and target_revision == proposal.revision_number:
+            return existing, False
     job = synthesis.QuestSynthesisJob(
         id=uuid.uuid4().hex,
         quest_id=quest_id,
