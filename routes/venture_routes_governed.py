@@ -18,6 +18,7 @@ from src.venture_bible_refresh_guard import (
     install_bible_refresh_guard,
     queue_selected_bible_reindex,
     recover_obsolete_bible_jobs,
+    refresh_selected_bible_source,
 )
 from src.venture_db_indexes import ensure_venture_indexes
 from src.venture_synthesis import process_synthesis_job, start_quest_synthesis_worker, stop_quest_synthesis_worker
@@ -28,8 +29,6 @@ from src.venture_synthesis_reliability import (
 )
 from src.venture_synthesis_validation_fallback import install_synthesis_validation_fallback
 
-# Install low-level guards before routes create or display work. The workers
-# remain idempotent: both legacy startup hooks and this facade may call start.
 ensure_venture_indexes()
 install_bible_refresh_guard()
 install_synthesis_reliability_guard()
@@ -62,11 +61,7 @@ async def _recover_then_process_synthesis(job_id: str) -> None:
 
 
 def _schedule_synthesis(background_tasks: BackgroundTasks | None, job_id: str | None) -> None:
-    """Nudge a queued or previously queued job after its commit.
-
-    The persistent worker remains the queue owner. The process function is
-    guarded by an atomic queued-to-running claim, so duplicate nudges are safe.
-    """
+    """Nudge a queued or previously queued job after its commit."""
     if background_tasks is not None and job_id:
         background_tasks.add_task(_recover_then_process_synthesis, job_id)
 
@@ -111,11 +106,14 @@ def _review_queue_payload(db, quest_id: str, captain: str) -> list[dict]:
     return payload
 
 
-def _queue_source_work(db, source, *, captain: str, trigger: str):
-    """Route every Bible action through a selected-book scope."""
+def _queue_source_work(db, source, *, captain: str, trigger: str, force_bible_reindex: bool = False):
+    """Use cheap state refreshes or explicit scoped Bible reindexing."""
     if source.source_type == "bible":
         try:
-            job, created = queue_selected_bible_reindex(db, source, captain=captain)
+            if force_bible_reindex:
+                job, created = queue_selected_bible_reindex(db, source, captain=captain)
+            else:
+                job, created = refresh_selected_bible_source(db, source)
         except ValueError as exc:
             message = {
                 "bible_book_scope_required": "Select a Bible book before reindexing this source.",
@@ -125,6 +123,63 @@ def _queue_source_work(db, source, *, captain: str, trigger: str):
         return job, created
     from src.quest_indexing import enqueue_index_job
     return enqueue_index_job(db, source, trigger=trigger, created_by=captain), True
+
+
+def _source_refresh_response(
+    request: Request,
+    quest_id: str,
+    source_id: str,
+    *,
+    trigger: str,
+    force_bible_reindex: bool,
+):
+    _legacy.require_venture_runtime()
+    captain = _legacy.require_quest_captain(request, quest_id)
+    db = _legacy.SessionLocal()
+    try:
+        source = db.query(_legacy.QuestSource).filter(
+            _legacy.QuestSource.id == source_id,
+            _legacy.QuestSource.session_id == quest_id,
+        ).first()
+        if not source:
+            raise HTTPException(404, "Quest source not found")
+
+        # Preserve the legacy dynamic-email preflight. Bible sources are static;
+        # their generic refresh is a status check, while explicit reindex does
+        # selected book work with canonical scope.
+        email_poll = None
+        if source.source_type == "email":
+            try:
+                from src.venture_email import poll_email_source
+                email_poll = poll_email_source(db, source)
+            except Exception:
+                email_poll = {"changed": False, "error": "email_poll_unavailable"}
+
+        job, created = _queue_source_work(
+            db,
+            source,
+            captain=captain,
+            trigger=trigger,
+            force_bible_reindex=force_bible_reindex,
+        )
+        db.commit()
+        payload = {
+            "accepted": True,
+            "reindexed_selected_books": bool(source.source_type == "bible" and force_bible_reindex),
+            "already_current": bool(source.source_type == "bible" and not force_bible_reindex and not created),
+            "already_active": bool(not created and not (source.source_type == "bible" and not force_bible_reindex)),
+            "source": _legacy._source_to_dict(source, "raw"),
+            "index_job": job_to_dict(job) if job else None,
+        }
+        if email_poll is not None:
+            payload["email_poll"] = email_poll
+            payload["version_id"] = email_poll.get("version_id")
+        return payload
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def setup_venture_routes(session_manager):
@@ -141,8 +196,6 @@ def setup_venture_routes(session_manager):
 
     @router.on_event("startup")
     async def start_venture_workers() -> None:
-        # Reclaim old work before polling. This makes an interrupted previous
-        # run visible again without waiting for the normal stale lease.
         recover_obsolete_bible_jobs()
         recover_stale_synthesis_jobs()
         start_quest_index_worker(concurrency=1)
@@ -194,54 +247,33 @@ def setup_venture_routes(session_manager):
 
     @router.post("/api/quests/{quest_id}/sources/{source_id}/refresh")
     def refresh_source(request: Request, quest_id: str, source_id: str):
-        _legacy.require_venture_runtime()
-        captain = _legacy.require_quest_captain(request, quest_id)
-        db = _legacy.SessionLocal()
-        try:
-            source = db.query(_legacy.QuestSource).filter(
-                _legacy.QuestSource.id == source_id,
-                _legacy.QuestSource.session_id == quest_id,
-            ).first()
-            if not source:
-                raise HTTPException(404, "Quest source not found")
-
-            # Preserve the legacy dynamic-email preflight. Bible sources are the
-            # only special case: they must queue selected book work, not a
-            # generic source refresh.
-            email_poll = None
-            if source.source_type == "email":
-                try:
-                    from src.venture_email import poll_email_source
-                    email_poll = poll_email_source(db, source)
-                except Exception:
-                    email_poll = {"changed": False, "error": "email_poll_unavailable"}
-
-            job, created = _queue_source_work(db, source, captain=captain, trigger="manual_refresh")
-            db.commit()
-            payload = {
-                "accepted": True,
-                "reindexed_selected_books": source.source_type == "bible",
-                "already_active": not created,
-                "source": _legacy._source_to_dict(source, "raw"),
-                "index_job": job_to_dict(job),
-            }
-            if email_poll is not None:
-                payload["email_poll"] = email_poll
-                payload["version_id"] = email_poll.get("version_id")
-            return payload
-        except Exception:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        return _source_refresh_response(
+            request,
+            quest_id,
+            source_id,
+            trigger="manual_refresh",
+            force_bible_reindex=False,
+        )
 
     @router.post("/api/quests/{quest_id}/sources/{source_id}/reindex")
     def reindex_source(request: Request, quest_id: str, source_id: str):
-        return refresh_source(request, quest_id, source_id)
+        return _source_refresh_response(
+            request,
+            quest_id,
+            source_id,
+            trigger="manual_reindex",
+            force_bible_reindex=True,
+        )
 
     @router.post("/api/quests/{quest_id}/sources/{source_id}/retry")
     def retry_source(request: Request, quest_id: str, source_id: str):
-        return refresh_source(request, quest_id, source_id)
+        return _source_refresh_response(
+            request,
+            quest_id,
+            source_id,
+            trigger="retry",
+            force_bible_reindex=True,
+        )
 
     @router.get("/api/quests/{quest_id}/bible/lookup")
     def lookup_bible(request: Request, quest_id: str, reference: str | None = None, query: str | None = None, source_id: str | None = None):
@@ -294,8 +326,6 @@ def setup_venture_routes(session_manager):
                     proposal_id=payload.artifact_proposal_id,
                 )
             db.commit()
-            # A duplicate request may return an existing queued job. Re-nudge it
-            # rather than reporting progress that cannot resume until a restart.
             _schedule_synthesis(background_tasks, result.job_id)
             return {"result": result.to_dict(), "management": _optimized._management_snapshot(db, quest_id, "captain")}
         except Exception:
