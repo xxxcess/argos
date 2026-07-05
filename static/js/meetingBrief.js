@@ -1,10 +1,22 @@
-// Argos Venture Meeting Brief — transcript-first, CookBook-aware meeting workflow.
+// Argos Venture Meeting Brief — transcript-first, Cookbook-aware meeting workflow.
 // Loaded as a storage.js side effect so it is available on the workspace home tab
 // without adding a separate frontend bundle or parallel app shell.
 
 const API_BASE = window.location.origin;
+const CAPTURE_CHANNEL = 'argos-venture-meeting-capture';
+const CAPTURE_PENDING_KEY = 'argos-venture-meeting-capture-pending';
 let _lastBrief = '';
 let _openModal = null;
+let _captureChannel = null;
+let _pendingCapture = null;
+
+function isLiveCapturePage() {
+  try {
+    return new URLSearchParams(window.location.search).get('meeting-capture') === 'live';
+  } catch (_) {
+    return false;
+  }
+}
 
 function notify(message, isError = false) {
   const ui = window.uiModule;
@@ -91,12 +103,71 @@ function cleanTitle(value) {
   return (value || '').trim() || 'Untitled meeting';
 }
 
-function makeButton(label, className = 'admin-btn-add') {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = className;
-  button.textContent = label;
-  return button;
+function validCaptureMessage(value) {
+  return value
+    && value.source === 'argos-venture-live-meeting-capture'
+    && ['meeting-capture-progress', 'meeting-capture-complete', 'meeting-capture-review', 'meeting-capture-exported'].includes(value.type)
+    && typeof value.transcript === 'string';
+}
+
+function rememberCapture(value) {
+  _pendingCapture = {
+    title: cleanTitle(value.title),
+    transcript: value.transcript,
+  };
+  try { sessionStorage.setItem(CAPTURE_PENDING_KEY, JSON.stringify(_pendingCapture)); } catch (_) {}
+}
+
+function applyPendingCapture(modal = _openModal) {
+  if (!modal || !_pendingCapture?.transcript?.trim()) return false;
+  const title = modal.querySelector('#meeting-brief-title');
+  const transcript = modal.querySelector('#meeting-brief-transcript');
+  const output = modal.querySelector('#meeting-brief-output');
+  const status = modal.querySelector('#meeting-brief-status');
+  const save = modal.querySelector('#meeting-brief-save');
+  if (!transcript) return false;
+  if (title && (!title.value.trim() || title.value.trim() === 'Untitled meeting')) title.value = _pendingCapture.title;
+  transcript.value = _pendingCapture.transcript;
+  _lastBrief = '';
+  if (save) save.disabled = true;
+  if (output) output.textContent = 'Live transcript ready. Generate a Meeting Brief to review decisions, actions, and discussion highlights.';
+  setStatus(status, 'Live transcript received.');
+  return true;
+}
+
+function receiveCaptureMessage(value) {
+  if (!validCaptureMessage(value)) return;
+  if (value.type === 'meeting-capture-exported') {
+    notify('Live transcript exported to your document library.');
+    return;
+  }
+  rememberCapture(value);
+  if (value.type === 'meeting-capture-progress') return;
+  if (applyPendingCapture()) notify('Live transcript is ready in Meeting Brief.');
+  else notify('Live transcript is ready. Open Meeting Brief to review it.');
+}
+
+function initCaptureBridge() {
+  try {
+    const pending = JSON.parse(sessionStorage.getItem(CAPTURE_PENDING_KEY) || 'null');
+    if (pending?.transcript) _pendingCapture = pending;
+  } catch (_) {}
+  if ('BroadcastChannel' in window) {
+    _captureChannel = new BroadcastChannel(CAPTURE_CHANNEL);
+    _captureChannel.onmessage = event => receiveCaptureMessage(event.data);
+  }
+  window.addEventListener('message', event => {
+    if (event.origin !== window.location.origin) return;
+    receiveCaptureMessage(event.data);
+  });
+}
+
+function openLiveCapture(title) {
+  const url = new URL('/', window.location.origin);
+  url.searchParams.set('meeting-capture', 'live');
+  url.searchParams.set('title', cleanTitle(title));
+  const tab = window.open(url.toString(), '_blank');
+  if (!tab) notify('Your browser blocked the live capture tab. Allow pop-ups for Argos and try again.', true);
 }
 
 function openMeetingBrief() {
@@ -121,13 +192,18 @@ function openMeetingBrief() {
             <input id="meeting-brief-title" class="settings-select" maxlength="180" placeholder="Weekly project review" />
           </div>
           <div class="settings-row">
+            <label class="settings-label" for="meeting-brief-live-capture">Live capture</label>
+            <button type="button" class="admin-btn-sm" id="meeting-brief-live-capture">Capture live meeting</button>
+            <span style="font-size:11px;opacity:.65">Opens a dedicated microphone and live-transcript tab.</span>
+          </div>
+          <div class="settings-row">
             <label class="settings-label" for="meeting-brief-audio">Audio</label>
             <input id="meeting-brief-audio" type="file" accept="audio/*,video/*" />
             <button type="button" class="admin-btn-sm" id="meeting-brief-transcribe">Transcribe</button>
           </div>
           <div class="settings-row" style="align-items:flex-start">
             <label class="settings-label" for="meeting-brief-transcript">Transcript</label>
-            <textarea id="meeting-brief-transcript" class="settings-select" rows="10" placeholder="Paste a transcript, or select a recording and transcribe it with the configured STT provider."></textarea>
+            <textarea id="meeting-brief-transcript" class="settings-select" rows="10" placeholder="Paste a transcript, select a recording to transcribe, or capture a live meeting in a new tab."></textarea>
           </div>
           <div class="settings-row" style="align-items:flex-start">
             <label class="settings-label" for="meeting-brief-focus">Focus</label>
@@ -144,7 +220,7 @@ function openMeetingBrief() {
           </div>
           <div class="settings-col">
             <label class="settings-label" for="meeting-brief-output">Brief</label>
-            <pre id="meeting-brief-output" class="settings-select" tabindex="0" aria-live="polite" style="white-space:pre-wrap;min-height:180px;overflow:auto">Generate a brief to review decisions, actions, and uncertainty.</pre>
+            <pre id="meeting-brief-output" class="settings-select" tabindex="0" aria-live="polite" style="white-space:pre-wrap;min-height:180px;overflow:auto">Generate a brief to review decisions, actions, discussion highlights, and uncertainty.</pre>
           </div>
         </div>
       </div>
@@ -178,6 +254,9 @@ function openMeetingBrief() {
   const transcribe = modal.querySelector('#meeting-brief-transcribe');
   const generate = modal.querySelector('#meeting-brief-generate');
   const save = modal.querySelector('#meeting-brief-save');
+  const captureLive = modal.querySelector('#meeting-brief-live-capture');
+
+  captureLive?.addEventListener('click', () => openLiveCapture(title?.value));
 
   transcribe?.addEventListener('click', async () => {
     const file = audio?.files?.[0];
@@ -206,7 +285,7 @@ function openMeetingBrief() {
   generate?.addEventListener('click', async () => {
     const text = (transcript?.value || '').trim();
     if (!text) {
-      notify('Paste a transcript or transcribe a recording first.', true);
+      notify('Paste a transcript, transcribe a recording, or capture a live meeting first.', true);
       return;
     }
     generate.disabled = true;
@@ -265,10 +344,12 @@ function openMeetingBrief() {
     }
   });
 
+  applyPendingCapture(modal);
   title?.focus();
 }
 
 function boot() {
+  initCaptureBridge();
   mountLaunchers();
   document.addEventListener('odysseus:workspace-tab-activated', syncHomeVisibility);
   new MutationObserver(syncHomeVisibility).observe(document.body, {
@@ -277,5 +358,10 @@ function boot() {
   });
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
-else boot();
+if (isLiveCapturePage()) {
+  import('./liveMeetingCapture.js').catch(error => console.error('Failed to load live meeting capture:', error));
+} else if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot, { once: true });
+} else {
+  boot();
+}
