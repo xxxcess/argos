@@ -1,71 +1,80 @@
-# Argos Venture Meeting Brief
+# Argos Venture Audio Capture and Meeting Brief
 
-## Purpose
+## Product surface
 
-Meeting Brief is an Argos Venture tool for turning a meeting transcript into a
-careful, reviewable Markdown record of decisions, actions, open questions, and
-uncertainty. It is an Argos implementation inspired by Meetily's workflow, not
-a port of Meetily code.
+Audio Capture is created from Argos Venture's **New Tab** wizard. The wizard
+now offers three choices:
 
-It appears on the Venture Home tab. Users can paste a transcript, transcribe an
-uploaded recording, or capture microphone audio live in a dedicated tab. The
-configured Argos Speech-to-Text provider produces text, and the configured
-Utility model produces the Meeting Brief.
+- Regular chat
+- Quest
+- Audio capture
 
-## Storage rule
+Choosing **Audio capture** opens a dedicated in-app workspace tab beside chat
+and Quest tabs. It does not open a browser tab and it does not add a Home
+sidebar tool.
 
-Meeting Brief never writes to Notes. When a user chooses to keep an output,
-Argos creates an owner-scoped Markdown document in the existing Document
-Library:
+## Live capture workflow
 
-- `<Meeting Title> — Transcript` for an explicitly exported transcript.
-- `<Meeting Title> — Meeting Brief` for an explicitly exported AI brief.
+1. Create an **Audio capture** tab from New Tab.
+2. Enter a meeting title and explicitly confirm consent.
+3. Use the recorder controls at the bottom of the tab: Start/Resume, Pause,
+   Stop, elapsed time, and live waveform.
+4. Review the timestamped transcript in the main panel.
+5. Choose an explicit export action:
+   - **Export transcript** creates `<Meeting Title> — Transcript`.
+   - **Generate & export brief** creates `<Meeting Title> — Meeting Brief`.
+6. Argos opens the created Library document for review.
 
-The feature does not create a duplicate meeting database or retain raw audio.
+Raw transcript text and recorder state stay in browser memory. They are not
+serialized into localStorage or written to a parallel meeting database.
 
-## Argos architecture
+## Architecture
 
 ```text
-transcript, imported recording, or consent-gated microphone capture
-  -> Argos STT provider
-  -> timestamped transcript
-  -> Utility model resolved from Model Endpoints / Cookbook
-  -> reviewable Meeting Brief Markdown
-  -> existing Document Library
+New Tab wizard -> Audio Capture workspace tab
+  -> consent-gated browser microphone
+  -> browser STT or short audio segments to Argos STT
+  -> timestamped transcript held in memory
+  -> Utility model resolved through Model Endpoints / Cookbook
+  -> owner-scoped Markdown Document Library export
+  -> Library document opens for review
 ```
 
-This reuses Argos endpoint configuration, Cookbook model lifecycle, document
-ownership, and Venture runtime isolation. It does not import Meetily's Tauri,
-Rust capture, tray, database, or provider code.
+The feature uses the configured Argos Speech-to-Text and Utility model paths.
+It does not import Meetily's Tauri, Rust capture, database, tray, or provider
+code.
 
-## Implemented capabilities
+## Meeting Brief format
 
-- Paste, import, or live-capture transcripts.
-- Browser speech recognition or short server-STT audio segments.
-- Consent-gated microphone capture in a dedicated tab.
-- Structured Markdown output: Summary, Key Decisions, evidence-linked Action
-  Items, Discussion Highlights, and Open Questions & Uncertainty.
-- Explicit transcript timestamps where live capture provides them.
-- Export transcript Markdown to the Library.
-- Export generated Meeting Brief Markdown to the Library from either the
-  Meeting Brief window or the live-capture tab.
-- Cookbook-aware Utility model selection.
-- Long-transcript chunking for bounded local-model requests.
-- Venture-only API boundary through `ARGOS_RUNTIME_ID=argos-venture`.
+The generated Markdown format takes useful structure from Meetily's standard
+meeting-notes template while preserving Argos's evidence requirement:
 
-## Follow-on options
+- Summary
+- Key Decisions
+- Action Items with Owner, Task, Due, Transcript Reference, and Timestamp
+- Discussion Highlights
+- Open Questions & Uncertainty
 
-1. **Native Argos Companion** for approved system-audio capture.
-2. **Authorized recording imports** from calendars or meeting providers.
-3. **Quest promotion** that turns a reviewed Library document into a
-   Captain-approved artifact.
-4. **Durable evidence pipeline** with diarization, retention rules, and
+The model must not fabricate attendees, owners, dates, decisions, timestamps,
+or outcomes. Missing information remains explicit.
+
+## Persistence rule
+
+Audio Capture never exports to Notes. User-requested transcript and brief
+outputs are Markdown documents in the existing owner-scoped Document Library.
+The brief export immediately opens the document for the user.
+
+## Current boundaries
+
+- Browser microphone only; system-audio capture is not included.
+- No automatic recording, calendar bot, diarization, or raw audio persistence.
+- One active microphone capture at a time.
+- User consent is required before microphone access.
+
+## Future options
+
+1. An optional native Argos Companion for approved system-audio capture.
+2. Authorized meeting-provider recording imports.
+3. Captain-controlled promotion of a Library document to a Quest artifact.
+4. A durable evidence pipeline with diarization, retention rules, and
    time-linked Quest citations.
-
-## Guardrails
-
-- Require explicit user action and consent before recording.
-- Keep raw audio out of the product's persistent store for this web workflow.
-- Never infer speaker identity, ownership, due dates, or decisions.
-- Preserve uncertainty rather than fabricating meeting outcomes.
-- Keep user-owned meeting output in the existing Markdown Document Library.
