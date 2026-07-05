@@ -1,67 +1,69 @@
-# Argos Venture Audio Capture Tab
+# Argos Venture Live Capture Tab
 
 ## Entry point
 
-Audio Capture is a choice in the Venture **New Tab** wizard. Selecting it opens
-a dedicated tab inside the Argos workspace tab strip, alongside chat and Quest
-tabs. It never opens a browser window.
+**Live Capture** is a choice in the Venture **New Tab** wizard. Selecting it
+opens a dedicated tab in the Argos workspace tab strip, alongside chat and
+Quest tabs. It does not open a browser window or add a Home sidebar tool.
 
-The tab is idle when created. It does not request microphone permission, start
-recording, start browser recognition, or send audio to Speech-to-Text until the
-user confirms consent and presses **Start capture**.
+The tab is idle when created. Pressing **Start recording** is the sole action
+that requests microphone permission; the browser supplies the standard allow or
+block prompt.
 
 ## Recorder controls
 
-The tab uses a two-row recorder footer so timing and audio activity remain
-separate from the action controls:
+The recorder footer uses two rows:
 
-- Elapsed time and microphone waveform appear above the controls.
-- Start capture / Resume capture, Pause, and Stop appear on the control row.
-- Export transcript and Generate & export brief appear on that same control row.
+- Elapsed time and microphone waveform are above the controls.
+- Start recording / Resume recording, Pause, Stop, transcript export, and brief
+  export are on the control row.
 
-The Home sidebar, its collapse control, and Home-only tools are hidden while an
-Audio Capture tab is active.
+The Home sidebar, collapse button, hamburger control, and other Home-only tools
+are hidden while Live Capture is active.
+
+## Persisted transcript session
+
+Live Capture uses Argos's existing persisted session and chat-message store.
+Each finalized timestamped transcript segment is a user message in a session
+whose type is `live_capture`. This means the transcript survives tab switches,
+reloads, and later review like a regular Argos conversation.
+
+- Local or endpoint Speech-to-Text receives microphone segments every 15 seconds
+  through `/api/stt/transcribe`.
+- Each server-transcribed segment is timestamped from its audio segment start,
+  rather than from the later transcription callback. This prevents repeated
+  timestamps when final segments return after Stop.
+- Browser STT uses `SpeechRecognition` when configured.
+- Old, stopped, closed, or superseded recording runs cannot append late results
+  into the active transcript.
+
+Switching away from an active Live Capture tab stops recording; it does not
+continue in the background.
 
 ## Transcript and export flow
 
-Browser STT uses `SpeechRecognition` when configured. Local or endpoint STT
-receives self-contained microphone segments through Argos's existing
-`/api/stt/transcribe` route. Final transcript entries include a relative
-`[MM:SS]` marker.
+Stop recording and wait for final transcription before exporting.
 
-Each recording has a distinct run identifier. Late callbacks from an old,
-stopped, or closed run are ignored rather than appended to the current
-transcript. Switching away from the active capture tab stops an active capture;
-Audio Capture does not continue recording in the background.
+- **Export transcript** writes `<Meeting Title> — Transcript` as an
+  owner-scoped Markdown document and opens it in the existing document editor
+  panel beside the still-open Live Capture tab.
+- **Generate & export brief** sends the persisted timestamped transcript to the
+  configured Utility model, writes `<Meeting Title> — Meeting Brief`, and opens
+  it in the same side panel. Transient provider 429 responses receive one bounded
+  server retry before Argos reports the limit.
 
-Stop capture before exporting so the final audio segment can be transcribed.
-Exports are explicit and Library-only:
-
-- **Export transcript** writes an owner-scoped Markdown document titled
-  `<Meeting Title> — Transcript` and opens it in the existing document editor
-  panel beside the still-open Audio Capture tab.
-- **Generate & export brief** uses the existing Meeting Brief generation route,
-  writes `<Meeting Title> — Meeting Brief`, and opens it beside the capture tab.
-
-The capture tab retains raw transcript text only in runtime memory. It does not
-write to Notes, localStorage, or a new meeting-specific database.
+No output is exported to Notes. Raw microphone audio is not persisted.
 
 ## Brief structure
 
-The generated brief contains:
-
-- Summary
-- Key Decisions
-- Action Items with Owner, Task, Due, Transcript Reference, and Timestamp
-- Discussion Highlights
-- Open Questions & Uncertainty
-
-Argos leaves ownership, due dates, decisions, and timestamps unknown when the
-transcript does not establish them.
+The generated brief contains Summary, Key Decisions, timestamp-aware Action
+Items, Discussion Highlights, and Open Questions & Uncertainty. Argo does not
+fabricate owners, due dates, decisions, timestamps, or outcomes absent from the
+transcript.
 
 ## Boundaries
 
 - Microphone only; no system-audio capture.
 - One active capture at a time.
-- No automatic capture, speaker diarization, raw audio persistence, or
-  calendar-provider recording import in this phase.
+- No automatic recording, speaker diarization, calendar-provider recording
+  imports, or raw-audio persistence in this phase.
