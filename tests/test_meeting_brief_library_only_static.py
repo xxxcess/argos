@@ -52,16 +52,38 @@ def test_capture_creation_is_inert_until_explicit_start():
     assert "Start capture" in source
 
 
-def test_exports_are_library_markdown_and_open_documents_after_stop():
-    capture = read("static/js/meetingCaptureWorkspace.js")
-    assert "'/api/document'" in capture
-    assert "language: 'markdown'" in capture
-    assert "Export transcript" in capture
-    assert "Generate & export brief" in capture
-    assert "loadDocument" in capture
-    assert "openPanel" in capture
-    assert "deactivateCapture();" in capture
-    assert "Stop capture and wait for final transcription before exporting." in capture
+def test_transcripts_are_scoped_to_the_current_recording_run():
+    source = read("static/js/meetingCaptureWorkspace.js")
+    assert "runId" in source
+    assert "activeRunId" in source
+    assert "function isCurrentRun" in source
+    assert "appendTranscript(capture, runId" in source
+    assert "isCurrentRun(capture, segment.runId, { allowStopping: true })" in source
+    assert "capture.phase === 'stopped'" in source
+
+
+def test_capture_layout_hides_home_only_chrome_and_header_overlay():
+    source = read("static/js/meetingCaptureWorkspace.js")
+    assert "#sidebar-toggle" in source
+    assert "#sidebar-collapse" in source
+    assert "setHomeOnlyControlsHidden(true)" in source
+    assert "Live Meeting Transcript" not in source
+    assert "meeting-capture-control-row" in source
+    assert "meeting-recorder-readout" in source
+
+
+def test_exports_are_library_markdown_and_keep_capture_open():
+    source = read("static/js/meetingCaptureWorkspace.js")
+    handoff = source.split("async function openLibraryDocument", 1)[1].split("async function exportTranscript", 1)[0]
+    assert "'/api/document'" in source
+    assert "language: 'markdown'" in source
+    assert "Export transcript" in source
+    assert "Generate & export brief" in source
+    assert "loadDocument" in source
+    assert "openPanel" in source
+    assert "documentPaneOffset" in handoff
+    assert "deactivateCapture" not in handoff
+    assert "Stop capture and wait for final transcription before exporting." in source
 
 
 def test_legacy_capture_modules_are_removed():
