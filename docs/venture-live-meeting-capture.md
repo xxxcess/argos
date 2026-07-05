@@ -6,20 +6,21 @@ Audio Capture is a choice in the Venture **New Tab** wizard. Selecting it opens
 a dedicated tab inside the Argos workspace tab strip, alongside chat and Quest
 tabs. It never opens a browser window.
 
+The tab is idle when created. It does not request microphone permission, start
+recording, start browser recognition, or send audio to Speech-to-Text until the
+user confirms consent and presses **Start capture**.
+
 ## Recorder controls
 
-The tab provides traditional recorder controls at the bottom of the workspace:
+The tab uses a two-row recorder footer so timing and audio activity remain
+separate from the action controls:
 
-- Start capture / Resume capture
-- Pause
-- Stop
-- Elapsed time
-- Live microphone waveform
-- Export transcript
-- Generate & export brief
+- Elapsed time and microphone waveform appear above the controls.
+- Start capture / Resume capture, Pause, and Stop appear on the control row.
+- Export transcript and Generate & export brief appear on that same control row.
 
-The user enters a title and must affirm they have authority and participant
-consent before the browser requests microphone access.
+The Home sidebar, its collapse control, and Home-only tools are hidden while an
+Audio Capture tab is active.
 
 ## Transcript and export flow
 
@@ -28,13 +29,19 @@ receives self-contained microphone segments through Argos's existing
 `/api/stt/transcribe` route. Final transcript entries include a relative
 `[MM:SS]` marker.
 
+Each recording has a distinct run identifier. Late callbacks from an old,
+stopped, or closed run are ignored rather than appended to the current
+transcript. Switching away from the active capture tab stops an active capture;
+Audio Capture does not continue recording in the background.
+
 Stop capture before exporting so the final audio segment can be transcribed.
 Exports are explicit and Library-only:
 
 - **Export transcript** writes an owner-scoped Markdown document titled
-  `<Meeting Title> — Transcript` and opens it for review.
+  `<Meeting Title> — Transcript` and opens it in the existing document editor
+  panel beside the still-open Audio Capture tab.
 - **Generate & export brief** uses the existing Meeting Brief generation route,
-  writes `<Meeting Title> — Meeting Brief`, and opens that document for review.
+  writes `<Meeting Title> — Meeting Brief`, and opens it beside the capture tab.
 
 The capture tab retains raw transcript text only in runtime memory. It does not
 write to Notes, localStorage, or a new meeting-specific database.
