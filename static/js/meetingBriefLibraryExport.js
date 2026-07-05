@@ -50,13 +50,15 @@ async function createLibraryDocument(title, content) {
 }
 
 function syncParentButton(modal) {
+  if (!modal) return;
   const button = modal.querySelector('#meeting-brief-export-library');
   const output = modal.querySelector('#meeting-brief-output');
   if (button) button.disabled = !isGeneratedBrief(output?.textContent);
 }
 
 function mountParentExport(modal) {
-  if (!modal || modal.dataset.meetingBriefLibraryExportBound === '1') {
+  if (!modal) return;
+  if (modal.dataset.meetingBriefLibraryExportBound === '1') {
     syncParentButton(modal);
     return;
   }
