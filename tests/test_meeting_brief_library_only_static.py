@@ -84,6 +84,21 @@ def test_live_capture_layout_is_single_panel_with_home_chrome_hidden():
     assert "live-capture-details" not in source
 
 
+def test_live_capture_document_dock_stays_visible_and_reserves_its_rendered_width():
+    storage = read("static/js/storage.js")
+    dock = read("static/js/liveCaptureDocumentDock.js")
+    assert "./liveCaptureDocumentDock.js" in storage
+    assert "#chat-container" in dock
+    assert "visibility: visible !important" in dock
+    assert "#doc-editor-pane" in dock
+    assert "#doc-divider" in dock
+    assert "ResizeObserver" in dock
+    assert "paneRect.left" in dock
+    assert "root.style.setProperty('right'" in dock
+    assert "attributeFilter: ['class']" in dock
+    assert "attributeFilter: ['class', 'style']" not in dock
+
+
 def test_exports_are_library_markdown_and_keep_capture_open():
     source = read("static/js/meetingCaptureWorkspace.js")
     handoff = source.split("async function openLibraryDocument", 1)[1].split("async function ensureSegmentsPersisted", 1)[0]
