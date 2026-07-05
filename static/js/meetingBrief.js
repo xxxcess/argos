@@ -5,7 +5,6 @@
 const API_BASE = window.location.origin;
 const CAPTURE_CHANNEL = 'argos-venture-meeting-capture';
 const CAPTURE_PENDING_KEY = 'argos-venture-meeting-capture-pending';
-let _lastBrief = '';
 let _openModal = null;
 let _captureChannel = null;
 let _pendingCapture = null;
@@ -31,6 +30,10 @@ function svg(path) {
 
 function meetingIcon() {
   return svg('<rect x="3" y="4" width="18" height="15" rx="2"/><path d="M7 21h10"/><path d="M9 8h6M8 12h8M8 16h4"/>');
+}
+
+function cleanTitle(value) {
+  return (value || '').trim() || 'Untitled meeting';
 }
 
 function homeIsActive() {
@@ -73,8 +76,7 @@ function mountLaunchers() {
     button.title = 'Meeting Brief';
     button.setAttribute('aria-label', 'Open Meeting Brief');
     button.innerHTML = meetingIcon();
-    const notes = document.getElementById('rail-notes');
-    rail.insertBefore(button, notes || null);
+    rail.insertBefore(button, document.getElementById('rail-notes') || null);
     wireLauncher(button);
   }
 
@@ -87,11 +89,9 @@ function mountLaunchers() {
     row.setAttribute('role', 'button');
     row.setAttribute('aria-label', 'Open Meeting Brief');
     row.innerHTML = `${meetingIcon()}<span class="grow">Meeting Brief</span>`;
-    const notes = document.getElementById('tool-notes-btn');
-    tools.insertBefore(row, notes || null);
+    tools.insertBefore(row, document.getElementById('tool-notes-btn') || null);
     wireLauncher(row);
   }
-
   syncHomeVisibility();
 }
 
@@ -99,22 +99,15 @@ function setStatus(el, text) {
   if (el) el.textContent = text || '';
 }
 
-function cleanTitle(value) {
-  return (value || '').trim() || 'Untitled meeting';
-}
-
 function validCaptureMessage(value) {
   return value
     && value.source === 'argos-venture-live-meeting-capture'
-    && ['meeting-capture-progress', 'meeting-capture-complete', 'meeting-capture-review', 'meeting-capture-exported'].includes(value.type)
+    && ['meeting-capture-progress', 'meeting-capture-complete', 'meeting-capture-review', 'meeting-capture-exported', 'meeting-capture-brief-exported'].includes(value.type)
     && typeof value.transcript === 'string';
 }
 
 function rememberCapture(value) {
-  _pendingCapture = {
-    title: cleanTitle(value.title),
-    transcript: value.transcript,
-  };
+  _pendingCapture = { title: cleanTitle(value.title), transcript: value.transcript };
   try { sessionStorage.setItem(CAPTURE_PENDING_KEY, JSON.stringify(_pendingCapture)); } catch (_) {}
 }
 
@@ -124,12 +117,9 @@ function applyPendingCapture(modal = _openModal) {
   const transcript = modal.querySelector('#meeting-brief-transcript');
   const output = modal.querySelector('#meeting-brief-output');
   const status = modal.querySelector('#meeting-brief-status');
-  const save = modal.querySelector('#meeting-brief-save');
   if (!transcript) return false;
   if (title && (!title.value.trim() || title.value.trim() === 'Untitled meeting')) title.value = _pendingCapture.title;
   transcript.value = _pendingCapture.transcript;
-  _lastBrief = '';
-  if (save) save.disabled = true;
   if (output) output.textContent = 'Live transcript ready. Generate a Meeting Brief to review decisions, actions, and discussion highlights.';
   setStatus(status, 'Live transcript received.');
   return true;
@@ -139,6 +129,10 @@ function receiveCaptureMessage(value) {
   if (!validCaptureMessage(value)) return;
   if (value.type === 'meeting-capture-exported') {
     notify('Live transcript exported to your document library.');
+    return;
+  }
+  if (value.type === 'meeting-capture-brief-exported') {
+    notify('Live Meeting Brief exported to your document library.');
     return;
   }
   rememberCapture(value);
@@ -157,8 +151,7 @@ function initCaptureBridge() {
     _captureChannel.onmessage = event => receiveCaptureMessage(event.data);
   }
   window.addEventListener('message', event => {
-    if (event.origin !== window.location.origin) return;
-    receiveCaptureMessage(event.data);
+    if (event.origin === window.location.origin) receiveCaptureMessage(event.data);
   });
 }
 
@@ -166,8 +159,9 @@ function openLiveCapture(title) {
   const url = new URL('/', window.location.origin);
   url.searchParams.set('meeting-capture', 'live');
   url.searchParams.set('title', cleanTitle(title));
-  const tab = window.open(url.toString(), '_blank');
-  if (!tab) notify('Your browser blocked the live capture tab. Allow pop-ups for Argos and try again.', true);
+  if (!window.open(url.toString(), '_blank')) {
+    notify('Your browser blocked the live capture tab. Allow pop-ups for Argos and try again.', true);
+  }
 }
 
 function openMeetingBrief() {
@@ -215,7 +209,6 @@ function openMeetingBrief() {
           </div>
           <div class="settings-row">
             <button type="button" class="admin-btn-add" id="meeting-brief-generate">Generate brief</button>
-            <button type="button" class="admin-btn-sm" id="meeting-brief-save" disabled>Save to Notes</button>
             <span id="meeting-brief-status" style="font-size:11px;opacity:.7"></span>
           </div>
           <div class="settings-col">
@@ -235,13 +228,9 @@ function openMeetingBrief() {
     _openModal = null;
     document.removeEventListener('keydown', onKeydown);
   };
-  const onKeydown = event => {
-    if (event.key === 'Escape') close();
-  };
+  const onKeydown = event => { if (event.key === 'Escape') close(); };
   document.addEventListener('keydown', onKeydown);
-  modal.addEventListener('click', event => {
-    if (event.target === modal) close();
-  });
+  modal.addEventListener('click', event => { if (event.target === modal) close(); });
   modal.querySelector('.close-btn')?.addEventListener('click', close);
 
   const title = modal.querySelector('#meeting-brief-title');
@@ -253,10 +242,7 @@ function openMeetingBrief() {
   const output = modal.querySelector('#meeting-brief-output');
   const transcribe = modal.querySelector('#meeting-brief-transcribe');
   const generate = modal.querySelector('#meeting-brief-generate');
-  const save = modal.querySelector('#meeting-brief-save');
-  const captureLive = modal.querySelector('#meeting-brief-live-capture');
-
-  captureLive?.addEventListener('click', () => openLiveCapture(title?.value));
+  modal.querySelector('#meeting-brief-live-capture')?.addEventListener('click', () => openLiveCapture(title?.value));
 
   transcribe?.addEventListener('click', async () => {
     const file = audio?.files?.[0];
@@ -289,7 +275,6 @@ function openMeetingBrief() {
       return;
     }
     generate.disabled = true;
-    if (save) save.disabled = true;
     output.textContent = 'Preparing a grounded meeting brief…';
     setStatus(status, 'Using the configured Utility model…');
     try {
@@ -304,43 +289,15 @@ function openMeetingBrief() {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result?.detail?.message || result?.message || 'Could not generate a meeting brief');
-      _lastBrief = result.brief || '';
-      output.textContent = _lastBrief || 'The model returned no brief.';
+      output.textContent = result.brief || 'The model returned no brief.';
       model.textContent = result.model ? `Utility model: ${result.model}` : 'Uses the configured Utility model';
-      setStatus(status, result.chunk_count > 1 ? `Merged ${result.chunk_count} transcript segments.` : 'Brief ready.');
-      if (save) save.disabled = !_lastBrief;
+      setStatus(status, result.chunk_count > 1 ? `Merged ${result.chunk_count} transcript segments.` : 'Brief ready. Export it to your document library when ready.');
     } catch (error) {
       output.textContent = 'The brief could not be generated.';
       setStatus(status, '');
       notify(error.message || 'Could not generate a meeting brief.', true);
     } finally {
       generate.disabled = false;
-    }
-  });
-
-  save?.addEventListener('click', async () => {
-    if (!_lastBrief) return;
-    save.disabled = true;
-    setStatus(status, 'Saving to Notes…');
-    try {
-      const response = await fetch(`${API_BASE}/api/meeting-briefs/save-to-notes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: cleanTitle(title?.value),
-          brief: _lastBrief,
-          transcript: (transcript?.value || '').trim(),
-        }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result?.detail?.message || result?.message || 'Could not save the brief');
-      setStatus(status, 'Saved to Notes.');
-      notify('Meeting brief saved to Notes.');
-    } catch (error) {
-      setStatus(status, '');
-      notify(error.message || 'Could not save the meeting brief.', true);
-    } finally {
-      save.disabled = false;
     }
   });
 
@@ -352,10 +309,7 @@ function boot() {
   initCaptureBridge();
   mountLaunchers();
   document.addEventListener('odysseus:workspace-tab-activated', syncHomeVisibility);
-  new MutationObserver(syncHomeVisibility).observe(document.body, {
-    attributes: true,
-    attributeFilter: ['class'],
-  });
+  new MutationObserver(syncHomeVisibility).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 }
 
 if (isLiveCapturePage()) {
