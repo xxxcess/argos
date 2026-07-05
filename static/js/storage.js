@@ -100,3 +100,21 @@ export function setToggle(name, value) {
   state[name] = value;
   saveToggleState(state);
 }
+
+// Most legacy UI modules import Storage as the default binding. Preserve that
+// contract alongside named exports so a storage integration cannot block app
+// initialization at module-load time.
+const Storage = {
+  KEYS,
+  getJSON,
+  setJSON,
+  get,
+  set,
+  remove,
+  loadToggleState,
+  saveToggleState,
+  getToggle,
+  setToggle,
+};
+
+export default Storage;
