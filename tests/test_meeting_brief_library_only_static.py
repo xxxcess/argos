@@ -13,6 +13,14 @@ def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def test_storage_default_export_preserves_app_initialization_contract():
+    storage = read("static/js/storage.js")
+    theme = read("static/js/theme.js")
+    assert "import Storage from './storage.js';" in theme
+    assert "const Storage = {" in storage
+    assert "export default Storage;" in storage
+
+
 def test_meeting_brief_remains_library_only_and_retries_transient_rate_limits():
     source = read("routes/meeting_brief_routes.py")
     ast.parse(source)
