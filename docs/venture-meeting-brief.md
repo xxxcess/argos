@@ -20,10 +20,11 @@ sidebar tool.
 3. Use the recorder controls at the bottom of the tab: Start/Resume, Pause,
    Stop, elapsed time, and live waveform.
 4. Review the timestamped transcript in the main panel.
-5. Choose an explicit export action:
+5. Stop capture and let final transcription finish.
+6. Choose an explicit export action:
    - **Export transcript** creates `<Meeting Title> — Transcript`.
    - **Generate & export brief** creates `<Meeting Title> — Meeting Brief`.
-6. Argos opens the created Library document for review.
+7. Argos opens the created Library document for review.
 
 Raw transcript text and recorder state stay in browser memory. They are not
 serialized into localStorage or written to a parallel meeting database.
@@ -70,6 +71,8 @@ The brief export immediately opens the document for the user.
 - No automatic recording, calendar bot, diarization, or raw audio persistence.
 - One active microphone capture at a time.
 - User consent is required before microphone access.
+- Export is available only after recording stops and final transcription
+  completes.
 
 ## Future options
 
