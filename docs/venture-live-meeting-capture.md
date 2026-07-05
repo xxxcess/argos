@@ -6,37 +6,48 @@
 2. Select **Capture live meeting** to open a dedicated tab.
 3. Enter a title, explicitly confirm participant consent, and start microphone capture.
 4. Review timestamped live transcript entries as they arrive.
-5. Select **Export transcript** to create a private Markdown document in the user's Library.
-6. Select **Review in Meeting Brief** to return the transcript to the parent Meeting Brief workflow for AI synthesis and Notes storage.
+5. Choose one or both explicit Library exports:
+   - **Export transcript** creates `<Meeting Title> — Transcript`.
+   - **Generate & export brief** creates `<Meeting Title> — Meeting Brief`.
+6. Select **Review in Meeting Brief** to send the transcript back to the parent
+   window for optional synthesis and Library export.
 
 ## Architecture
 
 The tab uses browser microphone capture only. It does not capture system audio.
 
-- With browser STT configured, `SpeechRecognition` provides incremental final and interim text.
-- With local or OpenAI-compatible endpoint STT configured, the browser creates a new self-contained WebM segment every 10 seconds and posts it to Argos's existing `/api/stt/transcribe` endpoint.
-- Each final segment is timestamped in the transcript, allowing the Meeting Brief synthesis to reference the evidence it used.
-- Export calls the existing `/api/document` endpoint with no `session_id`, creating an owner-scoped Library document rather than a new meeting data store.
-- A same-origin `BroadcastChannel`, with `window.postMessage` as a same-origin fallback, hands the transcript back to Meeting Brief.
+- Browser STT uses `SpeechRecognition` for incremental final and interim text.
+- Local or endpoint STT receives self-contained WebM segments through the
+  existing `/api/stt/transcribe` route.
+- Final transcript segments have relative timestamps, which the brief generator
+  can cite when present.
+- Both transcript and brief export use the existing `/api/document` endpoint
+  with no `session_id`, creating owner-scoped Markdown documents in the user's
+  Library.
+- A same-origin `BroadcastChannel`, with `window.postMessage` fallback, hands
+  the transcript back to Meeting Brief.
 
 ## Summary shape
 
-The brief follows a standard meeting-notes structure inspired by Meetily:
+The generated brief follows a standard meeting-record structure inspired by
+Meetily:
 
 - Summary
 - Key Decisions
 - Action Items with Owner, Task, Due, Transcript Reference, and Timestamp
 - Discussion Highlights
+- Open Questions & Uncertainty
 
-Argos additionally requires Open Questions & Uncertainty, and treats owners,
-due dates, decisions, and timestamps as unknown unless supported by the
-transcript.
+Argos treats owners, due dates, decisions, and timestamps as unknown unless the
+transcript supports them.
 
 ## Constraints
 
 - The browser requests microphone access only after the user explicitly starts capture.
 - The user must affirm consent before starting.
-- Audio is not persistently stored by this feature; it is sent only as short
-  segments to the selected Argos STT provider when server-side STT is in use.
+- Audio is not persistently stored by this feature; short segments are sent only
+  to the selected Argos STT provider when server-side STT is active.
+- No output is exported to Notes. User-requested outputs are Markdown documents
+  in the existing Library.
 - This is not a substitute for future native system-audio capture, speaker
   diarization, or calendar/provider recording imports.
