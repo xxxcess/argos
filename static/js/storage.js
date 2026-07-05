@@ -11,6 +11,7 @@ import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 import './streamRecoveryComposerGuard.js';
 import './meetingBrief.js';
+import './meetingBriefLibraryExport.js';
 
 // ── Key constants ──
 export const KEYS = {
