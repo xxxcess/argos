@@ -5,6 +5,14 @@ export function canonicalSessionTabId(sessionId) {
   return `session:${String(sessionId || '')}`;
 }
 
+export function canonicalLiveCaptureTabId(captureId) {
+  return `live-capture:${String(captureId || '')}`;
+}
+
+// Compatibility alias for callers written before the product naming settled on
+// Live Capture. New code should use canonicalLiveCaptureTabId.
+export const canonicalMeetingTabId = canonicalLiveCaptureTabId;
+
 export function createInitialTabState() {
   return {
     version: 3,
@@ -88,6 +96,29 @@ export function upsertSessionTab(state, session, { selected = true, state: visua
   if (selected) next.selected = id;
   return next;
 }
+
+export function upsertLiveCaptureTab(state, capture, { selected = true, state: visualState = 'idle' } = {}) {
+  const next = normalizeTabState(state);
+  const captureId = String(capture?.captureId || capture?.id || '');
+  if (!captureId) return next;
+  const id = canonicalLiveCaptureTabId(captureId);
+  next.tabs[id] = {
+    id,
+    kind: 'live_capture',
+    captureId,
+    title: capture?.title || 'Live Capture',
+    mode: 'live_capture',
+    pinned: false,
+    state: visualState || 'idle',
+    view: {},
+  };
+  if (!next.order.includes(id)) next.order.push(id);
+  if (selected) next.selected = id;
+  return next;
+}
+
+// Compatibility alias. This function no longer creates an Audio Capture tab.
+export const upsertMeetingTab = upsertLiveCaptureTab;
 
 export function closeTabById(state, tabId) {
   const next = normalizeTabState(state);
