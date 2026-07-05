@@ -1,36 +1,46 @@
-# Argos Venture Live Meeting Capture
+# Argos Venture Audio Capture Tab
 
-## User flow
+## Entry point
 
-1. Open **Meeting Brief** from the Venture Home tab.
-2. Select **Capture live meeting** to open a dedicated tab.
-3. Enter a title, explicitly confirm participant consent, and start microphone capture.
-4. Review timestamped live transcript entries as they arrive.
-5. Choose one or both explicit Library exports:
-   - **Export transcript** creates `<Meeting Title> — Transcript`.
-   - **Generate & export brief** creates `<Meeting Title> — Meeting Brief`.
-6. Select **Review in Meeting Brief** to send the transcript back to the parent
-   window for optional synthesis and Library export.
+Audio Capture is a choice in the Venture **New Tab** wizard. Selecting it opens
+a dedicated tab inside the Argos workspace tab strip, alongside chat and Quest
+tabs. It never opens a browser window.
 
-## Architecture
+## Recorder controls
 
-The tab uses browser microphone capture only. It does not capture system audio.
+The tab provides traditional recorder controls at the bottom of the workspace:
 
-- Browser STT uses `SpeechRecognition` for incremental final and interim text.
-- Local or endpoint STT receives self-contained WebM segments through the
-  existing `/api/stt/transcribe` route.
-- Final transcript segments have relative timestamps, which the brief generator
-  can cite when present.
-- Both transcript and brief export use the existing `/api/document` endpoint
-  with no `session_id`, creating owner-scoped Markdown documents in the user's
-  Library.
-- A same-origin `BroadcastChannel`, with `window.postMessage` fallback, hands
-  the transcript back to Meeting Brief.
+- Start capture / Resume capture
+- Pause
+- Stop
+- Elapsed time
+- Live microphone waveform
+- Export transcript
+- Generate & export brief
 
-## Summary shape
+The user enters a title and must affirm they have authority and participant
+consent before the browser requests microphone access.
 
-The generated brief follows a standard meeting-record structure inspired by
-Meetily:
+## Transcript and export flow
+
+Browser STT uses `SpeechRecognition` when configured. Local or endpoint STT
+receives self-contained microphone segments through Argos's existing
+`/api/stt/transcribe` route. Final transcript entries include a relative
+`[MM:SS]` marker.
+
+Exports are explicit and Library-only:
+
+- **Export transcript** writes an owner-scoped Markdown document titled
+  `<Meeting Title> — Transcript`.
+- **Generate & export brief** uses the existing Meeting Brief generation route,
+  writes `<Meeting Title> — Meeting Brief`, and opens that document for review.
+
+The capture tab retains raw transcript text only in runtime memory. It does not
+write to Notes, localStorage, or a new meeting-specific database.
+
+## Brief structure
+
+The generated brief contains:
 
 - Summary
 - Key Decisions
@@ -38,16 +48,12 @@ Meetily:
 - Discussion Highlights
 - Open Questions & Uncertainty
 
-Argos treats owners, due dates, decisions, and timestamps as unknown unless the
-transcript supports them.
+Argos leaves ownership, due dates, decisions, and timestamps unknown when the
+transcript does not establish them.
 
-## Constraints
+## Boundaries
 
-- The browser requests microphone access only after the user explicitly starts capture.
-- The user must affirm consent before starting.
-- Audio is not persistently stored by this feature; short segments are sent only
-  to the selected Argos STT provider when server-side STT is active.
-- No output is exported to Notes. User-requested outputs are Markdown documents
-  in the existing Library.
-- This is not a substitute for future native system-audio capture, speaker
-  diarization, or calendar/provider recording imports.
+- Microphone only; no system-audio capture.
+- One active capture at a time.
+- No automatic capture, speaker diarization, raw audio persistence, or
+  calendar-provider recording import in this phase.
