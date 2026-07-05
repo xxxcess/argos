@@ -60,10 +60,18 @@ function setStatus(text, error = false) {
   elements.status.dataset.error = error ? 'true' : 'false';
 }
 
+function browserRecognitionSupported() {
+  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function captureAvailable() {
+  return sttProvider !== 'disabled' && !(sttProvider === 'browser' && !browserRecognitionSupported());
+}
+
 function setRecordingState(isRecording) {
   recording = isRecording;
   document.body.classList.toggle('meeting-capture-recording', isRecording);
-  if (elements.start) elements.start.disabled = isRecording || stopping || !elements.consent?.checked;
+  if (elements.start) elements.start.disabled = isRecording || stopping || !elements.consent?.checked || !captureAvailable();
   if (elements.stop) elements.stop.disabled = !isRecording || stopping;
   if (elements.state) {
     elements.state.textContent = isRecording ? 'Recording live' : (stopping ? 'Finishing transcript' : 'Ready to capture');
@@ -125,10 +133,6 @@ function appendTranscript(text) {
   interimTranscript = '';
   renderTranscript();
   sendCaptureMessage('meeting-capture-progress');
-}
-
-function browserRecognitionSupported() {
-  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
 async function loadSttSettings() {
@@ -313,7 +317,9 @@ function releaseMicrophone() {
 function startElapsedTimer() {
   if (elapsedTimer) window.clearInterval(elapsedTimer);
   const update = () => {
-    if (elements.elapsed && startedAt) elements.elapsed.textContent = formatElapsed(Date.now() - startedAt);
+    const value = formatElapsed(Date.now() - startedAt);
+    if (elements.elapsed && startedAt) elements.elapsed.textContent = value;
+    if (elements.timer && startedAt) elements.timer.textContent = value;
   };
   update();
   elapsedTimer = window.setInterval(update, 250);
@@ -330,6 +336,10 @@ async function startCapture() {
     setStatus('Confirm participant consent before starting capture.', true);
     return;
   }
+  if (!captureAvailable()) {
+    setStatus('Configure an available browser, local, or endpoint STT provider before starting capture.', true);
+    return;
+  }
   if (!window.isSecureContext) {
     setStatus('Microphone capture requires HTTPS or localhost.', true);
     return;
@@ -338,7 +348,6 @@ async function startCapture() {
     setStatus('Microphone capture is unavailable in this browser.', true);
     return;
   }
-  if (sttProvider === 'disabled' || (sttProvider === 'browser' && !browserRecognitionSupported())) return;
 
   try {
     stopping = false;
@@ -540,4 +549,5 @@ function boot() {
   });
 }
 
-boot();
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+else boot();
