@@ -10,6 +10,7 @@ import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 import './streamRecoveryComposerGuard.js';
 import './meetingCaptureWorkspace.js';
+import './liveCaptureDocumentDock.js';
 
 export const KEYS = {
   THEME: 'odysseus-theme',
@@ -99,6 +100,3 @@ export function setToggle(name, value) {
   state[name] = value;
   saveToggleState(state);
 }
-
-const Storage = { KEYS, getJSON, setJSON, get, set, remove, loadToggleState, saveToggleState, getToggle, setToggle };
-export default Storage;
