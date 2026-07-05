@@ -27,6 +27,7 @@ def test_audio_capture_is_not_a_home_launcher_or_browser_tab():
     storage = read("static/js/storage.js")
     capture = read("static/js/meetingCaptureWorkspace.js")
     assert "./meetingCaptureWorkspace.js" in storage
+    assert "./meetingCaptureLibraryHandoff.js" in storage
     assert "meetingBrief.js" not in storage
     assert "window.open(" not in capture
     assert "workspace-tab meeting-capture-tab" in capture
@@ -41,13 +42,16 @@ def test_new_tab_wizard_offers_audio_capture():
 
 
 def test_exports_are_library_markdown_and_open_documents():
-    source = read("static/js/meetingCaptureWorkspace.js")
-    assert "'/api/document'" in source
-    assert "language: 'markdown'" in source
-    assert "Export transcript" in source
-    assert "Generate & export brief" in source
-    assert "loadDocument" in source
-    assert "openPanel" in source
+    capture = read("static/js/meetingCaptureWorkspace.js")
+    handoff = read("static/js/meetingCaptureLibraryHandoff.js")
+    assert "'/api/document'" in capture
+    assert "language: 'markdown'" in capture
+    assert "Export transcript" in capture
+    assert "Generate & export brief" in capture
+    assert "loadDocument" in capture
+    assert "openPanel" in capture
+    assert "deactivateCapture" in handoff
+    assert "Stop capture and wait for final transcription before exporting." in handoff
 
 
 def test_legacy_browser_capture_modules_are_removed():
