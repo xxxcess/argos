@@ -10,7 +10,6 @@ import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 import './streamRecoveryComposerGuard.js';
 import './meetingCaptureWorkspace.js';
-import './meetingCaptureLibraryHandoff.js';
 
 export const KEYS = {
   THEME: 'odysseus-theme',
