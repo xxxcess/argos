@@ -1,8 +1,7 @@
 // Argos Venture Audio Capture workspace tab.
 //
-// A capture tab is deliberately inert when created: no microphone request,
-// MediaRecorder instance, recognition session, or STT upload is started until
-// the user confirms consent and explicitly presses Start capture.
+// Capture is opt-in and scoped to an explicit recording run. A late browser-STT
+// or server-STT callback from a stopped, closed, or superseded run is ignored.
 
 const STT_STATS_ENDPOINT = '/api/stt/stats';
 const STT_ENDPOINT = '/api/stt/transcribe';
@@ -20,6 +19,11 @@ let tabSyncQueued = false;
 
 function makeId() {
   return window.crypto?.randomUUID?.() || `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function escapeSelector(value) {
+  if (window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, char => `\\${char}`);
 }
 
 function clean(value) {
@@ -59,7 +63,7 @@ function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
     transcript: '',
     interim: '',
     phase: 'idle', // idle | recording | paused | stopping | stopped
-    provider: 'unchecked', // unchecked | loading | browser | local | endpoint | disabled
+    provider: 'unchecked',
     language: '',
     consent: false,
     elapsedMs: 0,
@@ -75,6 +79,9 @@ function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
     analyser: null,
     audioSource: null,
     waveformFrame: 0,
+    runId: 0,
+    activeRunId: 0,
+    closed: false,
     status: 'This tab is idle. No microphone access is requested until Start capture.',
     statusError: false,
   };
@@ -89,21 +96,17 @@ function installStyles() {
   const style = document.createElement('style');
   style.id = 'meeting-capture-workspace-style';
   style.textContent = `
-    #meeting-capture-workspace { position:fixed; inset:var(--workspace-shell-h,0px) 0 0 var(--icon-rail-w,0px); z-index:35; display:none; grid-template-rows:auto minmax(0,1fr) auto; background:var(--bg,#17191d); color:var(--fg,#e8eaed); }
+    #meeting-capture-workspace { position:fixed; inset:var(--workspace-shell-h,0px) 0 0 0; z-index:35; display:none; grid-template-rows:auto minmax(0,1fr) auto; background:var(--bg,#17191d); color:var(--fg,#e8eaed); transition:right .15s ease,left .15s ease; }
     body.workspace-meeting-capture-active #meeting-capture-workspace { display:grid; }
     body.workspace-meeting-capture-active #chat-container { visibility:hidden; pointer-events:none; }
-    body.workspace-meeting-capture-active #sidebar { pointer-events:none; }
-    .meeting-capture-head { display:flex; align-items:center; gap:14px; min-width:0; padding:16px 24px; border-bottom:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
-    .meeting-capture-brand { display:flex; align-items:center; gap:10px; min-width:0; flex:1; }
-    .meeting-capture-brand svg { width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:1.8; flex:0 0 auto; color:var(--accent,var(--red,#e06c75)); }
-    .meeting-capture-kicker { font-size:10px; text-transform:uppercase; letter-spacing:.13em; opacity:.62; font-weight:700; }
-    .meeting-capture-brand h1 { margin:3px 0 0; font-size:18px; line-height:1.2; font-weight:650; }
-    .meeting-capture-title-input { width:min(360px,35vw); min-width:140px; padding:8px 10px; border:1px solid var(--border,#3a3f47); border-radius:7px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; }
+    body.workspace-meeting-capture-active #sidebar, body.workspace-meeting-capture-active #icon-rail, body.workspace-meeting-capture-active #sidebar-toggle, body.workspace-meeting-capture-active #sidebar-collapse, body.workspace-meeting-capture-active [data-sidebar-toggle], body.workspace-meeting-capture-active [data-sidebar-collapse] { visibility:hidden!important; pointer-events:none!important; }
+    .meeting-capture-head { display:flex; justify-content:flex-end; align-items:center; gap:14px; min-width:0; padding:14px 24px; border-bottom:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
+    .meeting-capture-title-input { order:-1; flex:1; max-width:720px; min-width:160px; padding:8px 10px; border:1px solid var(--border,#3a3f47); border-radius:7px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; }
     .meeting-capture-state { display:inline-flex; align-items:center; gap:7px; font-size:12px; white-space:nowrap; opacity:.82; }
     .meeting-capture-state::before { content:''; width:9px; height:9px; border-radius:999px; background:var(--border,#646a73); }
     .meeting-capture-state[data-phase="recording"]::before { background:var(--red,#e06c75); box-shadow:0 0 0 5px color-mix(in srgb,var(--red,#e06c75) 20%,transparent); }
     .meeting-capture-state[data-phase="paused"]::before { background:#e5c07b; }
-    .meeting-capture-main { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(220px,300px); gap:18px; padding:20px 24px; overflow:hidden; }
+    .meeting-capture-main { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(230px,300px); gap:18px; padding:20px 24px; overflow:hidden; }
     .meeting-capture-transcript-card, .meeting-capture-details { min-height:0; border:1px solid var(--border,#3a3f47); border-radius:12px; background:var(--panel,#21252b); }
     .meeting-capture-transcript-card { display:flex; flex-direction:column; overflow:hidden; }
     .meeting-capture-transcript-head { display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--border,#3a3f47); font-size:12px; }
@@ -119,31 +122,31 @@ function installStyles() {
     .meeting-capture-consent input { margin-top:2px; }
     .meeting-capture-provider { margin-top:14px; padding-top:14px; border-top:1px solid var(--border,#3a3f47); font-size:12px; }
     .meeting-capture-provider strong { display:block; margin-bottom:4px; }
-    .meeting-capture-footer { display:grid; grid-template-columns:auto minmax(110px,1fr) auto; align-items:center; gap:14px; padding:14px 24px; border-top:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
-    .meeting-recorder-controls { display:flex; align-items:center; gap:8px; }
+    .meeting-capture-footer { display:grid; gap:10px; padding:12px 24px 14px; border-top:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
+    .meeting-recorder-readout { display:flex; align-items:center; gap:14px; min-width:0; }
+    .meeting-recorder-time { flex:0 0 auto; font:600 24px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; white-space:nowrap; }
+    .meeting-waveform { height:28px; width:100%; min-width:0; border-radius:6px; background:color-mix(in srgb,var(--bg,#17191d) 65%,transparent); }
+    .meeting-capture-control-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+    .meeting-recorder-controls, .meeting-capture-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
     .meeting-recorder-controls button, .meeting-capture-actions button { border:1px solid var(--border,#3a3f47); border-radius:8px; padding:9px 12px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; font-size:12px; cursor:pointer; }
     .meeting-recorder-controls button:disabled, .meeting-capture-actions button:disabled { cursor:not-allowed; opacity:.45; }
     .meeting-record-btn { min-width:112px; color:white!important; border-color:var(--red,#e06c75)!important; background:var(--red,#e06c75)!important; }
     .meeting-stop-btn { color:white!important; border-color:#4b5058!important; background:#4b5058!important; }
     .meeting-recorder-controls svg { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2; vertical-align:-2px; margin-right:4px; }
     .meeting-record-btn svg { fill:currentColor; stroke:none; }
-    .meeting-recorder-readout { display:flex; align-items:center; gap:12px; min-width:0; }
-    .meeting-recorder-time { font:600 24px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; white-space:nowrap; }
-    .meeting-waveform { height:34px; width:100%; border-radius:6px; background:color-mix(in srgb,var(--bg,#17191d) 65%,transparent); }
-    .meeting-capture-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; }
     .meeting-capture-actions .primary { border-color:var(--accent,var(--red,#e06c75)); background:color-mix(in srgb,var(--accent,var(--red,#e06c75)) 18%,var(--bg)); }
-    .meeting-capture-status { grid-column:1 / -1; min-height:1.25em; font-size:11px; opacity:.75; }
+    .meeting-capture-status { min-height:1.25em; font-size:11px; opacity:.75; }
     .meeting-capture-status[data-error="true"] { color:var(--red,#e06c75); opacity:1; }
     .workspace-tab.meeting-capture-tab .workspace-tab-icon svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; }
     .workspace-tab.meeting-capture-tab[data-state="recording"] .workspace-tab-state { display:block; background:var(--red,#e06c75); }
     @media (max-width:820px) {
-      #meeting-capture-workspace { inset:var(--workspace-shell-h,0px) 0 0 0; }
-      .meeting-capture-head { padding:12px 14px; flex-wrap:wrap; }
-      .meeting-capture-title-input { order:3; width:100%; }
+      #meeting-capture-workspace { inset:var(--workspace-shell-h,0px) 0 0 0!important; }
+      .meeting-capture-head { padding:12px 14px; }
       .meeting-capture-main { grid-template-columns:1fr; padding:12px; overflow:auto; }
       .meeting-capture-transcript-card { min-height:42vh; }
-      .meeting-capture-footer { grid-template-columns:1fr; padding:12px; }
-      .meeting-capture-actions { justify-content:flex-start; }
+      .meeting-capture-footer { padding:12px; }
+      .meeting-capture-control-row { align-items:stretch; }
+      .meeting-recorder-controls, .meeting-capture-actions { width:100%; }
     }
   `;
   document.head.appendChild(style);
@@ -160,6 +163,12 @@ function phaseLabel(phase) {
   return ({ idle: 'Ready to capture', recording: 'Recording live', paused: 'Capture paused', stopping: 'Finishing transcript', stopped: 'Transcript ready' })[phase] || 'Ready to capture';
 }
 
+function isCurrentRun(capture, runId, { allowStopping = false } = {}) {
+  if (!capture || capture.closed || captures.get(capture.captureId) !== capture) return false;
+  if (capture.activeRunId !== runId) return false;
+  return capture.phase === 'recording' || (allowStopping && capture.phase === 'stopping');
+}
+
 function renderTranscript(capture, log) {
   log.replaceChildren();
   if (!capture.transcript && !capture.interim) {
@@ -174,7 +183,7 @@ function renderTranscript(capture, log) {
     final.textContent = capture.transcript;
     log.appendChild(final);
   }
-  if (capture.interim) {
+  if (capture.interim && capture.phase === 'recording') {
     const interim = document.createElement('span');
     interim.className = 'meeting-capture-interim';
     interim.textContent = `${capture.transcript ? '\n' : ''}${timestamp(capture)} ${capture.interim}`;
@@ -191,13 +200,12 @@ function ensureRoot() {
   root.setAttribute('aria-label', 'Audio capture workspace');
   root.innerHTML = `
     <header class="meeting-capture-head">
-      <div class="meeting-capture-brand">${microphoneIcon()}<div><div class="meeting-capture-kicker">Argos Venture · Audio Capture</div><h1>Live Meeting Transcript</h1></div></div>
-      <div id="meeting-capture-state" class="meeting-capture-state" data-phase="idle">Ready to capture</div>
       <input id="meeting-capture-title" class="meeting-capture-title-input" type="text" maxlength="180" placeholder="Meeting title" aria-label="Meeting title" />
+      <div id="meeting-capture-state" class="meeting-capture-state" data-phase="idle">Ready to capture</div>
     </header>
     <section class="meeting-capture-main">
       <article class="meeting-capture-transcript-card">
-        <div class="meeting-capture-transcript-head"><strong>Live transcript</strong><span id="meeting-capture-character-count">0 characters</span></div>
+        <div class="meeting-capture-transcript-head"><strong>Transcript</strong><span id="meeting-capture-character-count">0 characters</span></div>
         <div id="meeting-capture-log" class="meeting-capture-log" aria-live="polite"></div>
       </article>
       <aside class="meeting-capture-details">
@@ -208,13 +216,18 @@ function ensureRoot() {
       </aside>
     </section>
     <footer class="meeting-capture-footer">
-      <div class="meeting-recorder-controls">
-        <button id="meeting-capture-record" class="meeting-record-btn" type="button">${recordIcon()}<span>Start capture</span></button>
-        <button id="meeting-capture-pause" type="button" disabled>Pause</button>
-        <button id="meeting-capture-stop" class="meeting-stop-btn" type="button" disabled>Stop</button>
-      </div>
       <div class="meeting-recorder-readout"><span id="meeting-capture-time" class="meeting-recorder-time">00:00</span><canvas id="meeting-capture-waveform" class="meeting-waveform" aria-label="Microphone activity"></canvas></div>
-      <div class="meeting-capture-actions"><button id="meeting-capture-export-transcript" type="button">Export transcript</button><button id="meeting-capture-export-brief" class="primary" type="button">Generate & export brief</button></div>
+      <div class="meeting-capture-control-row">
+        <div class="meeting-recorder-controls">
+          <button id="meeting-capture-record" class="meeting-record-btn" type="button">${recordIcon()}<span>Start capture</span></button>
+          <button id="meeting-capture-pause" type="button" disabled>Pause</button>
+          <button id="meeting-capture-stop" class="meeting-stop-btn" type="button" disabled>Stop</button>
+        </div>
+        <div class="meeting-capture-actions">
+          <button id="meeting-capture-export-transcript" type="button">Export transcript</button>
+          <button id="meeting-capture-export-brief" class="primary" type="button">Generate & export brief</button>
+        </div>
+      </div>
       <div id="meeting-capture-status" class="meeting-capture-status" aria-live="polite"></div>
     </footer>
   `;
@@ -230,8 +243,7 @@ function wireRoot() {
   const consent = root.querySelector('#meeting-capture-consent');
   root.querySelector('#meeting-capture-record')?.addEventListener('click', async () => {
     const capture = activeCapture();
-    if (!capture) return;
-    if (capture.phase === 'paused') await resumeCapture(capture);
+    if (capture?.phase === 'paused') await resumeCapture(capture);
     else await startCapture(capture);
   });
   root.querySelector('#meeting-capture-pause')?.addEventListener('click', () => pauseCapture(activeCapture()));
@@ -308,7 +320,7 @@ function ensureTabChrome() {
     if (!captures.has(tab.dataset.captureId)) tab.remove();
   });
   captures.forEach(capture => {
-    let tab = list.querySelector(`.meeting-capture-tab[data-capture-id="${CSS.escape(capture.captureId)}"]`);
+    let tab = list.querySelector(`.meeting-capture-tab[data-capture-id="${escapeSelector(capture.captureId)}"]`);
     if (!tab) {
       tab = document.createElement('div');
       tab.className = 'workspace-tab meeting-capture-tab';
@@ -317,8 +329,7 @@ function ensureTabChrome() {
       tab.setAttribute('role', 'tab');
       tab.innerHTML = `<span class="workspace-tab-icon">${microphoneIcon()}</span><span class="workspace-tab-title"></span><span class="workspace-tab-state" aria-hidden="true"></span><span class="workspace-tab-close-wrap"><button type="button" class="workspace-tab-close" aria-label="Close audio capture tab">&times;</button></span>`;
       tab.addEventListener('click', event => {
-        if (event.target.closest('.workspace-tab-close')) return;
-        activateCapture(capture.captureId);
+        if (!event.target.closest('.workspace-tab-close')) activateCapture(capture.captureId);
       });
       tab.addEventListener('keydown', event => {
         event.stopPropagation();
@@ -333,13 +344,48 @@ function ensureTabChrome() {
       });
       list.appendChild(tab);
     }
-    const tabTitle = tab.querySelector('.workspace-tab-title');
-    if (tabTitle.textContent !== capture.title) tabTitle.textContent = capture.title;
+    tab.querySelector('.workspace-tab-title').textContent = capture.title;
     tab.dataset.state = capture.phase === 'recording' ? 'recording' : (capture.phase === 'paused' ? 'paused' : 'idle');
     tab.setAttribute('aria-selected', String(capture.captureId === activeCaptureId));
     tab.tabIndex = capture.captureId === activeCaptureId ? 0 : -1;
   });
   if (activeCaptureId) list.querySelectorAll('.workspace-tab:not(.meeting-capture-tab)').forEach(tab => tab.setAttribute('aria-selected', 'false'));
+}
+
+function setHomeOnlyControlsHidden(hidden) {
+  const candidates = document.querySelectorAll('button, [role="button"]');
+  candidates.forEach(element => {
+    if (element.closest('#meeting-capture-workspace, #workspace-shell, #doc-editor-pane')) return;
+    const label = `${element.id || ''} ${element.className || ''} ${element.title || ''} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
+    if (!/(sidebar|collapse)/.test(label)) return;
+    if (hidden) {
+      element.dataset.captureHiddenControl = '1';
+      element.style.visibility = 'hidden';
+      element.style.pointerEvents = 'none';
+    } else if (element.dataset.captureHiddenControl === '1') {
+      delete element.dataset.captureHiddenControl;
+      element.style.visibility = '';
+      element.style.pointerEvents = '';
+    }
+  });
+}
+
+function documentPaneOffset() {
+  if (!root) return;
+  const pane = document.getElementById('doc-editor-pane');
+  if (!pane || pane.getBoundingClientRect().width < 80) {
+    root.style.left = '0';
+    root.style.right = '0';
+    return;
+  }
+  const rect = pane.getBoundingClientRect();
+  if (rect.left >= window.innerWidth / 2) {
+    root.style.left = '0';
+    root.style.right = `${Math.ceil(window.innerWidth - rect.left)}px`;
+  } else {
+    root.style.left = `${Math.ceil(rect.right)}px`;
+    root.style.right = '0';
+  }
 }
 
 function activateCapture(captureId) {
@@ -349,14 +395,19 @@ function activateCapture(captureId) {
   ensureRoot();
   document.body.classList.add('workspace-meeting-capture-active');
   root.removeAttribute('aria-hidden');
+  setHomeOnlyControlsHidden(true);
+  documentPaneOffset();
   render();
 }
 
 function deactivateCapture() {
-  if (!activeCaptureId) return;
+  const capture = activeCapture();
+  if (capture && ['recording', 'paused', 'stopping'].includes(capture.phase)) stopCapture(capture);
   activeCaptureId = null;
   document.body.classList.remove('workspace-meeting-capture-active');
   root?.setAttribute('aria-hidden', 'true');
+  root && (root.style.left = root.style.right = '0');
+  setHomeOnlyControlsHidden(false);
   queueTabSync();
 }
 
@@ -390,7 +441,8 @@ async function loadSttConfiguration(capture) {
   render();
 }
 
-function appendTranscript(capture, text) {
+function appendTranscript(capture, runId, text) {
+  if (!isCurrentRun(capture, runId, { allowStopping: true })) return;
   const sentence = clean(text);
   if (!sentence) return;
   capture.transcript = capture.transcript ? `${capture.transcript}\n${timestamp(capture)} ${sentence}` : `${timestamp(capture)} ${sentence}`;
@@ -399,7 +451,7 @@ function appendTranscript(capture, text) {
     setStatus(capture, 'Transcript is limited to its most recent 120,000 characters.', true);
   }
   capture.interim = '';
-  render();
+  if (capture.captureId === activeCaptureId) render();
 }
 
 function startTimer(capture) {
@@ -463,7 +515,7 @@ function releaseMicrophone(capture) {
   if (activeRecordingId === capture.captureId && capture.phase !== 'recording') activeRecordingId = null;
 }
 
-function startBrowserRecognition(capture) {
+function startBrowserRecognition(capture, runId) {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) throw new Error('Browser speech recognition is unavailable.');
   const recognition = new Recognition();
@@ -472,22 +524,25 @@ function startBrowserRecognition(capture) {
   recognition.interimResults = true;
   recognition.lang = capture.language || '';
   recognition.onresult = event => {
+    if (!isCurrentRun(capture, runId)) return;
     let interim = '';
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
       const text = clean(result[0]?.transcript || '');
       if (!text) continue;
-      if (result.isFinal) appendTranscript(capture, text);
+      if (result.isFinal) appendTranscript(capture, runId, text);
       else interim = clean(`${interim} ${text}`);
     }
-    capture.interim = interim;
-    render();
+    if (isCurrentRun(capture, runId)) {
+      capture.interim = interim;
+      render();
+    }
   };
   recognition.onerror = event => {
-    if (event?.error !== 'aborted' && capture.phase === 'recording') setStatus(capture, `Browser transcription issue: ${event?.error || 'unknown'}.`, true);
+    if (isCurrentRun(capture, runId) && event?.error !== 'aborted') setStatus(capture, `Browser transcription issue: ${event?.error || 'unknown'}.`, true);
   };
   recognition.onend = () => {
-    if (capture.phase === 'recording') {
+    if (isCurrentRun(capture, runId)) {
       try { recognition.start(); } catch (_) {}
     }
   };
@@ -519,14 +574,14 @@ async function drainQueue(capture) {
   capture.draining = true;
   try {
     while (capture.segmentQueue.length) {
-      const blob = capture.segmentQueue.shift();
-      if (!blob?.size) continue;
+      const segment = capture.segmentQueue.shift();
+      if (!segment?.blob?.size || !isCurrentRun(capture, segment.runId, { allowStopping: true })) continue;
       setStatus(capture, capture.phase === 'stopping' ? 'Transcribing final audio…' : 'Transcribing live audio…');
       try {
-        const text = await transcribeSegment(blob);
-        if (text) appendTranscript(capture, text);
+        const text = await transcribeSegment(segment.blob);
+        appendTranscript(capture, segment.runId, text);
       } catch (error) {
-        setStatus(capture, `A segment could not be transcribed: ${error.message}`, true);
+        if (isCurrentRun(capture, segment.runId, { allowStopping: true })) setStatus(capture, `A segment could not be transcribed: ${error.message}`, true);
       }
     }
   } finally {
@@ -536,8 +591,8 @@ async function drainQueue(capture) {
   }
 }
 
-function startServerSegment(capture) {
-  if (!capture?.stream || capture.phase !== 'recording') return;
+function startServerSegment(capture, runId) {
+  if (!capture?.stream || !isCurrentRun(capture, runId)) return;
   const mimeType = preferredMimeType();
   let recorder;
   try { recorder = new MediaRecorder(capture.stream, mimeType ? { mimeType } : undefined); }
@@ -547,10 +602,11 @@ function startServerSegment(capture) {
   recorder.ondataavailable = event => { if (event.data?.size) chunks.push(event.data); };
   recorder.onstop = () => {
     if (capture.recorder === recorder) capture.recorder = null;
+    if (!isCurrentRun(capture, runId, { allowStopping: true })) return;
     const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-    if (blob.size) capture.segmentQueue.push(blob);
+    if (blob.size) capture.segmentQueue.push({ blob, runId });
     drainQueue(capture);
-    if (capture.phase === 'recording') setTimeout(() => startServerSegment(capture), 0);
+    if (isCurrentRun(capture, runId)) setTimeout(() => startServerSegment(capture, runId), 0);
     else if (capture.phase === 'stopping' && !capture.segmentQueue.length && !capture.draining) finishStop(capture);
     else if (capture.phase === 'paused' && !capture.segmentQueue.length && !capture.draining) releaseMicrophone(capture);
   };
@@ -584,16 +640,23 @@ async function startCapture(capture) {
     setStatus(capture, 'Microphone capture requires HTTPS or localhost in a supported browser.', true);
     return;
   }
+  const runId = capture.runId + 1;
   try {
     // This is the only microphone acquisition path in the module.
     capture.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    if (capture.closed || captures.get(capture.captureId) !== capture) {
+      capture.stream.getTracks().forEach(track => track.stop());
+      return;
+    }
+    capture.runId = runId;
+    capture.activeRunId = runId;
     capture.phase = 'recording';
     capture.runningSince = Date.now();
     activeRecordingId = capture.captureId;
     startTimer(capture);
     startMeter(capture);
-    if (capture.provider === 'browser') startBrowserRecognition(capture);
-    else startServerSegment(capture);
+    if (capture.provider === 'browser') startBrowserRecognition(capture, runId);
+    else startServerSegment(capture, runId);
     setStatus(capture, 'Recording. Audio is processed only by your configured Argos Speech-to-Text provider.');
   } catch (error) {
     capture.phase = 'idle';
@@ -624,6 +687,7 @@ function finishStop(capture) {
   if (!capture || capture.phase !== 'stopping') return;
   capture.phase = 'stopped';
   capture.runningSince = 0;
+  capture.interim = '';
   stopTimer(capture);
   releaseMicrophone(capture);
   setStatus(capture, capture.transcript ? 'Transcript ready. Export the transcript or generate a Meeting Brief.' : 'Capture stopped. No speech was transcribed.');
@@ -634,6 +698,7 @@ function stopCapture(capture) {
   if (!capture || !['recording', 'paused', 'stopping'].includes(capture.phase)) return;
   if (capture.phase === 'paused') {
     capture.phase = 'stopped';
+    capture.interim = '';
     releaseMicrophone(capture);
     setStatus(capture, capture.transcript ? 'Transcript ready. Export the transcript or generate a Meeting Brief.' : 'Capture stopped.');
     render();
@@ -663,13 +728,19 @@ async function createLibraryDocument(title, content) {
   return document;
 }
 
+function afterPaint() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
 async function openLibraryDocument(document) {
   const docId = document?.id || document?.doc_id;
   if (!docId) return;
-  deactivateCapture();
   try {
     await window.documentModule?.loadDocument?.(docId);
     window.documentModule?.openPanel?.();
+    await afterPaint();
+    // Keep Audio Capture open; make room for the document editor at the side.
+    documentPaneOffset();
   } catch (_) {
     window.documentModule?.openLibrary?.();
   }
@@ -684,7 +755,7 @@ async function exportTranscript(capture) {
   setStatus(capture, 'Exporting transcript to your document library…');
   try {
     const document = await createLibraryDocument(`${title} — Transcript`, `# ${title}\n\n## Live Transcript\n\n${capture.transcript.trim()}`);
-    setStatus(capture, 'Transcript exported. Opening the document now.');
+    setStatus(capture, 'Transcript exported. Opening it in the document panel.');
     await openLibraryDocument(document);
   } catch (error) {
     setStatus(capture, `Transcript export failed: ${error.message}`, true);
@@ -709,7 +780,7 @@ async function exportBrief(capture) {
     const brief = String(result.brief || '').trim();
     if (!brief) throw new Error('The Utility model returned an empty Meeting Brief');
     const document = await createLibraryDocument(`${title} — Meeting Brief`, brief);
-    setStatus(capture, 'Meeting Brief exported. Opening the document now.');
+    setStatus(capture, 'Meeting Brief exported. Opening it in the document panel.');
     await openLibraryDocument(document);
   } catch (error) {
     setStatus(capture, `Meeting Brief export failed: ${error.message}`, true);
@@ -730,6 +801,8 @@ async function closeCapture(captureId) {
       : window.confirm(message);
     if (!accepted) return;
   }
+  capture.closed = true;
+  capture.activeRunId += 1;
   stopBrowserRecognition(capture);
   stopActiveSegment(capture);
   stopTimer(capture);
@@ -808,8 +881,11 @@ function init() {
   document.addEventListener('odysseus:session-selected', queueTabSync);
   document.addEventListener('odysseus:session-materialized', queueTabSync);
   document.addEventListener('argos-venture:quest-registry-updated', queueTabSync);
+  window.addEventListener('resize', documentPaneOffset, { passive: true });
   window.addEventListener('pagehide', () => {
     captures.forEach(capture => {
+      capture.closed = true;
+      capture.activeRunId += 1;
       stopBrowserRecognition(capture);
       stopActiveSegment(capture);
       stopTimer(capture);
