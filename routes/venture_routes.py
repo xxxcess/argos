@@ -216,7 +216,7 @@ def setup_venture_routes(session_manager):
         finally:
             db.close()
 
-    # Meeting Brief is intentionally nested under the Venture router so the API
-    # inherits the same explicit runtime boundary as Quest workflows.
-    router.include_router(setup_meeting_brief_routes())
+    # Meeting Brief and Live Capture are nested under the Venture router so they
+    # inherit the same explicit runtime boundary as Quest workflows.
+    router.include_router(setup_meeting_brief_routes(session_manager))
     return router
