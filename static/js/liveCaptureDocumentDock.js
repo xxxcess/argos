@@ -13,6 +13,7 @@ const DIVIDER_SELECTOR = '#doc-divider';
 let queued = false;
 let paneObserver = null;
 let bodyObserver = null;
+let bodyClassObserver = null;
 let resizeObserver = null;
 
 function isVisible(element) {
@@ -127,16 +128,17 @@ function init() {
   resizeObserver = window.ResizeObserver ? new ResizeObserver(() => queueSync(2)) : null;
   if (resizeObserver) resizeObserver.observe(document.documentElement);
 
+  // Child-list changes detect the dock being mounted/unmounted. Do not observe
+  // inline style mutations here: syncDocumentDock intentionally writes bounds.
   bodyObserver = new MutationObserver(() => {
     observePane();
     queueSync(3);
   });
-  bodyObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['class', 'style'],
-  });
+  bodyObserver.observe(document.body, { childList: true, subtree: true });
+
+  // The active-capture class is the only body attribute relevant to geometry.
+  bodyClassObserver = new MutationObserver(() => queueSync(2));
+  bodyClassObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
   window.addEventListener('resize', () => queueSync(2), { passive: true });
   window.addEventListener('transitionend', event => {
