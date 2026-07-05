@@ -1,4 +1,4 @@
-"""Static guards for Argos Venture Meeting Brief persistence."""
+"""Static guards for Argos Venture Audio Capture and Meeting Brief."""
 
 from __future__ import annotations
 
@@ -23,16 +23,34 @@ def test_meeting_brief_api_only_generates_markdown():
     assert "SessionLocal" not in source
 
 
-def test_meeting_brief_window_has_no_notes_export_path():
-    source = read("static/js/meetingBrief.js")
-    assert "Save to Notes" not in source
-    assert "save-to-notes" not in source
-    assert "meeting-brief-save" not in source
+def test_audio_capture_is_not_a_home_launcher_or_browser_tab():
+    storage = read("static/js/storage.js")
+    capture = read("static/js/meetingCaptureWorkspace.js")
+    assert "./meetingCaptureWorkspace.js" in storage
+    assert "meetingBrief.js" not in storage
+    assert "window.open(" not in capture
+    assert "workspace-tab meeting-capture-tab" in capture
+    assert "argos:open-meeting-capture" in capture
 
 
-def test_completed_briefs_export_as_library_markdown_documents():
-    source = read("static/js/meetingBriefLibraryExport.js")
+def test_new_tab_wizard_offers_audio_capture():
+    source = read("static/js/meetingCaptureWorkspace.js")
+    assert 'value="audio_capture"' in source
+    assert "Audio capture" in source
+    assert "Open Audio Capture" in source
+
+
+def test_exports_are_library_markdown_and_open_documents():
+    source = read("static/js/meetingCaptureWorkspace.js")
     assert "'/api/document'" in source
     assert "language: 'markdown'" in source
-    assert "Export brief to Library" in source
+    assert "Export transcript" in source
     assert "Generate & export brief" in source
+    assert "loadDocument" in source
+    assert "openPanel" in source
+
+
+def test_legacy_browser_capture_modules_are_removed():
+    assert not (ROOT / "static/js/meetingBrief.js").exists()
+    assert not (ROOT / "static/js/meetingBriefLibraryExport.js").exists()
+    assert not (ROOT / "static/js/liveMeetingCapture.js").exists()
