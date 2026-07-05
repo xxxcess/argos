@@ -10,6 +10,7 @@ import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 import './streamRecoveryComposerGuard.js';
 import './meetingCaptureWorkspace.js';
+import './meetingCaptureLibraryHandoff.js';
 
 export const KEYS = {
   THEME: 'odysseus-theme',
@@ -19,7 +20,7 @@ export const KEYS = {
   SIDEBAR_SIDE: 'sidebar-side',
   CURRENT_SESSION: 'currentSessionId',
   COMPARE_SAVE: 'compare-save-results',
-  COMPARE_CHAT: 'compare-continue-chat',
+  COMPARE_CHAT: 'compare-chat',
   COMPARE_BLIND: 'compare-blind',
   COMPARE_RANDOM: 'compare-randomize',
   MODELS_EXPANDED: 'odysseus-models-expanded',
