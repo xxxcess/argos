@@ -1,8 +1,8 @@
 // Argos Venture Audio Capture workspace tab.
 //
-// Meeting Capture is an in-app workspace surface, not a browser window. Raw
-// transcript and recorder state remain in memory until the user explicitly
-// exports a Markdown transcript or Meeting Brief to the existing Document Library.
+// A capture tab is deliberately inert when created: no microphone request,
+// MediaRecorder instance, recognition session, or STT upload is started until
+// the user confirms consent and explicitly presses Start capture.
 
 const STT_STATS_ENDPOINT = '/api/stt/stats';
 const STT_ENDPOINT = '/api/stt/transcribe';
@@ -16,14 +16,18 @@ let activeCaptureId = null;
 let activeRecordingId = null;
 let root = null;
 let rootWired = false;
+let tabSyncQueued = false;
 
 function makeId() {
-  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-  return `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return window.crypto?.randomUUID?.() || `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function clean(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function elapsedMs(capture) {
+  return capture.elapsedMs + (capture.phase === 'recording' && capture.runningSince ? Date.now() - capture.runningSince : 0);
 }
 
 function formatElapsed(milliseconds) {
@@ -36,12 +40,16 @@ function formatElapsed(milliseconds) {
     : `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
 }
 
-function elapsedMs(capture) {
-  return capture.elapsedMs + (capture.phase === 'recording' && capture.runningSince ? Date.now() - capture.runningSince : 0);
+function timestamp(capture) {
+  return `[${formatElapsed(elapsedMs(capture))}]`;
 }
 
-function transcriptStamp(capture) {
-  return `[${formatElapsed(elapsedMs(capture))}]`;
+function microphoneIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>';
+}
+
+function recordIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></svg>';
 }
 
 function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
@@ -51,37 +59,29 @@ function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
     transcript: '',
     interim: '',
     phase: 'idle', // idle | recording | paused | stopping | stopped
-    status: 'Ready to capture. Confirm consent, then record.',
-    statusError: false,
+    provider: 'unchecked', // unchecked | loading | browser | local | endpoint | disabled
+    language: '',
+    consent: false,
     elapsedMs: 0,
     runningSince: 0,
-    provider: 'loading',
-    language: '',
     stream: null,
     recorder: null,
     recognition: null,
     segmentTimer: 0,
     segmentQueue: [],
     draining: false,
+    timer: 0,
     audioContext: null,
     analyser: null,
     audioSource: null,
     waveformFrame: 0,
-    timer: 0,
-    consent: false,
+    status: 'This tab is idle. No microphone access is requested until Start capture.',
+    statusError: false,
   };
 }
 
-function icon(path) {
-  return `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
-}
-
-function microphoneIcon() {
-  return icon('<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/>');
-}
-
-function recordingIcon() {
-  return icon('<circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/>');
+function activeCapture() {
+  return activeCaptureId ? captures.get(activeCaptureId) || null : null;
 }
 
 function installStyles() {
@@ -89,22 +89,21 @@ function installStyles() {
   const style = document.createElement('style');
   style.id = 'meeting-capture-workspace-style';
   style.textContent = `
-    #meeting-capture-workspace { position:fixed; inset:var(--workspace-shell-h, 0px) 0 0 var(--icon-rail-w, 0px); z-index:35; display:none; grid-template-rows:auto minmax(0, 1fr) auto; background:var(--bg,#17191d); color:var(--fg,#e8eaed); }
+    #meeting-capture-workspace { position:fixed; inset:var(--workspace-shell-h,0px) 0 0 var(--icon-rail-w,0px); z-index:35; display:none; grid-template-rows:auto minmax(0,1fr) auto; background:var(--bg,#17191d); color:var(--fg,#e8eaed); }
     body.workspace-meeting-capture-active #meeting-capture-workspace { display:grid; }
     body.workspace-meeting-capture-active #chat-container { visibility:hidden; pointer-events:none; }
     body.workspace-meeting-capture-active #sidebar { pointer-events:none; }
     .meeting-capture-head { display:flex; align-items:center; gap:14px; min-width:0; padding:16px 24px; border-bottom:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
     .meeting-capture-brand { display:flex; align-items:center; gap:10px; min-width:0; flex:1; }
     .meeting-capture-brand svg { width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:1.8; flex:0 0 auto; color:var(--accent,var(--red,#e06c75)); }
-    .meeting-capture-brand-copy { min-width:0; }
     .meeting-capture-kicker { font-size:10px; text-transform:uppercase; letter-spacing:.13em; opacity:.62; font-weight:700; }
     .meeting-capture-brand h1 { margin:3px 0 0; font-size:18px; line-height:1.2; font-weight:650; }
-    .meeting-capture-title-input { width:min(360px, 35vw); min-width:140px; padding:8px 10px; border:1px solid var(--border,#3a3f47); border-radius:7px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; }
+    .meeting-capture-title-input { width:min(360px,35vw); min-width:140px; padding:8px 10px; border:1px solid var(--border,#3a3f47); border-radius:7px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; }
     .meeting-capture-state { display:inline-flex; align-items:center; gap:7px; font-size:12px; white-space:nowrap; opacity:.82; }
     .meeting-capture-state::before { content:''; width:9px; height:9px; border-radius:999px; background:var(--border,#646a73); }
     .meeting-capture-state[data-phase="recording"]::before { background:var(--red,#e06c75); box-shadow:0 0 0 5px color-mix(in srgb,var(--red,#e06c75) 20%,transparent); }
     .meeting-capture-state[data-phase="paused"]::before { background:#e5c07b; }
-    .meeting-capture-main { min-height:0; display:grid; grid-template-columns:minmax(0, 1fr) minmax(220px, 300px); gap:18px; padding:20px 24px; overflow:hidden; }
+    .meeting-capture-main { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(220px,300px); gap:18px; padding:20px 24px; overflow:hidden; }
     .meeting-capture-transcript-card, .meeting-capture-details { min-height:0; border:1px solid var(--border,#3a3f47); border-radius:12px; background:var(--panel,#21252b); }
     .meeting-capture-transcript-card { display:flex; flex-direction:column; overflow:hidden; }
     .meeting-capture-transcript-head { display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--border,#3a3f47); font-size:12px; }
@@ -112,7 +111,7 @@ function installStyles() {
     .meeting-capture-log { flex:1; overflow:auto; padding:18px 20px; font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; white-space:pre-wrap; }
     .meeting-capture-log pre { margin:0; font:inherit; white-space:pre-wrap; }
     .meeting-capture-empty { margin:0; color:var(--muted,#a4a8ae); font-family:var(--font-family,system-ui,sans-serif); opacity:.72; }
-    .meeting-capture-interim { display:block; margin-top:10px; opacity:.5; font-style:italic; }
+    .meeting-capture-interim { display:block; margin-top:10px; opacity:.52; font-style:italic; }
     .meeting-capture-details { padding:16px; overflow:auto; }
     .meeting-capture-details h2 { margin:0 0 10px; font-size:13px; }
     .meeting-capture-details p { margin:0 0 12px; font-size:12px; line-height:1.5; opacity:.72; }
@@ -133,12 +132,12 @@ function installStyles() {
     .meeting-waveform { height:34px; width:100%; border-radius:6px; background:color-mix(in srgb,var(--bg,#17191d) 65%,transparent); }
     .meeting-capture-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; }
     .meeting-capture-actions .primary { border-color:var(--accent,var(--red,#e06c75)); background:color-mix(in srgb,var(--accent,var(--red,#e06c75)) 18%,var(--bg)); }
-    .meeting-capture-status { min-height:1.25em; font-size:11px; opacity:.75; }
+    .meeting-capture-status { grid-column:1 / -1; min-height:1.25em; font-size:11px; opacity:.75; }
     .meeting-capture-status[data-error="true"] { color:var(--red,#e06c75); opacity:1; }
     .workspace-tab.meeting-capture-tab .workspace-tab-icon svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; }
     .workspace-tab.meeting-capture-tab[data-state="recording"] .workspace-tab-state { display:block; background:var(--red,#e06c75); }
     @media (max-width:820px) {
-      #meeting-capture-workspace { inset:var(--workspace-shell-h, 0px) 0 0 0; }
+      #meeting-capture-workspace { inset:var(--workspace-shell-h,0px) 0 0 0; }
       .meeting-capture-head { padding:12px 14px; flex-wrap:wrap; }
       .meeting-capture-title-input { order:3; width:100%; }
       .meeting-capture-main { grid-template-columns:1fr; padding:12px; overflow:auto; }
@@ -150,10 +149,6 @@ function installStyles() {
   document.head.appendChild(style);
 }
 
-function activeCapture() {
-  return activeCaptureId ? captures.get(activeCaptureId) || null : null;
-}
-
 function setStatus(capture, message, isError = false) {
   if (!capture) return;
   capture.status = message || '';
@@ -161,9 +156,8 @@ function setStatus(capture, message, isError = false) {
   if (capture.captureId === activeCaptureId) render();
 }
 
-function setTabRuntime(capture) {
-  const tab = document.querySelector(`.workspace-tab[data-capture-id="${CSS.escape(capture.captureId)}"]`);
-  if (tab) tab.dataset.state = capture.phase === 'recording' ? 'recording' : (capture.phase === 'paused' ? 'paused' : 'idle');
+function phaseLabel(phase) {
+  return ({ idle: 'Ready to capture', recording: 'Recording live', paused: 'Capture paused', stopping: 'Finishing transcript', stopped: 'Transcript ready' })[phase] || 'Ready to capture';
 }
 
 function renderTranscript(capture, log) {
@@ -171,7 +165,7 @@ function renderTranscript(capture, log) {
   if (!capture.transcript && !capture.interim) {
     const empty = document.createElement('p');
     empty.className = 'meeting-capture-empty';
-    empty.textContent = 'Your live transcript will appear here as you record.';
+    empty.textContent = 'Your live transcript will appear here after you start capture.';
     log.appendChild(empty);
     return;
   }
@@ -183,14 +177,10 @@ function renderTranscript(capture, log) {
   if (capture.interim) {
     const interim = document.createElement('span');
     interim.className = 'meeting-capture-interim';
-    interim.textContent = `${capture.transcript ? '\n' : ''}${transcriptStamp(capture)} ${capture.interim}`;
+    interim.textContent = `${capture.transcript ? '\n' : ''}${timestamp(capture)} ${capture.interim}`;
     log.appendChild(interim);
   }
   log.scrollTop = log.scrollHeight;
-}
-
-function phaseLabel(phase) {
-  return ({ idle: 'Ready to capture', recording: 'Recording live', paused: 'Capture paused', stopping: 'Finishing transcript', stopped: 'Transcript ready' })[phase] || 'Ready to capture';
 }
 
 function ensureRoot() {
@@ -201,56 +191,48 @@ function ensureRoot() {
   root.setAttribute('aria-label', 'Audio capture workspace');
   root.innerHTML = `
     <header class="meeting-capture-head">
-      <div class="meeting-capture-brand">
-        ${microphoneIcon()}
-        <div class="meeting-capture-brand-copy"><div class="meeting-capture-kicker">Argos Venture · Audio Capture</div><h1>Live Meeting Transcript</h1></div>
-      </div>
-      <div class="meeting-capture-state" id="meeting-capture-state" data-phase="idle">Ready to capture</div>
+      <div class="meeting-capture-brand">${microphoneIcon()}<div><div class="meeting-capture-kicker">Argos Venture · Audio Capture</div><h1>Live Meeting Transcript</h1></div></div>
+      <div id="meeting-capture-state" class="meeting-capture-state" data-phase="idle">Ready to capture</div>
       <input id="meeting-capture-title" class="meeting-capture-title-input" type="text" maxlength="180" placeholder="Meeting title" aria-label="Meeting title" />
     </header>
     <section class="meeting-capture-main">
       <article class="meeting-capture-transcript-card">
-        <div class="meeting-capture-transcript-head"><strong>Live transcript</strong><span id="meeting-capture-word-count">0 characters</span></div>
-        <div class="meeting-capture-log" id="meeting-capture-log" aria-live="polite"></div>
+        <div class="meeting-capture-transcript-head"><strong>Live transcript</strong><span id="meeting-capture-character-count">0 characters</span></div>
+        <div id="meeting-capture-log" class="meeting-capture-log" aria-live="polite"></div>
       </article>
       <aside class="meeting-capture-details">
         <h2>Capture settings</h2>
-        <p>Use the microphone only when you have authority and participant consent. Audio is sent only to the Speech-to-Text provider configured in Argos.</p>
-        <label class="meeting-capture-consent"><input id="meeting-capture-consent" type="checkbox" /> <span>I have consent and authority to capture and transcribe this meeting.</span></label>
-        <div class="meeting-capture-provider"><strong>Speech-to-text</strong><span id="meeting-capture-provider">Checking configuration…</span></div>
+        <p>This tab does not access your microphone until you check consent and press Start capture.</p>
+        <label class="meeting-capture-consent"><input id="meeting-capture-consent" type="checkbox" /><span>I have consent and authority to capture and transcribe this meeting.</span></label>
+        <div class="meeting-capture-provider"><strong>Speech-to-text</strong><span id="meeting-capture-provider">Check consent to verify configuration.</span></div>
       </aside>
     </section>
     <footer class="meeting-capture-footer">
       <div class="meeting-recorder-controls">
-        <button class="meeting-record-btn" id="meeting-capture-record" type="button">${recordingIcon()}<span>Start capture</span></button>
+        <button id="meeting-capture-record" class="meeting-record-btn" type="button">${recordIcon()}<span>Start capture</span></button>
         <button id="meeting-capture-pause" type="button" disabled>Pause</button>
-        <button class="meeting-stop-btn" id="meeting-capture-stop" type="button" disabled>Stop</button>
+        <button id="meeting-capture-stop" class="meeting-stop-btn" type="button" disabled>Stop</button>
       </div>
-      <div class="meeting-recorder-readout">
-        <span class="meeting-recorder-time" id="meeting-capture-time">00:00</span>
-        <canvas class="meeting-waveform" id="meeting-capture-waveform" aria-label="Microphone activity"></canvas>
-      </div>
-      <div class="meeting-capture-actions">
-        <button id="meeting-capture-export-transcript" type="button">Export transcript</button>
-        <button class="primary" id="meeting-capture-export-brief" type="button">Generate & export brief</button>
-      </div>
-      <div class="meeting-capture-status" id="meeting-capture-status" aria-live="polite"></div>
+      <div class="meeting-recorder-readout"><span id="meeting-capture-time" class="meeting-recorder-time">00:00</span><canvas id="meeting-capture-waveform" class="meeting-waveform" aria-label="Microphone activity"></canvas></div>
+      <div class="meeting-capture-actions"><button id="meeting-capture-export-transcript" type="button">Export transcript</button><button id="meeting-capture-export-brief" class="primary" type="button">Generate & export brief</button></div>
+      <div id="meeting-capture-status" class="meeting-capture-status" aria-live="polite"></div>
     </footer>
   `;
   document.body.appendChild(root);
-  if (!rootWired) wireRoot();
+  wireRoot();
   return root;
 }
 
 function wireRoot() {
+  if (rootWired || !root) return;
   rootWired = true;
   const title = root.querySelector('#meeting-capture-title');
   const consent = root.querySelector('#meeting-capture-consent');
-  root.querySelector('#meeting-capture-record')?.addEventListener('click', () => {
+  root.querySelector('#meeting-capture-record')?.addEventListener('click', async () => {
     const capture = activeCapture();
     if (!capture) return;
-    if (capture.phase === 'paused') resumeCapture(capture);
-    else startCapture(capture);
+    if (capture.phase === 'paused') await resumeCapture(capture);
+    else await startCapture(capture);
   });
   root.querySelector('#meeting-capture-pause')?.addEventListener('click', () => pauseCapture(activeCapture()));
   root.querySelector('#meeting-capture-stop')?.addEventListener('click', () => stopCapture(activeCapture()));
@@ -260,13 +242,13 @@ function wireRoot() {
     const capture = activeCapture();
     if (!capture) return;
     capture.title = clean(title.value) || 'Audio Capture';
-    const tabTitle = document.querySelector(`.workspace-tab[data-capture-id="${CSS.escape(capture.captureId)}"] .workspace-tab-title`);
-    if (tabTitle) tabTitle.textContent = capture.title;
+    queueTabSync();
   });
-  consent?.addEventListener('change', () => {
+  consent?.addEventListener('change', async () => {
     const capture = activeCapture();
     if (!capture) return;
     capture.consent = !!consent.checked;
+    if (capture.consent && capture.provider === 'unchecked') await loadSttConfiguration(capture);
     render();
   });
 }
@@ -278,86 +260,86 @@ function render() {
   const consent = root.querySelector('#meeting-capture-consent');
   const state = root.querySelector('#meeting-capture-state');
   const provider = root.querySelector('#meeting-capture-provider');
-  const log = root.querySelector('#meeting-capture-log');
-  const characters = root.querySelector('#meeting-capture-word-count');
   const record = root.querySelector('#meeting-capture-record');
   const pause = root.querySelector('#meeting-capture-pause');
   const stop = root.querySelector('#meeting-capture-stop');
-  const time = root.querySelector('#meeting-capture-time');
-  const status = root.querySelector('#meeting-capture-status');
   const exportTranscriptButton = root.querySelector('#meeting-capture-export-transcript');
   const exportBriefButton = root.querySelector('#meeting-capture-export-brief');
   if (document.activeElement !== title) title.value = capture.title;
   consent.checked = capture.consent;
   state.dataset.phase = capture.phase;
   state.textContent = phaseLabel(capture.phase);
-  provider.textContent = capture.provider === 'loading' ? 'Checking configuration…'
+  provider.textContent = capture.provider === 'unchecked' ? 'Check consent to verify configuration.'
+    : capture.provider === 'loading' ? 'Checking configuration…'
     : capture.provider === 'browser' ? 'Browser speech recognition'
     : capture.provider === 'disabled' ? 'Speech-to-text is not configured'
     : `Argos ${capture.provider} provider`;
-  renderTranscript(capture, log);
-  characters.textContent = `${capture.transcript.length.toLocaleString()} characters`;
-  time.textContent = formatElapsed(elapsedMs(capture));
+  renderTranscript(capture, root.querySelector('#meeting-capture-log'));
+  root.querySelector('#meeting-capture-character-count').textContent = `${capture.transcript.length.toLocaleString()} characters`;
+  root.querySelector('#meeting-capture-time').textContent = formatElapsed(elapsedMs(capture));
+  const status = root.querySelector('#meeting-capture-status');
   status.textContent = capture.status;
   status.dataset.error = capture.statusError ? 'true' : 'false';
-  const canCapture = capture.provider !== 'disabled' && !(capture.provider === 'browser' && !browserRecognitionSupported());
-  record.disabled = capture.phase === 'recording' || capture.phase === 'stopping' || !capture.consent || !canCapture || (activeRecordingId && activeRecordingId !== capture.captureId);
+  const providerReady = ['browser', 'local', 'endpoint'].includes(capture.provider);
+  const anotherCaptureIsRecording = !!activeRecordingId && activeRecordingId !== capture.captureId;
+  record.disabled = !capture.consent || !providerReady || capture.phase === 'recording' || capture.phase === 'stopping' || anotherCaptureIsRecording;
   record.querySelector('span').textContent = capture.phase === 'paused' ? 'Resume capture' : 'Start capture';
   pause.disabled = capture.phase !== 'recording';
-  pause.textContent = capture.phase === 'recording' ? 'Pause' : 'Resume';
   stop.disabled = !['recording', 'paused', 'stopping'].includes(capture.phase);
-  exportTranscriptButton.disabled = !capture.transcript.trim();
-  exportBriefButton.disabled = !capture.transcript.trim() || capture.phase === 'stopping';
-  setTabRuntime(capture);
+  const canExport = capture.phase === 'stopped' && !!capture.transcript.trim();
+  exportTranscriptButton.disabled = !canExport;
+  exportBriefButton.disabled = !canExport;
+  queueTabSync();
+}
+
+function queueTabSync() {
+  if (tabSyncQueued) return;
+  tabSyncQueued = true;
+  requestAnimationFrame(() => {
+    tabSyncQueued = false;
+    ensureTabChrome();
+  });
 }
 
 function ensureTabChrome() {
   const list = document.getElementById('workspace-tab-list');
   if (!list) return;
-  for (const stale of list.querySelectorAll('.meeting-capture-tab')) {
-    if (!captures.has(stale.dataset.captureId)) stale.remove();
-  }
-  for (const capture of captures.values()) {
+  list.querySelectorAll('.meeting-capture-tab').forEach(tab => {
+    if (!captures.has(tab.dataset.captureId)) tab.remove();
+  });
+  captures.forEach(capture => {
     let tab = list.querySelector(`.meeting-capture-tab[data-capture-id="${CSS.escape(capture.captureId)}"]`);
     if (!tab) {
       tab = document.createElement('div');
       tab.className = 'workspace-tab meeting-capture-tab';
       tab.dataset.captureId = capture.captureId;
-      tab.dataset.state = 'idle';
+      tab.dataset.tabId = `meeting:${capture.captureId}`;
       tab.setAttribute('role', 'tab');
-      tab.tabIndex = 0;
       tab.innerHTML = `<span class="workspace-tab-icon">${microphoneIcon()}</span><span class="workspace-tab-title"></span><span class="workspace-tab-state" aria-hidden="true"></span><span class="workspace-tab-close-wrap"><button type="button" class="workspace-tab-close" aria-label="Close audio capture tab">&times;</button></span>`;
       tab.addEventListener('click', event => {
         if (event.target.closest('.workspace-tab-close')) return;
         activateCapture(capture.captureId);
       });
       tab.addEventListener('keydown', event => {
+        event.stopPropagation();
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           activateCapture(capture.captureId);
         }
       });
-      tab.querySelector('.workspace-tab-close')?.addEventListener('click', event => {
+      tab.querySelector('.workspace-tab-close')?.addEventListener('click', async event => {
         event.stopPropagation();
-        closeCapture(capture.captureId);
+        await closeCapture(capture.captureId);
       });
       list.appendChild(tab);
     }
-    tab.querySelector('.workspace-tab-title').textContent = capture.title;
+    const tabTitle = tab.querySelector('.workspace-tab-title');
+    if (tabTitle.textContent !== capture.title) tabTitle.textContent = capture.title;
     tab.dataset.state = capture.phase === 'recording' ? 'recording' : (capture.phase === 'paused' ? 'paused' : 'idle');
-    tab.setAttribute('aria-selected', String(activeCaptureId === capture.captureId));
-  }
-  if (activeCaptureId) {
-    list.querySelectorAll('.workspace-tab:not(.meeting-capture-tab)').forEach(tab => tab.setAttribute('aria-selected', 'false'));
-  }
-}
-
-function deactivateCapture() {
-  if (!activeCaptureId) return;
-  activeCaptureId = null;
-  document.body.classList.remove('workspace-meeting-capture-active');
-  if (root) root.setAttribute('aria-hidden', 'true');
-  ensureTabChrome();
+    tab.setAttribute('aria-selected', String(capture.captureId === activeCaptureId));
+    tab.tabIndex = capture.captureId === activeCaptureId ? 0 : -1;
+  });
+  if (activeCaptureId) list.querySelectorAll('.workspace-tab:not(.meeting-capture-tab)').forEach(tab => tab.setAttribute('aria-selected', 'false'));
 }
 
 function activateCapture(captureId) {
@@ -367,16 +349,20 @@ function activateCapture(captureId) {
   ensureRoot();
   document.body.classList.add('workspace-meeting-capture-active');
   root.removeAttribute('aria-hidden');
-  ensureTabChrome();
   render();
-  loadSttConfiguration(capture);
-  window.dispatchEvent(new CustomEvent('argos:meeting-capture-activated', { detail: { captureId } }));
+}
+
+function deactivateCapture() {
+  if (!activeCaptureId) return;
+  activeCaptureId = null;
+  document.body.classList.remove('workspace-meeting-capture-active');
+  root?.setAttribute('aria-hidden', 'true');
+  queueTabSync();
 }
 
 function openWorkspaceCapture({ title = 'Audio Capture' } = {}) {
   const capture = newCapture({ title });
   captures.set(capture.captureId, capture);
-  ensureTabChrome();
   activateCapture(capture.captureId);
   return capture.captureId;
 }
@@ -386,9 +372,12 @@ function browserRecognitionSupported() {
 }
 
 async function loadSttConfiguration(capture) {
+  if (!capture || capture.provider === 'loading') return;
+  capture.provider = 'loading';
+  setStatus(capture, 'Checking Speech-to-Text configuration…');
   try {
     const response = await fetch(STT_STATS_ENDPOINT, { credentials: 'same-origin' });
-    if (!response.ok) throw new Error('Speech-to-text status unavailable');
+    if (!response.ok) throw new Error('status unavailable');
     const stats = await response.json();
     capture.provider = stats.provider || 'disabled';
     capture.language = stats.language || '';
@@ -396,140 +385,30 @@ async function loadSttConfiguration(capture) {
     capture.provider = 'disabled';
   }
   if (capture.provider === 'disabled') setStatus(capture, 'Configure browser, local, or endpoint Speech-to-Text in Settings before recording.', true);
-  else if (capture.provider === 'browser' && !browserRecognitionSupported()) setStatus(capture, 'Browser speech recognition is unavailable. Configure local or endpoint Speech-to-Text.', true);
-  else if (capture.phase === 'idle') setStatus(capture, capture.provider === 'browser' ? 'Ready. Browser speech recognition is configured.' : 'Ready. Argos will transcribe short microphone segments.');
-  if (capture.captureId === activeCaptureId) render();
-}
-
-function preferredMimeType() {
-  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
-  return candidates.find(type => window.MediaRecorder?.isTypeSupported?.(type)) || '';
-}
-
-function createRecorder(capture) {
-  const type = preferredMimeType();
-  try { return new MediaRecorder(capture.stream, type ? { mimeType: type } : undefined); }
-  catch (_) { return new MediaRecorder(capture.stream); }
+  else if (capture.provider === 'browser' && !browserRecognitionSupported()) setStatus(capture, 'Browser recognition is unavailable. Configure local or endpoint Speech-to-Text.', true);
+  else setStatus(capture, 'Ready. Press Start capture when you want to request microphone access.');
+  render();
 }
 
 function appendTranscript(capture, text) {
-  const cleaned = clean(text);
-  if (!cleaned) return;
-  const entry = `${transcriptStamp(capture)} ${cleaned}`;
-  capture.transcript = capture.transcript ? `${capture.transcript}\n${entry}` : entry;
+  const sentence = clean(text);
+  if (!sentence) return;
+  capture.transcript = capture.transcript ? `${capture.transcript}\n${timestamp(capture)} ${sentence}` : `${timestamp(capture)} ${sentence}`;
   if (capture.transcript.length > MAX_TRANSCRIPT_CHARS) {
-    capture.transcript = capture.transcript.slice(capture.transcript.length - MAX_TRANSCRIPT_CHARS).trim();
-    setStatus(capture, 'Transcript is limited to the most recent 120,000 characters.', true);
+    capture.transcript = capture.transcript.slice(-MAX_TRANSCRIPT_CHARS).trim();
+    setStatus(capture, 'Transcript is limited to its most recent 120,000 characters.', true);
   }
   capture.interim = '';
-  if (capture.captureId === activeCaptureId) render();
-}
-
-function startBrowserRecognition(capture) {
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recognition) throw new Error('Browser speech recognition is unavailable.');
-  const recognition = new Recognition();
-  capture.recognition = recognition;
-  recognition.continuous = true;
-  recognition.interimResults = true;
-  recognition.lang = capture.language || '';
-  recognition.onresult = event => {
-    let interim = '';
-    for (let index = event.resultIndex; index < event.results.length; index += 1) {
-      const result = event.results[index];
-      const text = clean(result[0]?.transcript || '');
-      if (!text) continue;
-      if (result.isFinal) appendTranscript(capture, text);
-      else interim = clean(`${interim} ${text}`);
-    }
-    capture.interim = interim;
-    if (capture.captureId === activeCaptureId) render();
-  };
-  recognition.onerror = event => {
-    const code = event?.error || 'unknown';
-    if (code !== 'aborted' && capture.phase === 'recording') setStatus(capture, `Browser transcription issue: ${code}.`, true);
-  };
-  recognition.onend = () => {
-    if (capture.phase === 'recording') {
-      try { recognition.start(); } catch (_) {}
-    }
-  };
-  recognition.start();
-}
-
-function stopBrowserRecognition(capture) {
-  if (!capture?.recognition) return;
-  try { capture.recognition.onend = null; capture.recognition.stop(); } catch (_) {}
-  capture.recognition = null;
-  capture.interim = '';
-}
-
-async function transcribeSegment(blob) {
-  const data = new FormData();
-  data.append('file', blob, 'audio-capture-segment.webm');
-  const response = await fetch(STT_ENDPOINT, { method: 'POST', credentials: 'same-origin', body: data });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result?.detail?.message || result?.message || 'Transcription failed');
-  return clean(result.text || '');
-}
-
-async function drainQueue(capture) {
-  if (!capture || capture.draining) return;
-  capture.draining = true;
-  try {
-    while (capture.segmentQueue.length) {
-      const blob = capture.segmentQueue.shift();
-      if (!blob?.size) continue;
-      setStatus(capture, capture.phase === 'stopping' ? 'Transcribing final audio…' : 'Transcribing live audio…');
-      try {
-        const text = await transcribeSegment(blob);
-        if (text) appendTranscript(capture, text);
-      } catch (error) {
-        setStatus(capture, `A segment could not be transcribed: ${error.message}`, true);
-      }
-    }
-  } finally {
-    capture.draining = false;
-    if (capture.phase === 'stopping' && !capture.recorder && !capture.segmentQueue.length) finishStop(capture);
-    if (capture.phase === 'paused' && !capture.recorder && !capture.segmentQueue.length) releaseMicrophone(capture);
-  }
-}
-
-function startServerSegment(capture) {
-  if (!capture || capture.phase !== 'recording' || !capture.stream) return;
-  const recorder = createRecorder(capture);
-  capture.recorder = recorder;
-  const chunks = [];
-  recorder.ondataavailable = event => { if (event.data?.size) chunks.push(event.data); };
-  recorder.onstop = () => {
-    if (capture.recorder === recorder) capture.recorder = null;
-    const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-    if (blob.size) capture.segmentQueue.push(blob);
-    drainQueue(capture);
-    if (capture.phase === 'recording') window.setTimeout(() => startServerSegment(capture), 0);
-    else if (capture.phase === 'stopping' && !capture.segmentQueue.length && !capture.draining) finishStop(capture);
-    else if (capture.phase === 'paused' && !capture.segmentQueue.length && !capture.draining) releaseMicrophone(capture);
-  };
-  recorder.start();
-  capture.segmentTimer = window.setTimeout(() => {
-    if (recorder.state === 'recording') recorder.stop();
-  }, SEGMENT_MS);
-}
-
-function stopActiveSegment(capture) {
-  if (!capture) return;
-  if (capture.segmentTimer) window.clearTimeout(capture.segmentTimer);
-  capture.segmentTimer = 0;
-  if (capture.recorder?.state === 'recording') capture.recorder.stop();
+  render();
 }
 
 function startTimer(capture) {
-  if (capture.timer) window.clearInterval(capture.timer);
-  capture.timer = window.setInterval(() => { if (capture.captureId === activeCaptureId) render(); }, 250);
+  if (capture.timer) clearInterval(capture.timer);
+  capture.timer = setInterval(() => { if (capture.captureId === activeCaptureId) render(); }, 250);
 }
 
 function stopTimer(capture) {
-  if (capture?.timer) window.clearInterval(capture.timer);
+  if (capture?.timer) clearInterval(capture.timer);
   if (capture) capture.timer = 0;
 }
 
@@ -584,10 +463,117 @@ function releaseMicrophone(capture) {
   if (activeRecordingId === capture.captureId && capture.phase !== 'recording') activeRecordingId = null;
 }
 
+function startBrowserRecognition(capture) {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) throw new Error('Browser speech recognition is unavailable.');
+  const recognition = new Recognition();
+  capture.recognition = recognition;
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = capture.language || '';
+  recognition.onresult = event => {
+    let interim = '';
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      const text = clean(result[0]?.transcript || '');
+      if (!text) continue;
+      if (result.isFinal) appendTranscript(capture, text);
+      else interim = clean(`${interim} ${text}`);
+    }
+    capture.interim = interim;
+    render();
+  };
+  recognition.onerror = event => {
+    if (event?.error !== 'aborted' && capture.phase === 'recording') setStatus(capture, `Browser transcription issue: ${event?.error || 'unknown'}.`, true);
+  };
+  recognition.onend = () => {
+    if (capture.phase === 'recording') {
+      try { recognition.start(); } catch (_) {}
+    }
+  };
+  recognition.start();
+}
+
+function stopBrowserRecognition(capture) {
+  if (!capture?.recognition) return;
+  try { capture.recognition.onend = null; capture.recognition.stop(); } catch (_) {}
+  capture.recognition = null;
+  capture.interim = '';
+}
+
+function preferredMimeType() {
+  return ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'].find(type => window.MediaRecorder?.isTypeSupported?.(type)) || '';
+}
+
+async function transcribeSegment(blob) {
+  const data = new FormData();
+  data.append('file', blob, 'audio-capture-segment.webm');
+  const response = await fetch(STT_ENDPOINT, { method: 'POST', credentials: 'same-origin', body: data });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result?.detail?.message || result?.message || 'Transcription failed');
+  return clean(result.text || '');
+}
+
+async function drainQueue(capture) {
+  if (!capture || capture.draining) return;
+  capture.draining = true;
+  try {
+    while (capture.segmentQueue.length) {
+      const blob = capture.segmentQueue.shift();
+      if (!blob?.size) continue;
+      setStatus(capture, capture.phase === 'stopping' ? 'Transcribing final audio…' : 'Transcribing live audio…');
+      try {
+        const text = await transcribeSegment(blob);
+        if (text) appendTranscript(capture, text);
+      } catch (error) {
+        setStatus(capture, `A segment could not be transcribed: ${error.message}`, true);
+      }
+    }
+  } finally {
+    capture.draining = false;
+    if (capture.phase === 'stopping' && !capture.recorder && !capture.segmentQueue.length) finishStop(capture);
+    if (capture.phase === 'paused' && !capture.recorder && !capture.segmentQueue.length) releaseMicrophone(capture);
+  }
+}
+
+function startServerSegment(capture) {
+  if (!capture?.stream || capture.phase !== 'recording') return;
+  const mimeType = preferredMimeType();
+  let recorder;
+  try { recorder = new MediaRecorder(capture.stream, mimeType ? { mimeType } : undefined); }
+  catch (_) { recorder = new MediaRecorder(capture.stream); }
+  capture.recorder = recorder;
+  const chunks = [];
+  recorder.ondataavailable = event => { if (event.data?.size) chunks.push(event.data); };
+  recorder.onstop = () => {
+    if (capture.recorder === recorder) capture.recorder = null;
+    const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+    if (blob.size) capture.segmentQueue.push(blob);
+    drainQueue(capture);
+    if (capture.phase === 'recording') setTimeout(() => startServerSegment(capture), 0);
+    else if (capture.phase === 'stopping' && !capture.segmentQueue.length && !capture.draining) finishStop(capture);
+    else if (capture.phase === 'paused' && !capture.segmentQueue.length && !capture.draining) releaseMicrophone(capture);
+  };
+  recorder.start();
+  capture.segmentTimer = setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, SEGMENT_MS);
+}
+
+function stopActiveSegment(capture) {
+  if (!capture) return;
+  if (capture.segmentTimer) clearTimeout(capture.segmentTimer);
+  capture.segmentTimer = 0;
+  if (capture.recorder?.state === 'recording') capture.recorder.stop();
+}
+
 async function startCapture(capture) {
   if (!capture || capture.phase === 'recording' || capture.phase === 'stopping') return;
   if (!capture.consent) {
     setStatus(capture, 'Confirm participant consent before starting capture.', true);
+    return;
+  }
+  if (capture.provider === 'unchecked') await loadSttConfiguration(capture);
+  if (!['browser', 'local', 'endpoint'].includes(capture.provider)) {
+    setStatus(capture, 'Configure an available Speech-to-Text provider before recording.', true);
     return;
   }
   if (activeRecordingId && activeRecordingId !== capture.captureId) {
@@ -598,12 +584,8 @@ async function startCapture(capture) {
     setStatus(capture, 'Microphone capture requires HTTPS or localhost in a supported browser.', true);
     return;
   }
-  if (capture.provider === 'loading') await loadSttConfiguration(capture);
-  if (capture.provider === 'disabled' || (capture.provider === 'browser' && !browserRecognitionSupported())) {
-    setStatus(capture, 'Configure an available Speech-to-Text provider before recording.', true);
-    return;
-  }
   try {
+    // This is the only microphone acquisition path in the module.
     capture.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     capture.phase = 'recording';
     capture.runningSince = Date.now();
@@ -613,17 +595,16 @@ async function startCapture(capture) {
     if (capture.provider === 'browser') startBrowserRecognition(capture);
     else startServerSegment(capture);
     setStatus(capture, 'Recording. Audio is processed only by your configured Argos Speech-to-Text provider.');
-    render();
   } catch (error) {
-    releaseMicrophone(capture);
     capture.phase = 'idle';
+    releaseMicrophone(capture);
     setStatus(capture, `Microphone access failed: ${error.message}`, true);
   }
+  render();
 }
 
 async function resumeCapture(capture) {
-  if (!capture || capture.phase !== 'paused') return;
-  await startCapture(capture);
+  if (capture?.phase === 'paused') await startCapture(capture);
 }
 
 function pauseCapture(capture) {
@@ -674,9 +655,7 @@ function stopCapture(capture) {
 
 async function createLibraryDocument(title, content) {
   const response = await fetch(DOCUMENT_ENDPOINT, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: null, title, language: 'markdown', content }),
   });
   const document = await response.json().catch(() => ({}));
@@ -687,28 +666,25 @@ async function createLibraryDocument(title, content) {
 async function openLibraryDocument(document) {
   const docId = document?.id || document?.doc_id;
   if (!docId) return;
-  const module = window.documentModule;
+  deactivateCapture();
   try {
-    await module?.loadDocument?.(docId);
-    module?.openPanel?.();
-    return;
-  } catch (_) {}
-  try {
-    module?.openLibrary?.();
-  } catch (_) {}
+    await window.documentModule?.loadDocument?.(docId);
+    window.documentModule?.openPanel?.();
+  } catch (_) {
+    window.documentModule?.openLibrary?.();
+  }
 }
 
 async function exportTranscript(capture) {
-  if (!capture?.transcript.trim()) {
-    setStatus(capture, 'Record speech before exporting a transcript.', true);
+  if (!capture?.transcript.trim() || capture.phase !== 'stopped') {
+    setStatus(capture, 'Stop capture and wait for final transcription before exporting.', true);
     return;
   }
   const title = clean(capture.title) || 'Audio Capture';
   setStatus(capture, 'Exporting transcript to your document library…');
-  render();
   try {
     const document = await createLibraryDocument(`${title} — Transcript`, `# ${title}\n\n## Live Transcript\n\n${capture.transcript.trim()}`);
-    setStatus(capture, `Transcript exported to your document library. Opening it now.`);
+    setStatus(capture, 'Transcript exported. Opening the document now.');
     await openLibraryDocument(document);
   } catch (error) {
     setStatus(capture, `Transcript export failed: ${error.message}`, true);
@@ -717,26 +693,23 @@ async function exportTranscript(capture) {
 }
 
 async function exportBrief(capture) {
-  if (!capture?.transcript.trim()) {
-    setStatus(capture, 'Record speech before generating a Meeting Brief.', true);
+  if (!capture?.transcript.trim() || capture.phase !== 'stopped') {
+    setStatus(capture, 'Stop capture and wait for final transcription before exporting.', true);
     return;
   }
   const title = clean(capture.title) || 'Audio Capture';
   setStatus(capture, 'Generating a grounded Meeting Brief…');
-  render();
   try {
     const response = await fetch(BRIEF_ENDPOINT, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title, transcript: capture.transcript.trim(), focus: '' }),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result?.detail?.message || result?.detail || result?.message || 'Meeting Brief generation failed');
-    const brief = clean(result.brief);
+    const brief = String(result.brief || '').trim();
     if (!brief) throw new Error('The Utility model returned an empty Meeting Brief');
     const document = await createLibraryDocument(`${title} — Meeting Brief`, brief);
-    setStatus(capture, 'Meeting Brief exported to your document library. Opening it now.');
+    setStatus(capture, 'Meeting Brief exported. Opening the document now.');
     await openLibraryDocument(document);
   } catch (error) {
     setStatus(capture, `Meeting Brief export failed: ${error.message}`, true);
@@ -747,9 +720,14 @@ async function exportBrief(capture) {
 async function closeCapture(captureId) {
   const capture = captures.get(captureId);
   if (!capture) return;
-  if (capture.phase === 'recording' || capture.phase === 'stopping') {
-    const message = 'Stop this live capture and close the tab? Unexported transcript text will be discarded.';
-    const accepted = window.uiModule?.styledConfirm ? await window.uiModule.styledConfirm(message, { confirmText: 'Stop and close' }) : window.confirm(message);
+  const hasUnexportedTranscript = !!capture.transcript.trim();
+  if (capture.phase === 'recording' || capture.phase === 'stopping' || hasUnexportedTranscript) {
+    const message = capture.phase === 'recording' || capture.phase === 'stopping'
+      ? 'Stop this live capture and close the tab? Unexported transcript text will be discarded.'
+      : 'Close this Audio Capture tab? Its unexported transcript text will be discarded.';
+    const accepted = window.uiModule?.styledConfirm
+      ? await window.uiModule.styledConfirm(message, { confirmText: 'Close capture' })
+      : window.confirm(message);
     if (!accepted) return;
   }
   stopBrowserRecognition(capture);
@@ -758,7 +736,7 @@ async function closeCapture(captureId) {
   releaseMicrophone(capture);
   captures.delete(captureId);
   if (activeCaptureId === captureId) deactivateCapture();
-  ensureTabChrome();
+  queueTabSync();
   if (!captures.size) document.querySelector('.workspace-tab[data-tab-id="home"]')?.click();
 }
 
@@ -779,7 +757,7 @@ function augmentNewTabWizard() {
   const audioFields = document.createElement('div');
   audioFields.dataset.audioCaptureFields = 'true';
   audioFields.hidden = true;
-  audioFields.innerHTML = '<label>Meeting title</label><input name="audio_capture_title" autocomplete="off" placeholder="Weekly project review"><div class="venture-muted" style="margin-top:8px">This opens an in-app Audio Capture tab. Microphone access is requested only when you start recording.</div>';
+  audioFields.innerHTML = '<label>Meeting title</label><input name="audio_capture_title" autocomplete="off" placeholder="Weekly project review"><div class="venture-muted" style="margin-top:8px">No microphone permission is requested until you press Start capture in the new tab.</div>';
   questFields.after(audioFields);
 
   const sync = () => {
@@ -799,7 +777,7 @@ function augmentNewTabWizard() {
     const title = clean(audioFields.querySelector('[name="audio_capture_title"]')?.value) || 'Audio Capture';
     modal.remove();
     backdrop.remove();
-    window.dispatchEvent(new CustomEvent('argos:open-meeting-capture', { detail: { title } }));
+    openWorkspaceCapture({ title });
   }, true);
   modal.dataset.audioCaptureAugmented = '1';
 }
@@ -819,30 +797,25 @@ function wrapVentureWizard() {
 
 function init() {
   installStyles();
+  const installWizard = () => {
+    if (!wrapVentureWizard()) setTimeout(installWizard, 250);
+  };
+  installWizard();
   document.addEventListener('odysseus:workspace-tab-activated', event => {
     if (event.detail?.kind !== 'meeting') deactivateCapture();
+    queueTabSync();
   });
-  window.addEventListener('argos:open-meeting-capture', event => openWorkspaceCapture(event.detail || {}));
+  document.addEventListener('odysseus:session-selected', queueTabSync);
+  document.addEventListener('odysseus:session-materialized', queueTabSync);
+  document.addEventListener('argos-venture:quest-registry-updated', queueTabSync);
   window.addEventListener('pagehide', () => {
-    for (const capture of captures.values()) {
+    captures.forEach(capture => {
       stopBrowserRecognition(capture);
       stopActiveSegment(capture);
       stopTimer(capture);
       releaseMicrophone(capture);
-    }
+    });
   });
-  const install = () => {
-    if (!wrapVentureWizard()) window.setTimeout(install, 250);
-    else augmentNewTabWizard();
-  };
-  install();
-  const target = document.body || document.documentElement;
-  if (target && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(() => {
-      ensureTabChrome();
-      augmentNewTabWizard();
-    }).observe(target, { childList: true, subtree: true });
-  }
 }
 
 const meetingCaptureModule = { openWorkspaceCapture, activateCapture, deactivateCapture, closeCapture };
