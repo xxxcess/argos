@@ -1,13 +1,16 @@
-// Argos Venture Audio Capture workspace tab.
+// Argos Venture Live Capture workspace tab.
 //
-// Capture is opt-in and scoped to an explicit recording run. A late browser-STT
-// or server-STT callback from a stopped, closed, or superseded run is ignored.
+// A Live Capture is a normal persisted Argos session with mode=live_capture.
+// Each finalized timestamped transcript segment is stored as a ChatMessage.
+// The browser microphone prompt is the only permission gate and runs only after
+// the user presses Start recording.
 
 const STT_STATS_ENDPOINT = '/api/stt/stats';
 const STT_ENDPOINT = '/api/stt/transcribe';
 const BRIEF_ENDPOINT = '/api/meeting-briefs/generate';
 const DOCUMENT_ENDPOINT = '/api/document';
-const SEGMENT_MS = 10_000;
+const LIVE_CAPTURE_ENDPOINT = '/api/meeting-briefs/live-captures';
+const SEGMENT_MS = 15_000;
 const MAX_TRANSCRIPT_CHARS = 120_000;
 
 const captures = new Map();
@@ -18,7 +21,7 @@ let rootWired = false;
 let tabSyncQueued = false;
 
 function makeId() {
-  return window.crypto?.randomUUID?.() || `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return window.crypto?.randomUUID?.() || `live-capture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function escapeSelector(value) {
@@ -28,6 +31,10 @@ function escapeSelector(value) {
 
 function clean(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function titleForSession(title) {
+  return `Live Capture — ${clean(title) || 'Live Capture'}`;
 }
 
 function elapsedMs(capture) {
@@ -44,8 +51,8 @@ function formatElapsed(milliseconds) {
     : `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
 }
 
-function timestamp(capture) {
-  return `[${formatElapsed(elapsedMs(capture))}]`;
+function timestamp(offsetMs) {
+  return `[${formatElapsed(offsetMs)}]`;
 }
 
 function microphoneIcon() {
@@ -56,16 +63,15 @@ function recordIcon() {
   return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/></svg>';
 }
 
-function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
+function newCapture({ captureId = makeId(), title = 'Live Capture', sessionId = null } = {}) {
   return {
     captureId,
-    title: clean(title) || 'Audio Capture',
-    transcript: '',
-    interim: '',
+    sessionId,
+    title: clean(title) || 'Live Capture',
+    segments: [],
     phase: 'idle', // idle | recording | paused | stopping | stopped
     provider: 'unchecked',
     language: '',
-    consent: false,
     elapsedMs: 0,
     runningSince: 0,
     stream: null,
@@ -74,6 +80,7 @@ function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
     segmentTimer: 0,
     segmentQueue: [],
     draining: false,
+    starting: false,
     timer: 0,
     audioContext: null,
     analyser: null,
@@ -82,7 +89,10 @@ function newCapture({ captureId = makeId(), title = 'Audio Capture' } = {}) {
     runId: 0,
     activeRunId: 0,
     closed: false,
-    status: 'This tab is idle. No microphone access is requested until Start capture.',
+    sessionCreating: false,
+    sessionCreateFailed: false,
+    titleSaveTimer: 0,
+    status: 'Ready. Start recording when you want the browser to request microphone access.',
     statusError: false,
   };
 }
@@ -91,65 +101,8 @@ function activeCapture() {
   return activeCaptureId ? captures.get(activeCaptureId) || null : null;
 }
 
-function installStyles() {
-  if (document.getElementById('meeting-capture-workspace-style')) return;
-  const style = document.createElement('style');
-  style.id = 'meeting-capture-workspace-style';
-  style.textContent = `
-    #meeting-capture-workspace { position:fixed; inset:var(--workspace-shell-h,0px) 0 0 0; z-index:35; display:none; grid-template-rows:auto minmax(0,1fr) auto; background:var(--bg,#17191d); color:var(--fg,#e8eaed); transition:right .15s ease,left .15s ease; }
-    body.workspace-meeting-capture-active #meeting-capture-workspace { display:grid; }
-    body.workspace-meeting-capture-active #chat-container { visibility:hidden; pointer-events:none; }
-    body.workspace-meeting-capture-active #sidebar, body.workspace-meeting-capture-active #icon-rail, body.workspace-meeting-capture-active #sidebar-toggle, body.workspace-meeting-capture-active #sidebar-collapse, body.workspace-meeting-capture-active [data-sidebar-toggle], body.workspace-meeting-capture-active [data-sidebar-collapse] { visibility:hidden!important; pointer-events:none!important; }
-    .meeting-capture-head { display:flex; justify-content:flex-end; align-items:center; gap:14px; min-width:0; padding:14px 24px; border-bottom:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
-    .meeting-capture-title-input { order:-1; flex:1; max-width:720px; min-width:160px; padding:8px 10px; border:1px solid var(--border,#3a3f47); border-radius:7px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; }
-    .meeting-capture-state { display:inline-flex; align-items:center; gap:7px; font-size:12px; white-space:nowrap; opacity:.82; }
-    .meeting-capture-state::before { content:''; width:9px; height:9px; border-radius:999px; background:var(--border,#646a73); }
-    .meeting-capture-state[data-phase="recording"]::before { background:var(--red,#e06c75); box-shadow:0 0 0 5px color-mix(in srgb,var(--red,#e06c75) 20%,transparent); }
-    .meeting-capture-state[data-phase="paused"]::before { background:#e5c07b; }
-    .meeting-capture-main { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(230px,300px); gap:18px; padding:20px 24px; overflow:hidden; }
-    .meeting-capture-transcript-card, .meeting-capture-details { min-height:0; border:1px solid var(--border,#3a3f47); border-radius:12px; background:var(--panel,#21252b); }
-    .meeting-capture-transcript-card { display:flex; flex-direction:column; overflow:hidden; }
-    .meeting-capture-transcript-head { display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--border,#3a3f47); font-size:12px; }
-    .meeting-capture-transcript-head span { opacity:.6; }
-    .meeting-capture-log { flex:1; overflow:auto; padding:18px 20px; font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; white-space:pre-wrap; }
-    .meeting-capture-log pre { margin:0; font:inherit; white-space:pre-wrap; }
-    .meeting-capture-empty { margin:0; color:var(--muted,#a4a8ae); font-family:var(--font-family,system-ui,sans-serif); opacity:.72; }
-    .meeting-capture-interim { display:block; margin-top:10px; opacity:.52; font-style:italic; }
-    .meeting-capture-details { padding:16px; overflow:auto; }
-    .meeting-capture-details h2 { margin:0 0 10px; font-size:13px; }
-    .meeting-capture-details p { margin:0 0 12px; font-size:12px; line-height:1.5; opacity:.72; }
-    .meeting-capture-consent { display:flex; align-items:flex-start; gap:8px; padding:10px; border:1px solid color-mix(in srgb,var(--border,#3a3f47) 75%,transparent); border-radius:8px; font-size:12px; line-height:1.4; }
-    .meeting-capture-consent input { margin-top:2px; }
-    .meeting-capture-provider { margin-top:14px; padding-top:14px; border-top:1px solid var(--border,#3a3f47); font-size:12px; }
-    .meeting-capture-provider strong { display:block; margin-bottom:4px; }
-    .meeting-capture-footer { display:grid; gap:10px; padding:12px 24px 14px; border-top:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
-    .meeting-recorder-readout { display:flex; align-items:center; gap:14px; min-width:0; }
-    .meeting-recorder-time { flex:0 0 auto; font:600 24px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; white-space:nowrap; }
-    .meeting-waveform { height:28px; width:100%; min-width:0; border-radius:6px; background:color-mix(in srgb,var(--bg,#17191d) 65%,transparent); }
-    .meeting-capture-control-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
-    .meeting-recorder-controls, .meeting-capture-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
-    .meeting-recorder-controls button, .meeting-capture-actions button { border:1px solid var(--border,#3a3f47); border-radius:8px; padding:9px 12px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; font-size:12px; cursor:pointer; }
-    .meeting-recorder-controls button:disabled, .meeting-capture-actions button:disabled { cursor:not-allowed; opacity:.45; }
-    .meeting-record-btn { min-width:112px; color:white!important; border-color:var(--red,#e06c75)!important; background:var(--red,#e06c75)!important; }
-    .meeting-stop-btn { color:white!important; border-color:#4b5058!important; background:#4b5058!important; }
-    .meeting-recorder-controls svg { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2; vertical-align:-2px; margin-right:4px; }
-    .meeting-record-btn svg { fill:currentColor; stroke:none; }
-    .meeting-capture-actions .primary { border-color:var(--accent,var(--red,#e06c75)); background:color-mix(in srgb,var(--accent,var(--red,#e06c75)) 18%,var(--bg)); }
-    .meeting-capture-status { min-height:1.25em; font-size:11px; opacity:.75; }
-    .meeting-capture-status[data-error="true"] { color:var(--red,#e06c75); opacity:1; }
-    .workspace-tab.meeting-capture-tab .workspace-tab-icon svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; }
-    .workspace-tab.meeting-capture-tab[data-state="recording"] .workspace-tab-state { display:block; background:var(--red,#e06c75); }
-    @media (max-width:820px) {
-      #meeting-capture-workspace { inset:var(--workspace-shell-h,0px) 0 0 0!important; }
-      .meeting-capture-head { padding:12px 14px; }
-      .meeting-capture-main { grid-template-columns:1fr; padding:12px; overflow:auto; }
-      .meeting-capture-transcript-card { min-height:42vh; }
-      .meeting-capture-footer { padding:12px; }
-      .meeting-capture-control-row { align-items:stretch; }
-      .meeting-recorder-controls, .meeting-capture-actions { width:100%; }
-    }
-  `;
-  document.head.appendChild(style);
+function transcript(capture) {
+  return capture.segments.map(segment => segment.content).join('\n');
 }
 
 function setStatus(capture, message, isError = false) {
@@ -160,33 +113,94 @@ function setStatus(capture, message, isError = false) {
 }
 
 function phaseLabel(phase) {
-  return ({ idle: 'Ready to capture', recording: 'Recording live', paused: 'Capture paused', stopping: 'Finishing transcript', stopped: 'Transcript ready' })[phase] || 'Ready to capture';
+  return ({
+    idle: 'Ready to record',
+    recording: 'Recording',
+    paused: 'Recording paused',
+    stopping: 'Finishing transcription',
+    stopped: 'Transcript ready',
+  })[phase] || 'Ready to record';
 }
 
-function isCurrentRun(capture, runId, { allowStopping = false } = {}) {
+function isCurrentRun(capture, runId, { allowPaused = false, allowStopping = false } = {}) {
   if (!capture || capture.closed || captures.get(capture.captureId) !== capture) return false;
   if (capture.activeRunId !== runId) return false;
-  return capture.phase === 'recording' || (allowStopping && capture.phase === 'stopping');
+  return capture.phase === 'recording'
+    || (allowPaused && capture.phase === 'paused')
+    || (allowStopping && capture.phase === 'stopping');
+}
+
+function installStyles() {
+  if (document.getElementById('live-capture-workspace-style')) return;
+  const style = document.createElement('style');
+  style.id = 'live-capture-workspace-style';
+  style.textContent = `
+    #live-capture-workspace { position:fixed; inset:var(--workspace-shell-h,0px) 0 0 0; z-index:35; display:none; grid-template-rows:auto minmax(0,1fr) auto; background:var(--bg,#17191d); color:var(--fg,#e8eaed); transition:right .15s ease,left .15s ease; }
+    body.workspace-live-capture-active #live-capture-workspace { display:grid; }
+    body.workspace-live-capture-active #chat-container { visibility:hidden; pointer-events:none; }
+    body.workspace-live-capture-active #sidebar, body.workspace-live-capture-active #icon-rail, body.workspace-live-capture-active #sidebar-toggle, body.workspace-live-capture-active #sidebar-collapse, body.workspace-live-capture-active [data-sidebar-toggle], body.workspace-live-capture-active [data-sidebar-collapse] { visibility:hidden!important; pointer-events:none!important; }
+    .live-capture-head { display:flex; align-items:center; gap:14px; padding:14px 24px; border-bottom:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
+    .live-capture-title { flex:1; min-width:160px; max-width:720px; padding:8px 10px; border:1px solid var(--border,#3a3f47); border-radius:7px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; }
+    .live-capture-state { display:inline-flex; align-items:center; gap:7px; font-size:12px; white-space:nowrap; opacity:.82; }
+    .live-capture-state::before { content:''; width:9px; height:9px; border-radius:999px; background:var(--border,#646a73); }
+    .live-capture-state[data-phase="recording"]::before { background:var(--red,#e06c75); box-shadow:0 0 0 5px color-mix(in srgb,var(--red,#e06c75) 20%,transparent); }
+    .live-capture-state[data-phase="paused"]::before { background:#e5c07b; }
+    .live-capture-main { min-height:0; padding:20px 24px; overflow:hidden; }
+    .live-capture-transcript-card { height:100%; min-height:0; display:flex; flex-direction:column; overflow:hidden; border:1px solid var(--border,#3a3f47); border-radius:12px; background:var(--panel,#21252b); }
+    .live-capture-transcript-head { display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--border,#3a3f47); font-size:12px; }
+    .live-capture-transcript-head span { opacity:.6; }
+    .live-capture-log { flex:1; overflow:auto; padding:18px 20px; font:14px/1.7 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; white-space:pre-wrap; }
+    .live-capture-log pre { margin:0; font:inherit; white-space:pre-wrap; }
+    .live-capture-empty { margin:0; color:var(--muted,#a4a8ae); font-family:var(--font-family,system-ui,sans-serif); opacity:.72; }
+    .live-capture-interim { display:block; margin-top:10px; opacity:.52; font-style:italic; }
+    .live-capture-footer { display:grid; gap:10px; padding:12px 24px 14px; border-top:1px solid var(--border,#3a3f47); background:var(--panel,#21252b); }
+    .live-capture-readout { display:flex; align-items:center; gap:14px; min-width:0; }
+    .live-capture-time { flex:0 0 auto; font:600 24px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; white-space:nowrap; }
+    .live-capture-waveform { height:28px; width:100%; min-width:0; border-radius:6px; background:color-mix(in srgb,var(--bg,#17191d) 65%,transparent); }
+    .live-capture-control-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; }
+    .live-capture-recorder-controls, .live-capture-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+    .live-capture-recorder-controls button, .live-capture-actions button { border:1px solid var(--border,#3a3f47); border-radius:8px; padding:9px 12px; background:var(--bg,#17191d); color:var(--fg,#e8eaed); font:inherit; font-size:12px; cursor:pointer; }
+    .live-capture-recorder-controls button:disabled, .live-capture-actions button:disabled { cursor:not-allowed; opacity:.45; }
+    .live-capture-record-btn { min-width:118px; color:white!important; border-color:var(--red,#e06c75)!important; background:var(--red,#e06c75)!important; }
+    .live-capture-stop-btn { color:white!important; border-color:#4b5058!important; background:#4b5058!important; }
+    .live-capture-recorder-controls svg { width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2; vertical-align:-2px; margin-right:4px; }
+    .live-capture-record-btn svg { fill:currentColor; stroke:none; }
+    .live-capture-actions .primary { border-color:var(--accent,var(--red,#e06c75)); background:color-mix(in srgb,var(--accent,var(--red,#e06c75)) 18%,var(--bg)); }
+    .live-capture-status { min-height:1.25em; font-size:11px; opacity:.75; }
+    .live-capture-status[data-error="true"] { color:var(--red,#e06c75); opacity:1; }
+    .workspace-tab.live-capture-tab .workspace-tab-icon svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; }
+    .workspace-tab.live-capture-tab[data-state="recording"] .workspace-tab-state { display:block; background:var(--red,#e06c75); }
+    @media (max-width:820px) {
+      #live-capture-workspace { inset:var(--workspace-shell-h,0px) 0 0 0!important; }
+      .live-capture-head { padding:12px 14px; }
+      .live-capture-main { padding:12px; }
+      .live-capture-footer { padding:12px; }
+      .live-capture-control-row { align-items:stretch; }
+      .live-capture-recorder-controls, .live-capture-actions { width:100%; }
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 function renderTranscript(capture, log) {
   log.replaceChildren();
-  if (!capture.transcript && !capture.interim) {
+  const saved = transcript(capture);
+  if (!saved && !capture.interim) {
     const empty = document.createElement('p');
-    empty.className = 'meeting-capture-empty';
-    empty.textContent = 'Your live transcript will appear here after you start capture.';
+    empty.className = 'live-capture-empty';
+    empty.textContent = 'Start recording to create a persisted, timestamped transcript.';
     log.appendChild(empty);
     return;
   }
-  if (capture.transcript) {
+  if (saved) {
     const final = document.createElement('pre');
-    final.textContent = capture.transcript;
+    final.textContent = saved;
     log.appendChild(final);
   }
   if (capture.interim && capture.phase === 'recording') {
     const interim = document.createElement('span');
-    interim.className = 'meeting-capture-interim';
-    interim.textContent = `${capture.transcript ? '\n' : ''}${timestamp(capture)} ${capture.interim}`;
+    interim.className = 'live-capture-interim';
+    interim.textContent = `${saved ? '\n' : ''}${timestamp(elapsedMs(capture))} ${capture.interim}`;
     log.appendChild(interim);
   }
   log.scrollTop = log.scrollHeight;
@@ -196,39 +210,33 @@ function ensureRoot() {
   installStyles();
   if (root) return root;
   root = document.createElement('main');
-  root.id = 'meeting-capture-workspace';
-  root.setAttribute('aria-label', 'Audio capture workspace');
+  root.id = 'live-capture-workspace';
+  root.setAttribute('aria-label', 'Live Capture workspace');
   root.innerHTML = `
-    <header class="meeting-capture-head">
-      <input id="meeting-capture-title" class="meeting-capture-title-input" type="text" maxlength="180" placeholder="Meeting title" aria-label="Meeting title" />
-      <div id="meeting-capture-state" class="meeting-capture-state" data-phase="idle">Ready to capture</div>
+    <header class="live-capture-head">
+      <input id="live-capture-title" class="live-capture-title" type="text" maxlength="180" placeholder="Live Capture title" aria-label="Live Capture title" />
+      <div id="live-capture-state" class="live-capture-state" data-phase="idle">Ready to record</div>
     </header>
-    <section class="meeting-capture-main">
-      <article class="meeting-capture-transcript-card">
-        <div class="meeting-capture-transcript-head"><strong>Transcript</strong><span id="meeting-capture-character-count">0 characters</span></div>
-        <div id="meeting-capture-log" class="meeting-capture-log" aria-live="polite"></div>
+    <section class="live-capture-main">
+      <article class="live-capture-transcript-card">
+        <div class="live-capture-transcript-head"><strong>Transcript</strong><span id="live-capture-character-count">0 characters</span></div>
+        <div id="live-capture-log" class="live-capture-log" aria-live="polite"></div>
       </article>
-      <aside class="meeting-capture-details">
-        <h2>Capture settings</h2>
-        <p>This tab does not access your microphone until you check consent and press Start capture.</p>
-        <label class="meeting-capture-consent"><input id="meeting-capture-consent" type="checkbox" /><span>I have consent and authority to capture and transcribe this meeting.</span></label>
-        <div class="meeting-capture-provider"><strong>Speech-to-text</strong><span id="meeting-capture-provider">Check consent to verify configuration.</span></div>
-      </aside>
     </section>
-    <footer class="meeting-capture-footer">
-      <div class="meeting-recorder-readout"><span id="meeting-capture-time" class="meeting-recorder-time">00:00</span><canvas id="meeting-capture-waveform" class="meeting-waveform" aria-label="Microphone activity"></canvas></div>
-      <div class="meeting-capture-control-row">
-        <div class="meeting-recorder-controls">
-          <button id="meeting-capture-record" class="meeting-record-btn" type="button">${recordIcon()}<span>Start capture</span></button>
-          <button id="meeting-capture-pause" type="button" disabled>Pause</button>
-          <button id="meeting-capture-stop" class="meeting-stop-btn" type="button" disabled>Stop</button>
+    <footer class="live-capture-footer">
+      <div class="live-capture-readout"><span id="live-capture-time" class="live-capture-time">00:00</span><canvas id="live-capture-waveform" class="live-capture-waveform" aria-label="Microphone activity"></canvas></div>
+      <div class="live-capture-control-row">
+        <div class="live-capture-recorder-controls">
+          <button id="live-capture-record" class="live-capture-record-btn" type="button">${recordIcon()}<span>Start recording</span></button>
+          <button id="live-capture-pause" type="button" disabled>Pause</button>
+          <button id="live-capture-stop" class="live-capture-stop-btn" type="button" disabled>Stop</button>
         </div>
-        <div class="meeting-capture-actions">
-          <button id="meeting-capture-export-transcript" type="button">Export transcript</button>
-          <button id="meeting-capture-export-brief" class="primary" type="button">Generate & export brief</button>
+        <div class="live-capture-actions">
+          <button id="live-capture-export-transcript" type="button">Export transcript</button>
+          <button id="live-capture-export-brief" class="primary" type="button">Generate & export brief</button>
         </div>
       </div>
-      <div id="meeting-capture-status" class="meeting-capture-status" aria-live="polite"></div>
+      <div id="live-capture-status" class="live-capture-status" aria-live="polite"></div>
     </footer>
   `;
   document.body.appendChild(root);
@@ -239,66 +247,51 @@ function ensureRoot() {
 function wireRoot() {
   if (rootWired || !root) return;
   rootWired = true;
-  const title = root.querySelector('#meeting-capture-title');
-  const consent = root.querySelector('#meeting-capture-consent');
-  root.querySelector('#meeting-capture-record')?.addEventListener('click', async () => {
+  const title = root.querySelector('#live-capture-title');
+  root.querySelector('#live-capture-record')?.addEventListener('click', async () => {
     const capture = activeCapture();
     if (capture?.phase === 'paused') await resumeCapture(capture);
     else await startCapture(capture);
   });
-  root.querySelector('#meeting-capture-pause')?.addEventListener('click', () => pauseCapture(activeCapture()));
-  root.querySelector('#meeting-capture-stop')?.addEventListener('click', () => stopCapture(activeCapture()));
-  root.querySelector('#meeting-capture-export-transcript')?.addEventListener('click', () => exportTranscript(activeCapture()));
-  root.querySelector('#meeting-capture-export-brief')?.addEventListener('click', () => exportBrief(activeCapture()));
+  root.querySelector('#live-capture-pause')?.addEventListener('click', () => pauseCapture(activeCapture()));
+  root.querySelector('#live-capture-stop')?.addEventListener('click', () => stopCapture(activeCapture()));
+  root.querySelector('#live-capture-export-transcript')?.addEventListener('click', () => exportTranscript(activeCapture()));
+  root.querySelector('#live-capture-export-brief')?.addEventListener('click', () => exportBrief(activeCapture()));
   title?.addEventListener('input', () => {
     const capture = activeCapture();
     if (!capture) return;
-    capture.title = clean(title.value) || 'Audio Capture';
+    capture.title = clean(title.value) || 'Live Capture';
+    scheduleTitlePersist(capture);
     queueTabSync();
-  });
-  consent?.addEventListener('change', async () => {
-    const capture = activeCapture();
-    if (!capture) return;
-    capture.consent = !!consent.checked;
-    if (capture.consent && capture.provider === 'unchecked') await loadSttConfiguration(capture);
-    render();
   });
 }
 
 function render() {
   const capture = activeCapture();
   if (!capture || !root) return;
-  const title = root.querySelector('#meeting-capture-title');
-  const consent = root.querySelector('#meeting-capture-consent');
-  const state = root.querySelector('#meeting-capture-state');
-  const provider = root.querySelector('#meeting-capture-provider');
-  const record = root.querySelector('#meeting-capture-record');
-  const pause = root.querySelector('#meeting-capture-pause');
-  const stop = root.querySelector('#meeting-capture-stop');
-  const exportTranscriptButton = root.querySelector('#meeting-capture-export-transcript');
-  const exportBriefButton = root.querySelector('#meeting-capture-export-brief');
+  const title = root.querySelector('#live-capture-title');
+  const state = root.querySelector('#live-capture-state');
+  const record = root.querySelector('#live-capture-record');
+  const pause = root.querySelector('#live-capture-pause');
+  const stop = root.querySelector('#live-capture-stop');
+  const exportTranscriptButton = root.querySelector('#live-capture-export-transcript');
+  const exportBriefButton = root.querySelector('#live-capture-export-brief');
   if (document.activeElement !== title) title.value = capture.title;
-  consent.checked = capture.consent;
   state.dataset.phase = capture.phase;
   state.textContent = phaseLabel(capture.phase);
-  provider.textContent = capture.provider === 'unchecked' ? 'Check consent to verify configuration.'
-    : capture.provider === 'loading' ? 'Checking configuration…'
-    : capture.provider === 'browser' ? 'Browser speech recognition'
-    : capture.provider === 'disabled' ? 'Speech-to-text is not configured'
-    : `Argos ${capture.provider} provider`;
-  renderTranscript(capture, root.querySelector('#meeting-capture-log'));
-  root.querySelector('#meeting-capture-character-count').textContent = `${capture.transcript.length.toLocaleString()} characters`;
-  root.querySelector('#meeting-capture-time').textContent = formatElapsed(elapsedMs(capture));
-  const status = root.querySelector('#meeting-capture-status');
+  renderTranscript(capture, root.querySelector('#live-capture-log'));
+  const transcriptText = transcript(capture);
+  root.querySelector('#live-capture-character-count').textContent = `${transcriptText.length.toLocaleString()} characters`;
+  root.querySelector('#live-capture-time').textContent = formatElapsed(elapsedMs(capture));
+  const status = root.querySelector('#live-capture-status');
   status.textContent = capture.status;
   status.dataset.error = capture.statusError ? 'true' : 'false';
-  const providerReady = ['browser', 'local', 'endpoint'].includes(capture.provider);
   const anotherCaptureIsRecording = !!activeRecordingId && activeRecordingId !== capture.captureId;
-  record.disabled = !capture.consent || !providerReady || capture.phase === 'recording' || capture.phase === 'stopping' || anotherCaptureIsRecording;
-  record.querySelector('span').textContent = capture.phase === 'paused' ? 'Resume capture' : 'Start capture';
+  record.disabled = capture.starting || capture.phase === 'recording' || capture.phase === 'stopping' || anotherCaptureIsRecording;
+  record.querySelector('span').textContent = capture.phase === 'paused' ? 'Resume recording' : 'Start recording';
   pause.disabled = capture.phase !== 'recording';
   stop.disabled = !['recording', 'paused', 'stopping'].includes(capture.phase);
-  const canExport = capture.phase === 'stopped' && !!capture.transcript.trim();
+  const canExport = capture.phase === 'stopped' && !!transcriptText.trim();
   exportTranscriptButton.disabled = !canExport;
   exportBriefButton.disabled = !canExport;
   queueTabSync();
@@ -316,18 +309,18 @@ function queueTabSync() {
 function ensureTabChrome() {
   const list = document.getElementById('workspace-tab-list');
   if (!list) return;
-  list.querySelectorAll('.meeting-capture-tab').forEach(tab => {
+  list.querySelectorAll('.live-capture-tab').forEach(tab => {
     if (!captures.has(tab.dataset.captureId)) tab.remove();
   });
   captures.forEach(capture => {
-    let tab = list.querySelector(`.meeting-capture-tab[data-capture-id="${escapeSelector(capture.captureId)}"]`);
+    let tab = list.querySelector(`.live-capture-tab[data-capture-id="${escapeSelector(capture.captureId)}"]`);
     if (!tab) {
       tab = document.createElement('div');
-      tab.className = 'workspace-tab meeting-capture-tab';
+      tab.className = 'workspace-tab live-capture-tab';
       tab.dataset.captureId = capture.captureId;
-      tab.dataset.tabId = `meeting:${capture.captureId}`;
+      tab.dataset.tabId = `live-capture:${capture.captureId}`;
       tab.setAttribute('role', 'tab');
-      tab.innerHTML = `<span class="workspace-tab-icon">${microphoneIcon()}</span><span class="workspace-tab-title"></span><span class="workspace-tab-state" aria-hidden="true"></span><span class="workspace-tab-close-wrap"><button type="button" class="workspace-tab-close" aria-label="Close audio capture tab">&times;</button></span>`;
+      tab.innerHTML = `<span class="workspace-tab-icon">${microphoneIcon()}</span><span class="workspace-tab-title"></span><span class="workspace-tab-state" aria-hidden="true"></span><span class="workspace-tab-close-wrap"><button type="button" class="workspace-tab-close" aria-label="Close Live Capture tab">&times;</button></span>`;
       tab.addEventListener('click', event => {
         if (!event.target.closest('.workspace-tab-close')) activateCapture(capture.captureId);
       });
@@ -349,21 +342,20 @@ function ensureTabChrome() {
     tab.setAttribute('aria-selected', String(capture.captureId === activeCaptureId));
     tab.tabIndex = capture.captureId === activeCaptureId ? 0 : -1;
   });
-  if (activeCaptureId) list.querySelectorAll('.workspace-tab:not(.meeting-capture-tab)').forEach(tab => tab.setAttribute('aria-selected', 'false'));
+  if (activeCaptureId) list.querySelectorAll('.workspace-tab:not(.live-capture-tab)').forEach(tab => tab.setAttribute('aria-selected', 'false'));
 }
 
 function setHomeOnlyControlsHidden(hidden) {
-  const candidates = document.querySelectorAll('button, [role="button"]');
-  candidates.forEach(element => {
-    if (element.closest('#meeting-capture-workspace, #workspace-shell, #doc-editor-pane')) return;
+  document.querySelectorAll('button, [role="button"]').forEach(element => {
+    if (element.closest('#live-capture-workspace, #workspace-shell, #doc-editor-pane')) return;
     const label = `${element.id || ''} ${element.className || ''} ${element.title || ''} ${element.getAttribute('aria-label') || ''}`.toLowerCase();
-    if (!/(sidebar|collapse)/.test(label)) return;
+    if (!/(sidebar|collapse|hamburger)/.test(label)) return;
     if (hidden) {
-      element.dataset.captureHiddenControl = '1';
+      element.dataset.liveCaptureHiddenControl = '1';
       element.style.visibility = 'hidden';
       element.style.pointerEvents = 'none';
-    } else if (element.dataset.captureHiddenControl === '1') {
-      delete element.dataset.captureHiddenControl;
+    } else if (element.dataset.liveCaptureHiddenControl === '1') {
+      delete element.dataset.liveCaptureHiddenControl;
       element.style.visibility = '';
       element.style.pointerEvents = '';
     }
@@ -371,7 +363,7 @@ function setHomeOnlyControlsHidden(hidden) {
 }
 
 function documentPaneOffset() {
-  if (!root) return;
+  if (!root || !document.body.classList.contains('workspace-live-capture-active')) return;
   const pane = document.getElementById('doc-editor-pane');
   if (!pane || pane.getBoundingClientRect().width < 80) {
     root.style.left = '0';
@@ -393,7 +385,7 @@ function activateCapture(captureId) {
   if (!capture) return;
   activeCaptureId = captureId;
   ensureRoot();
-  document.body.classList.add('workspace-meeting-capture-active');
+  document.body.classList.add('workspace-live-capture-active');
   root.removeAttribute('aria-hidden');
   setHomeOnlyControlsHidden(true);
   documentPaneOffset();
@@ -404,17 +396,46 @@ function deactivateCapture() {
   const capture = activeCapture();
   if (capture && ['recording', 'paused', 'stopping'].includes(capture.phase)) stopCapture(capture);
   activeCaptureId = null;
-  document.body.classList.remove('workspace-meeting-capture-active');
+  document.body.classList.remove('workspace-live-capture-active');
   root?.setAttribute('aria-hidden', 'true');
-  root && (root.style.left = root.style.right = '0');
+  if (root) root.style.left = root.style.right = '0';
   setHomeOnlyControlsHidden(false);
   queueTabSync();
 }
 
-function openWorkspaceCapture({ title = 'Audio Capture' } = {}) {
+async function createPersistedSession(capture) {
+  if (!capture || capture.sessionId || capture.sessionCreating || capture.closed) return capture?.sessionId || null;
+  capture.sessionCreating = true;
+  capture.sessionCreateFailed = false;
+  setStatus(capture, 'Creating persistent Live Capture session…');
+  try {
+    const response = await fetch(LIVE_CAPTURE_ENDPOINT, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: capture.title }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result?.detail?.message || result?.detail || result?.message || 'Could not create Live Capture session');
+    capture.sessionId = result.session_id;
+    setStatus(capture, 'Live Capture session ready. Start recording when ready.');
+    await flushPendingSegments(capture);
+    try { await window.sessionModule?.loadSessions?.(); } catch (_) {}
+  } catch (error) {
+    capture.sessionCreateFailed = true;
+    setStatus(capture, `Transcript persistence is unavailable: ${error.message}`, true);
+  } finally {
+    capture.sessionCreating = false;
+    if (capture.captureId === activeCaptureId) render();
+  }
+  return capture.sessionId;
+}
+
+function openWorkspaceCapture({ title = 'Live Capture' } = {}) {
   const capture = newCapture({ title });
   captures.set(capture.captureId, capture);
   activateCapture(capture.captureId);
+  void createPersistedSession(capture);
   return capture.captureId;
 }
 
@@ -423,7 +444,7 @@ function browserRecognitionSupported() {
 }
 
 async function loadSttConfiguration(capture) {
-  if (!capture || capture.provider === 'loading') return;
+  if (!capture || capture.provider === 'loading') return capture?.provider;
   capture.provider = 'loading';
   setStatus(capture, 'Checking Speech-to-Text configuration…');
   try {
@@ -437,26 +458,82 @@ async function loadSttConfiguration(capture) {
   }
   if (capture.provider === 'disabled') setStatus(capture, 'Configure browser, local, or endpoint Speech-to-Text in Settings before recording.', true);
   else if (capture.provider === 'browser' && !browserRecognitionSupported()) setStatus(capture, 'Browser recognition is unavailable. Configure local or endpoint Speech-to-Text.', true);
-  else setStatus(capture, 'Ready. Press Start capture when you want to request microphone access.');
+  else setStatus(capture, 'Ready. Start recording to request microphone access.');
   render();
+  return capture.provider;
 }
 
-function appendTranscript(capture, runId, text) {
-  if (!isCurrentRun(capture, runId, { allowStopping: true })) return;
-  const sentence = clean(text);
-  if (!sentence) return;
-  capture.transcript = capture.transcript ? `${capture.transcript}\n${timestamp(capture)} ${sentence}` : `${timestamp(capture)} ${sentence}`;
-  if (capture.transcript.length > MAX_TRANSCRIPT_CHARS) {
-    capture.transcript = capture.transcript.slice(-MAX_TRANSCRIPT_CHARS).trim();
-    setStatus(capture, 'Transcript is limited to its most recent 120,000 characters.', true);
-  }
-  capture.interim = '';
+function addSegment(capture, runId, offsetMs, text) {
+  if (!isCurrentRun(capture, runId, { allowPaused: true, allowStopping: true })) return;
+  const normalized = clean(text);
+  if (!normalized) return;
+  const safeOffset = Math.max(0, Math.floor(offsetMs));
+  const segment = {
+    id: makeId(),
+    offsetMs: safeOffset,
+    text: normalized,
+    content: `${timestamp(safeOffset)} ${normalized}`,
+    persisted: false,
+    persisting: false,
+  };
+  capture.segments.push(segment);
+  while (transcript(capture).length > MAX_TRANSCRIPT_CHARS && capture.segments.length > 1) capture.segments.shift();
+  void persistSegment(capture, segment);
   if (capture.captureId === activeCaptureId) render();
+}
+
+async function persistSegment(capture, segment) {
+  if (!capture || !segment || segment.persisted || segment.persisting || capture.closed) return;
+  if (!capture.sessionId) {
+    if (!capture.sessionCreating) void createPersistedSession(capture);
+    return;
+  }
+  segment.persisting = true;
+  try {
+    const response = await fetch(`${LIVE_CAPTURE_ENDPOINT}/${encodeURIComponent(capture.sessionId)}/segments`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: segment.text, offset_ms: segment.offsetMs, segment_id: segment.id }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result?.detail?.message || result?.detail || result?.message || 'Could not persist transcript segment');
+    segment.content = result.content || segment.content;
+    segment.persisted = true;
+  } catch (error) {
+    segment.persistError = error.message || 'Could not persist transcript segment';
+    setStatus(capture, `Transcript segment is visible but not yet saved: ${segment.persistError}`, true);
+  } finally {
+    segment.persisting = false;
+  }
+}
+
+async function flushPendingSegments(capture) {
+  if (!capture?.sessionId) return;
+  for (const segment of capture.segments) {
+    if (!segment.persisted && !segment.persisting) await persistSegment(capture, segment);
+  }
+}
+
+function scheduleTitlePersist(capture) {
+  if (!capture?.sessionId) return;
+  if (capture.titleSaveTimer) clearTimeout(capture.titleSaveTimer);
+  capture.titleSaveTimer = setTimeout(async () => {
+    try {
+      const form = new FormData();
+      form.append('name', titleForSession(capture.title));
+      await fetch(`/api/session/${encodeURIComponent(capture.sessionId)}`, {
+        method: 'PATCH', credentials: 'same-origin', body: form,
+      });
+    } catch (_) {}
+  }, 500);
 }
 
 function startTimer(capture) {
   if (capture.timer) clearInterval(capture.timer);
-  capture.timer = setInterval(() => { if (capture.captureId === activeCaptureId) render(); }, 250);
+  capture.timer = setInterval(() => {
+    if (capture.captureId === activeCaptureId) render();
+  }, 250);
 }
 
 function stopTimer(capture) {
@@ -475,7 +552,7 @@ function startMeter(capture) {
     capture.audioSource.connect(capture.analyser);
     const draw = () => {
       if (capture.phase !== 'recording' || !capture.analyser) return;
-      const canvas = root?.querySelector('#meeting-capture-waveform');
+      const canvas = root?.querySelector('#live-capture-waveform');
       const context = canvas?.getContext?.('2d');
       if (canvas && context && capture.captureId === activeCaptureId) {
         const values = new Uint8Array(capture.analyser.frequencyBinCount);
@@ -524,13 +601,13 @@ function startBrowserRecognition(capture, runId) {
   recognition.interimResults = true;
   recognition.lang = capture.language || '';
   recognition.onresult = event => {
-    if (!isCurrentRun(capture, runId)) return;
+    if (!isCurrentRun(capture, runId, { allowStopping: true })) return;
     let interim = '';
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
       const text = clean(result[0]?.transcript || '');
       if (!text) continue;
-      if (result.isFinal) appendTranscript(capture, runId, text);
+      if (result.isFinal) addSegment(capture, runId, elapsedMs(capture), text);
       else interim = clean(`${interim} ${text}`);
     }
     if (isCurrentRun(capture, runId)) {
@@ -562,7 +639,7 @@ function preferredMimeType() {
 
 async function transcribeSegment(blob) {
   const data = new FormData();
-  data.append('file', blob, 'audio-capture-segment.webm');
+  data.append('file', blob, 'live-capture-segment.webm');
   const response = await fetch(STT_ENDPOINT, { method: 'POST', credentials: 'same-origin', body: data });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result?.detail?.message || result?.message || 'Transcription failed');
@@ -575,13 +652,13 @@ async function drainQueue(capture) {
   try {
     while (capture.segmentQueue.length) {
       const segment = capture.segmentQueue.shift();
-      if (!segment?.blob?.size || !isCurrentRun(capture, segment.runId, { allowStopping: true })) continue;
+      if (!segment?.blob?.size || !isCurrentRun(capture, segment.runId, { allowPaused: true, allowStopping: true })) continue;
       setStatus(capture, capture.phase === 'stopping' ? 'Transcribing final audio…' : 'Transcribing live audio…');
       try {
         const text = await transcribeSegment(segment.blob);
-        appendTranscript(capture, segment.runId, text);
+        addSegment(capture, segment.runId, segment.startOffsetMs, text);
       } catch (error) {
-        if (isCurrentRun(capture, segment.runId, { allowStopping: true })) setStatus(capture, `A segment could not be transcribed: ${error.message}`, true);
+        if (isCurrentRun(capture, segment.runId, { allowPaused: true, allowStopping: true })) setStatus(capture, `A segment could not be transcribed: ${error.message}`, true);
       }
     }
   } finally {
@@ -593,6 +670,7 @@ async function drainQueue(capture) {
 
 function startServerSegment(capture, runId) {
   if (!capture?.stream || !isCurrentRun(capture, runId)) return;
+  const startOffsetMs = elapsedMs(capture);
   const mimeType = preferredMimeType();
   let recorder;
   try { recorder = new MediaRecorder(capture.stream, mimeType ? { mimeType } : undefined); }
@@ -602,16 +680,18 @@ function startServerSegment(capture, runId) {
   recorder.ondataavailable = event => { if (event.data?.size) chunks.push(event.data); };
   recorder.onstop = () => {
     if (capture.recorder === recorder) capture.recorder = null;
-    if (!isCurrentRun(capture, runId, { allowStopping: true })) return;
+    if (!isCurrentRun(capture, runId, { allowPaused: true, allowStopping: true })) return;
     const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-    if (blob.size) capture.segmentQueue.push({ blob, runId });
-    drainQueue(capture);
+    if (blob.size) capture.segmentQueue.push({ blob, runId, startOffsetMs });
+    void drainQueue(capture);
     if (isCurrentRun(capture, runId)) setTimeout(() => startServerSegment(capture, runId), 0);
     else if (capture.phase === 'stopping' && !capture.segmentQueue.length && !capture.draining) finishStop(capture);
     else if (capture.phase === 'paused' && !capture.segmentQueue.length && !capture.draining) releaseMicrophone(capture);
   };
   recorder.start();
-  capture.segmentTimer = setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, SEGMENT_MS);
+  capture.segmentTimer = setTimeout(() => {
+    if (recorder.state === 'recording') recorder.stop();
+  }, SEGMENT_MS);
 }
 
 function stopActiveSegment(capture) {
@@ -622,33 +702,32 @@ function stopActiveSegment(capture) {
 }
 
 async function startCapture(capture) {
-  if (!capture || capture.phase === 'recording' || capture.phase === 'stopping') return;
-  if (!capture.consent) {
-    setStatus(capture, 'Confirm participant consent before starting capture.', true);
-    return;
-  }
-  if (capture.provider === 'unchecked') await loadSttConfiguration(capture);
-  if (!['browser', 'local', 'endpoint'].includes(capture.provider)) {
-    setStatus(capture, 'Configure an available Speech-to-Text provider before recording.', true);
-    return;
-  }
+  if (!capture || capture.starting || capture.phase === 'recording' || capture.phase === 'stopping') return;
   if (activeRecordingId && activeRecordingId !== capture.captureId) {
-    setStatus(capture, 'Another Audio Capture tab is already recording. Stop it before starting this one.', true);
+    setStatus(capture, 'Another Live Capture tab is already recording. Stop it before starting this one.', true);
     return;
   }
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-    setStatus(capture, 'Microphone capture requires HTTPS or localhost in a supported browser.', true);
+    setStatus(capture, 'Recording requires HTTPS or localhost in a supported browser.', true);
     return;
   }
-  const runId = capture.runId + 1;
+  capture.starting = true;
+  render();
   try {
-    // This is the only microphone acquisition path in the module.
+    if (capture.provider === 'unchecked') await loadSttConfiguration(capture);
+    if (!['browser', 'local', 'endpoint'].includes(capture.provider)) {
+      setStatus(capture, 'Configure an available Speech-to-Text provider before recording.', true);
+      return;
+    }
+    const runId = capture.phase === 'paused' && capture.activeRunId ? capture.activeRunId : capture.runId + 1;
+    // This is the only microphone acquisition path. Browsers show their own
+    // permission prompt in direct response to Start recording.
     capture.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     if (capture.closed || captures.get(capture.captureId) !== capture) {
       capture.stream.getTracks().forEach(track => track.stop());
       return;
     }
-    capture.runId = runId;
+    capture.runId = Math.max(capture.runId, runId);
     capture.activeRunId = runId;
     capture.phase = 'recording';
     capture.runningSince = Date.now();
@@ -657,13 +736,15 @@ async function startCapture(capture) {
     startMeter(capture);
     if (capture.provider === 'browser') startBrowserRecognition(capture, runId);
     else startServerSegment(capture, runId);
-    setStatus(capture, 'Recording. Audio is processed only by your configured Argos Speech-to-Text provider.');
+    setStatus(capture, capture.sessionId ? 'Recording. Final segments are saved to this Live Capture session.' : 'Recording. Creating its persistent Live Capture session…');
   } catch (error) {
-    capture.phase = 'idle';
+    capture.phase = capture.segments.length ? 'stopped' : 'idle';
     releaseMicrophone(capture);
     setStatus(capture, `Microphone access failed: ${error.message}`, true);
+  } finally {
+    capture.starting = false;
+    render();
   }
-  render();
 }
 
 async function resumeCapture(capture) {
@@ -679,7 +760,7 @@ function pauseCapture(capture) {
   stopBrowserRecognition(capture);
   stopActiveSegment(capture);
   if (capture.provider === 'browser') releaseMicrophone(capture);
-  setStatus(capture, 'Capture paused. Resume to continue the same transcript.');
+  setStatus(capture, 'Recording paused. Resume to continue the same Live Capture session.');
   render();
 }
 
@@ -690,7 +771,8 @@ function finishStop(capture) {
   capture.interim = '';
   stopTimer(capture);
   releaseMicrophone(capture);
-  setStatus(capture, capture.transcript ? 'Transcript ready. Export the transcript or generate a Meeting Brief.' : 'Capture stopped. No speech was transcribed.');
+  void flushPendingSegments(capture);
+  setStatus(capture, transcript(capture) ? 'Transcript ready. Export the transcript or generate a Meeting Brief.' : 'Recording stopped. No speech was transcribed.');
   render();
 }
 
@@ -700,7 +782,8 @@ function stopCapture(capture) {
     capture.phase = 'stopped';
     capture.interim = '';
     releaseMicrophone(capture);
-    setStatus(capture, capture.transcript ? 'Transcript ready. Export the transcript or generate a Meeting Brief.' : 'Capture stopped.');
+    void flushPendingSegments(capture);
+    setStatus(capture, transcript(capture) ? 'Transcript ready. Export the transcript or generate a Meeting Brief.' : 'Recording stopped.');
     render();
     return;
   }
@@ -739,22 +822,30 @@ async function openLibraryDocument(document) {
     await window.documentModule?.loadDocument?.(docId);
     window.documentModule?.openPanel?.();
     await afterPaint();
-    // Keep Audio Capture open; make room for the document editor at the side.
+    // Keep Live Capture open and put the Library document beside it.
     documentPaneOffset();
   } catch (_) {
     window.documentModule?.openLibrary?.();
   }
 }
 
+async function ensureSegmentsPersisted(capture) {
+  await createPersistedSession(capture);
+  await flushPendingSegments(capture);
+  const unsaved = capture.segments.filter(segment => !segment.persisted).length;
+  if (unsaved) throw new Error(`${unsaved} transcript segment${unsaved === 1 ? '' : 's'} could not be saved yet`);
+}
+
 async function exportTranscript(capture) {
-  if (!capture?.transcript.trim() || capture.phase !== 'stopped') {
-    setStatus(capture, 'Stop capture and wait for final transcription before exporting.', true);
+  if (!capture || capture.phase !== 'stopped' || !transcript(capture).trim()) {
+    setStatus(capture, 'Stop recording and wait for final transcription before exporting.', true);
     return;
   }
-  const title = clean(capture.title) || 'Audio Capture';
-  setStatus(capture, 'Exporting transcript to your document library…');
+  const title = clean(capture.title) || 'Live Capture';
+  setStatus(capture, 'Saving transcript and exporting it to your document library…');
   try {
-    const document = await createLibraryDocument(`${title} — Transcript`, `# ${title}\n\n## Live Transcript\n\n${capture.transcript.trim()}`);
+    await ensureSegmentsPersisted(capture);
+    const document = await createLibraryDocument(`${title} — Transcript`, `# ${title}\n\n## Live Transcript\n\n${transcript(capture).trim()}`);
     setStatus(capture, 'Transcript exported. Opening it in the document panel.');
     await openLibraryDocument(document);
   } catch (error) {
@@ -764,19 +855,24 @@ async function exportTranscript(capture) {
 }
 
 async function exportBrief(capture) {
-  if (!capture?.transcript.trim() || capture.phase !== 'stopped') {
-    setStatus(capture, 'Stop capture and wait for final transcription before exporting.', true);
+  if (!capture || capture.phase !== 'stopped' || !transcript(capture).trim()) {
+    setStatus(capture, 'Stop recording and wait for final transcription before exporting.', true);
     return;
   }
-  const title = clean(capture.title) || 'Audio Capture';
-  setStatus(capture, 'Generating a grounded Meeting Brief…');
+  const title = clean(capture.title) || 'Live Capture';
+  setStatus(capture, 'Saving transcript and generating a grounded Meeting Brief…');
   try {
+    await ensureSegmentsPersisted(capture);
     const response = await fetch(BRIEF_ENDPOINT, {
       method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, transcript: capture.transcript.trim(), focus: '' }),
+      body: JSON.stringify({ title, transcript: transcript(capture), focus: '' }),
     });
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result?.detail?.message || result?.detail || result?.message || 'Meeting Brief generation failed');
+    if (!response.ok) {
+      const providerMessage = result?.detail?.message || result?.detail || result?.message || 'Meeting Brief generation failed';
+      if (response.status === 429) throw new Error(`The Utility model is rate-limited. Argos retried once; retry after the provider limit resets. (${providerMessage})`);
+      throw new Error(providerMessage);
+    }
     const brief = String(result.brief || '').trim();
     if (!brief) throw new Error('The Utility model returned an empty Meeting Brief');
     const document = await createLibraryDocument(`${title} — Meeting Brief`, brief);
@@ -788,16 +884,55 @@ async function exportBrief(capture) {
   render();
 }
 
+async function restorePersistedCapture(meta) {
+  const sessionId = String(meta?.id || meta?.sessionId || '');
+  if (!sessionId) return;
+  const existing = [...captures.values()].find(capture => capture.sessionId === sessionId);
+  if (existing) {
+    activateCapture(existing.captureId);
+    return;
+  }
+  const capture = newCapture({
+    title: clean(meta?.name || '').replace(/^Live Capture\s+—\s+/i, '') || 'Live Capture',
+    sessionId,
+  });
+  capture.phase = 'stopped';
+  capture.status = 'Loading persisted Live Capture transcript…';
+  captures.set(capture.captureId, capture);
+  activateCapture(capture.captureId);
+  try {
+    const response = await fetch(`${LIVE_CAPTURE_ENDPOINT}/${encodeURIComponent(sessionId)}`, { credentials: 'same-origin' });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result?.detail?.message || result?.detail || result?.message || 'Could not load Live Capture transcript');
+    capture.title = result.title || capture.title;
+    capture.segments = (result.segments || []).map(segment => ({
+      id: segment.id || makeId(),
+      offsetMs: Number(segment.offset_ms) || 0,
+      text: String(segment.content || '').replace(/^\[[^\]]+\]\s*/, ''),
+      content: String(segment.content || ''),
+      persisted: true,
+      persisting: false,
+    }));
+    capture.elapsedMs = capture.segments.reduce((max, segment) => Math.max(max, segment.offsetMs), 0);
+    capture.status = capture.segments.length ? 'Persisted transcript ready. Resume recording or export a document.' : 'Live Capture is ready to record.';
+  } catch (error) {
+    capture.status = `Could not load persisted Live Capture: ${error.message}`;
+    capture.statusError = true;
+  }
+  render();
+}
+
 async function closeCapture(captureId) {
   const capture = captures.get(captureId);
   if (!capture) return;
-  const hasUnexportedTranscript = !!capture.transcript.trim();
-  if (capture.phase === 'recording' || capture.phase === 'stopping' || hasUnexportedTranscript) {
-    const message = capture.phase === 'recording' || capture.phase === 'stopping'
-      ? 'Stop this live capture and close the tab? Unexported transcript text will be discarded.'
-      : 'Close this Audio Capture tab? Its unexported transcript text will be discarded.';
+  const active = ['recording', 'paused', 'stopping'].includes(capture.phase);
+  const unsaved = capture.segments.some(segment => !segment.persisted);
+  if (active || unsaved) {
+    const message = active
+      ? 'Stop this recording and close the Live Capture tab? Unsaved transcript text will be discarded.'
+      : 'Close this Live Capture tab? Unsaved transcript text will be discarded.';
     const accepted = window.uiModule?.styledConfirm
-      ? await window.uiModule.styledConfirm(message, { confirmText: 'Close capture' })
+      ? await window.uiModule.styledConfirm(message, { confirmText: 'Close Live Capture' })
       : window.confirm(message);
     if (!accepted) return;
   }
@@ -816,7 +951,7 @@ async function closeCapture(captureId) {
 function augmentNewTabWizard() {
   const modal = document.querySelector('.QuestCreationWizard');
   const backdrop = document.querySelector('.venture-modal-backdrop[data-venture-session-wizard]');
-  if (!modal || !backdrop || modal.dataset.audioCaptureAugmented === '1') return;
+  if (!modal || !backdrop || modal.dataset.liveCaptureAugmented === '1') return;
   const grid = modal.querySelector('.venture-choice-grid');
   const chatFields = modal.querySelector('[data-chat-fields]');
   const questFields = modal.querySelector('[data-quest-fields]');
@@ -825,45 +960,46 @@ function augmentNewTabWizard() {
 
   const choice = document.createElement('label');
   choice.className = 'venture-choice';
-  choice.innerHTML = '<input type="radio" name="session_type" value="audio_capture"><strong>Audio capture</strong><span class="venture-muted">Open a native live-transcript workspace tab with recorder controls.</span>';
+  choice.innerHTML = '<input type="radio" name="session_type" value="live_capture"><strong>Live Capture</strong><span class="venture-muted">Open a persisted, timestamped recorder workspace tab.</span>';
   grid.appendChild(choice);
-  const audioFields = document.createElement('div');
-  audioFields.dataset.audioCaptureFields = 'true';
-  audioFields.hidden = true;
-  audioFields.innerHTML = '<label>Meeting title</label><input name="audio_capture_title" autocomplete="off" placeholder="Weekly project review"><div class="venture-muted" style="margin-top:8px">No microphone permission is requested until you press Start capture in the new tab.</div>';
-  questFields.after(audioFields);
+  const captureFields = document.createElement('div');
+  captureFields.dataset.liveCaptureFields = 'true';
+  captureFields.hidden = true;
+  captureFields.innerHTML = '<label>Capture title</label><input name="live_capture_title" autocomplete="off" placeholder="Weekly project review"><div class="venture-muted" style="margin-top:8px">The browser asks for microphone permission only when you press Start recording.</div>';
+  questFields.after(captureFields);
 
   const sync = () => {
-    const isAudio = modal.querySelector('[name="session_type"]:checked')?.value === 'audio_capture';
-    audioFields.hidden = !isAudio;
-    if (isAudio) {
+    const selected = modal.querySelector('[name="session_type"]:checked')?.value;
+    const isLiveCapture = selected === 'live_capture';
+    captureFields.hidden = !isLiveCapture;
+    if (isLiveCapture) {
       chatFields.hidden = true;
       questFields.hidden = true;
-      submit.textContent = 'Open Audio Capture';
+      submit.textContent = 'Open Live Capture';
     }
   };
   modal.querySelectorAll('[name="session_type"]').forEach(input => input.addEventListener('change', sync));
   modal.addEventListener('submit', event => {
-    if (modal.querySelector('[name="session_type"]:checked')?.value !== 'audio_capture') return;
+    if (modal.querySelector('[name="session_type"]:checked')?.value !== 'live_capture') return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    const title = clean(audioFields.querySelector('[name="audio_capture_title"]')?.value) || 'Audio Capture';
+    const title = clean(captureFields.querySelector('[name="live_capture_title"]')?.value) || 'Live Capture';
     modal.remove();
     backdrop.remove();
     openWorkspaceCapture({ title });
   }, true);
-  modal.dataset.audioCaptureAugmented = '1';
+  modal.dataset.liveCaptureAugmented = '1';
 }
 
 function wrapVentureWizard() {
   const original = window.argosVentureOpenSessionWizard;
-  if (typeof original !== 'function' || original.__audioCaptureWrapped) return false;
+  if (typeof original !== 'function' || original.__liveCaptureWrapped) return false;
   const wrapped = function wrappedVentureSessionWizard(...args) {
     const result = original.apply(this, args);
     queueMicrotask(augmentNewTabWizard);
     return result;
   };
-  wrapped.__audioCaptureWrapped = true;
+  wrapped.__liveCaptureWrapped = true;
   window.argosVentureOpenSessionWizard = wrapped;
   return true;
 }
@@ -874,11 +1010,19 @@ function init() {
     if (!wrapVentureWizard()) setTimeout(installWizard, 250);
   };
   installWizard();
-  document.addEventListener('odysseus:workspace-tab-activated', event => {
-    if (event.detail?.kind !== 'meeting') deactivateCapture();
+  document.addEventListener('odysseus:session-selected', event => {
+    const meta = event.detail?.meta;
+    if (meta?.mode === 'live_capture') {
+      setTimeout(() => { void restorePersistedCapture(meta); }, 0);
+    } else if (activeCaptureId) {
+      deactivateCapture();
+    }
     queueTabSync();
   });
-  document.addEventListener('odysseus:session-selected', queueTabSync);
+  document.addEventListener('odysseus:workspace-tab-activated', event => {
+    if (event.detail?.kind !== 'meeting' && event.detail?.kind !== 'live_capture' && activeCaptureId) deactivateCapture();
+    queueTabSync();
+  });
   document.addEventListener('odysseus:session-materialized', queueTabSync);
   document.addEventListener('argos-venture:quest-registry-updated', queueTabSync);
   window.addEventListener('resize', documentPaneOffset, { passive: true });
@@ -894,7 +1038,7 @@ function init() {
   });
 }
 
-const meetingCaptureModule = { openWorkspaceCapture, activateCapture, deactivateCapture, closeCapture };
+const meetingCaptureModule = { openWorkspaceCapture, activateCapture, deactivateCapture, closeCapture, restorePersistedCapture };
 window.meetingCaptureModule = meetingCaptureModule;
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });
