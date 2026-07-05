@@ -1,49 +1,58 @@
-# Argos Venture Audio Capture and Meeting Brief
+# Argos Venture Live Capture and Meeting Brief
 
 ## Product surface
 
-Audio Capture is created from Argos Venture's **New Tab** wizard. The wizard
-now offers three choices:
+Live Capture is created from Argos Venture's **New Tab** wizard. The wizard
+offers three workspace session types:
 
 - Regular chat
 - Quest
-- Audio capture
+- Live Capture
 
-Choosing **Audio capture** opens a dedicated in-app workspace tab beside chat
+Choosing **Live Capture** opens a dedicated in-app workspace tab beside chat
 and Quest tabs. It does not open a browser tab and it does not add a Home
 sidebar tool.
 
-## Live capture workflow
+## Live Capture workflow
 
-1. Create an **Audio capture** tab from New Tab.
-2. Enter a meeting title and explicitly confirm consent.
-3. Use the recorder controls at the bottom of the tab: Start/Resume, Pause,
-   Stop, elapsed time, and live waveform.
-4. Review the timestamped transcript in the main panel.
-5. Stop capture and let final transcription finish.
+1. Create a **Live Capture** tab from New Tab.
+2. Enter a title.
+3. Press **Start recording** and answer the browser's microphone permission
+   prompt when it appears.
+4. Use the recorder footer to pause, resume, or stop recording and review the
+   timestamped transcript.
+5. Stop recording and let final transcription finish.
 6. Choose an explicit export action:
    - **Export transcript** creates `<Meeting Title> — Transcript`.
    - **Generate & export brief** creates `<Meeting Title> — Meeting Brief`.
-7. Argos opens the created Library document for review.
+7. Argos opens the created Library document beside the still-open Live Capture
+   tab.
 
-Raw transcript text and recorder state stay in browser memory. They are not
-serialized into localStorage or written to a parallel meeting database.
+## Persistence model
+
+Each Live Capture is an owner-scoped Argos session with type `live_capture`.
+Each finalized timestamp segment is stored as a timestamped user message in the
+existing chat-message history. The Live Capture transcript therefore persists
+for later review rather than being only in-memory tab state.
+
+Local and endpoint Speech-to-Text use 15-second microphone segments. Segment
+timestamps use the audio segment's start time, so final transcription callbacks
+do not collapse into the same final timestamp.
 
 ## Architecture
 
 ```text
-New Tab wizard -> Audio Capture workspace tab
-  -> consent-gated browser microphone
-  -> browser STT or short audio segments to Argos STT
-  -> timestamped transcript held in memory
+New Tab wizard -> persisted Live Capture session
+  -> browser microphone permission after Start recording
+  -> browser STT or 15-second segments to Argos STT
+  -> timestamped chat-message transcript
   -> Utility model resolved through Model Endpoints / Cookbook
   -> owner-scoped Markdown Document Library export
-  -> Library document opens for review
+  -> Library document opens beside Live Capture
 ```
 
-The feature uses the configured Argos Speech-to-Text and Utility model paths.
-It does not import Meetily's Tauri, Rust capture, database, tray, or provider
-code.
+The feature uses configured Argos Speech-to-Text and Utility model paths. It
+does not import Meetily's Tauri, Rust capture, database, tray, or provider code.
 
 ## Meeting Brief format
 
@@ -61,18 +70,20 @@ or outcomes. Missing information remains explicit.
 
 ## Persistence rule
 
-Audio Capture never exports to Notes. User-requested transcript and brief
-outputs are Markdown documents in the existing owner-scoped Document Library.
-The brief export immediately opens the document for the user.
+Live Capture never exports to Notes. User-requested transcript and brief outputs
+are Markdown documents in the existing owner-scoped Document Library. The brief
+export opens the document for the user and keeps the Live Capture tab visible.
 
 ## Current boundaries
 
 - Browser microphone only; system-audio capture is not included.
 - No automatic recording, calendar bot, diarization, or raw audio persistence.
-- One active microphone capture at a time.
-- User consent is required before microphone access.
+- One active microphone recording at a time.
+- The browser controls microphone permission.
 - Export is available only after recording stops and final transcription
   completes.
+- A transient Utility-provider 429 gets one bounded retry; a continuing rate
+  limit is reported without fabricating a brief.
 
 ## Future options
 
