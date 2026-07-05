@@ -16,25 +16,32 @@ function recordingIsActive() {
   return !document.getElementById('meeting-capture-stop')?.disabled;
 }
 
+function blockExportDuringCapture(event) {
+  const exportButton = event.target.closest('#meeting-capture-export-transcript, #meeting-capture-export-brief');
+  if (!exportButton || !recordingIsActive()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  setCaptureStatus('Stop capture and wait for final transcription before exporting.', true);
+}
+
+function blockCloseDuringCapture(event) {
+  const closeButton = event.target.closest('.meeting-capture-tab .workspace-tab-close');
+  if (!closeButton || !recordingIsActive()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  setCaptureStatus('Stop capture before closing this Audio Capture tab.', true);
+}
+
 function wireCaptureGuard(root) {
   if (!root || root.dataset.libraryHandoffWired === '1') return;
   root.dataset.libraryHandoffWired = '1';
-  root.addEventListener('click', event => {
-    const exportButton = event.target.closest('#meeting-capture-export-transcript, #meeting-capture-export-brief');
-    if (exportButton && recordingIsActive()) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      setCaptureStatus('Stop capture and wait for final transcription before exporting.', true);
-      return;
-    }
+  root.addEventListener('click', blockExportDuringCapture, true);
+}
 
-    const closeButton = event.target.closest('.meeting-capture-tab .workspace-tab-close');
-    if (closeButton && recordingIsActive()) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      setCaptureStatus('Stop capture before closing this Audio Capture tab.', true);
-    }
-  }, true);
+function wireWorkspaceCloseGuard() {
+  if (document.documentElement.dataset.meetingCaptureCloseGuard === '1') return;
+  document.documentElement.dataset.meetingCaptureCloseGuard = '1';
+  document.addEventListener('click', blockCloseDuringCapture, true);
 }
 
 function wrapDocumentPanel() {
@@ -50,6 +57,7 @@ function wrapDocumentPanel() {
 }
 
 function install() {
+  wireWorkspaceCloseGuard();
   const root = document.getElementById('meeting-capture-workspace');
   if (root) wireCaptureGuard(root);
   wrapDocumentPanel();
