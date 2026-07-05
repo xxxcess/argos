@@ -28,10 +28,11 @@ receives self-contained microphone segments through Argos's existing
 `/api/stt/transcribe` route. Final transcript entries include a relative
 `[MM:SS]` marker.
 
+Stop capture before exporting so the final audio segment can be transcribed.
 Exports are explicit and Library-only:
 
 - **Export transcript** writes an owner-scoped Markdown document titled
-  `<Meeting Title> — Transcript`.
+  `<Meeting Title> — Transcript` and opens it for review.
 - **Generate & export brief** uses the existing Meeting Brief generation route,
   writes `<Meeting Title> — Meeting Brief`, and opens that document for review.
 
