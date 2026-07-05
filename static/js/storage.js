@@ -1,19 +1,16 @@
 // static/js/storage.js
 // Centralized localStorage access with key constants and JSON parse safety
 
-// The local Diffusers image controls attach after the regular Settings module
-// loads. Keep these side-effect imports here because storage.js is the first UI
-// module loaded by index.html on every page.
+// Side-effect integrations load here because storage.js is the first UI module
+// loaded by index.html on every page.
 import './localImageIntegration.js';
 import './localImageFreshLoad.js';
 import './localImageEndpointRecovery.js';
 import './localImageChatGuard.js';
 import './localImageCookbookPanel.js';
 import './streamRecoveryComposerGuard.js';
-import './meetingBrief.js';
-import './meetingBriefLibraryExport.js';
+import './meetingCaptureWorkspace.js';
 
-// ── Key constants ──
 export const KEYS = {
   THEME: 'odysseus-theme',
   TOGGLES: 'odysseus-toggles',
@@ -40,10 +37,6 @@ export const KEYS = {
   WORKSPACE: 'odysseus-workspace'
 };
 
-/**
- * Safely get and parse a JSON value from localStorage.
- * Returns fallback on any error.
- */
 export function getJSON(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -55,9 +48,6 @@ export function getJSON(key, fallback) {
   }
 }
 
-/**
- * Set a JSON-serialized value in localStorage.
- */
 export function setJSON(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
@@ -66,9 +56,6 @@ export function setJSON(key, value) {
   }
 }
 
-/**
- * Get a raw string value from localStorage.
- */
 export function get(key, fallback) {
   try {
     const val = localStorage.getItem(key);
@@ -78,9 +65,6 @@ export function get(key, fallback) {
   }
 }
 
-/**
- * Set a raw string value in localStorage.
- */
 export function set(key, value) {
   try {
     localStorage.setItem(key, value);
@@ -89,18 +73,14 @@ export function set(key, value) {
   }
 }
 
-/**
- * Remove a key from localStorage.
- */
 export function remove(key) {
   try {
     localStorage.removeItem(key);
   } catch (e) {
-    // Ignore removal errors
+    // Ignore removal errors.
   }
 }
 
-// ── Toggle state helpers ──
 export function loadToggleState() {
   return getJSON(KEYS.TOGGLES, {});
 }
@@ -120,17 +100,5 @@ export function setToggle(name, value) {
   saveToggleState(state);
 }
 
-const Storage = {
-  KEYS,
-  getJSON,
-  setJSON,
-  get,
-  set,
-  remove,
-  loadToggleState,
-  saveToggleState,
-  getToggle,
-  setToggle
-};
-
+const Storage = { KEYS, getJSON, setJSON, get, set, remove, loadToggleState, saveToggleState, getToggle, setToggle };
 export default Storage;
