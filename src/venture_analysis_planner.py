@@ -2,8 +2,8 @@
 
 The model receives metadata and a finite candidate list, then selects IDs from
 that list. It never writes chart data, executable code, or free-form factual
-claims. A deterministic selection always covers the dashboard when no planner
-is configured or a model response is unavailable.
+claims. An objective-aware deterministic selection covers the dashboard when no
+planner is configured or a model response is unavailable.
 """
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ MAX_CHARTS = 6
 MAX_INSIGHT_CARDS = 6
 MAX_COLUMNS_FOR_PLANNER = 32
 
+_TIME_WORDS = {"trend", "trends", "change", "changes", "growth", "decline", "forecast", "seasonality", "weekly", "monthly", "daily", "time"}
+_RELATIONSHIP_WORDS = {"driver", "drivers", "relationship", "relationships", "correlation", "impact", "influence", "association"}
+_EXCEPTION_WORDS = {"outlier", "outliers", "anomaly", "anomalies", "exception", "exceptions", "risk", "error", "errors"}
+_QUALITY_WORDS = {"quality", "missing", "complete", "completeness", "duplicate", "duplicates", "clean", "cleanliness"}
+_CATEGORY_WORDS = {"region", "regions", "segment", "segments", "customer", "customers", "product", "products", "category", "categories", "country", "countries", "market", "markets"}
+
 
 def _clean_endpoint(value: str) -> str:
     endpoint = (value or "").strip().rstrip("/")
@@ -33,17 +39,24 @@ def _settings() -> dict[str, Any] | None:
     model = os.getenv("ARGOS_ANALYSIS_PLANNER_MODEL", "").strip()
     if not endpoint or not model:
         return None
-    timeout = max(2.0, min(float(os.getenv("ARGOS_ANALYSIS_PLANNER_TIMEOUT_SECONDS", "12")), 45.0))
+    try:
+        timeout = float(os.getenv("ARGOS_ANALYSIS_PLANNER_TIMEOUT_SECONDS", "12"))
+    except ValueError:
+        timeout = 12.0
     return {
         "endpoint": endpoint,
         "model": model,
         "api_key": os.getenv("ARGOS_ANALYSIS_PLANNER_API_KEY", "").strip(),
-        "timeout": timeout,
+        "timeout": max(2.0, min(timeout, 45.0)),
     }
 
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(value or "").casefold()).strip("-") or "candidate"
+
+
+def _tokens(value: str | None) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", str(value or "").casefold()) if len(token) > 1}
 
 
 def _unique_ids(candidates: list[dict[str, Any]], prefix: str) -> list[dict[str, Any]]:
@@ -209,6 +222,48 @@ def _ask_model(context: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _candidate_tokens(candidate: dict[str, Any]) -> set[str]:
+    spec = candidate.get("spec") or {}
+    values = [
+        candidate.get("id"), candidate.get("title"), candidate.get("kind"),
+        candidate.get("tone"), candidate.get("detail"), candidate.get("action"),
+        spec.get("field"), spec.get("x_field"), spec.get("y_field"),
+        spec.get("x_label"), spec.get("y_label"),
+    ]
+    return _tokens(" ".join(str(value or "") for value in values))
+
+
+def _heuristic_order(candidates: list[dict[str, Any]], goal: str, candidate_type: str) -> list[dict[str, Any]]:
+    """Rank deterministic fallbacks by objective relevance before general health."""
+    objective = _tokens(goal)
+    if not objective:
+        return list(candidates)
+
+    def score(candidate: dict[str, Any], position: int) -> tuple[int, int]:
+        candidate_id = str(candidate.get("id") or "")
+        tokens = _candidate_tokens(candidate)
+        value = len(objective.intersection(tokens)) * 8
+        if candidate_type == "card" and str(candidate.get("tone") or "") == "goal":
+            value += 24
+        if objective.intersection(_TIME_WORDS) and candidate_id in {"trend", "temporal-coverage"}:
+            value += 16
+        if objective.intersection(_RELATIONSHIP_WORDS) and candidate_id in {"relationship", "correlation"}:
+            value += 16
+        if objective.intersection(_EXCEPTION_WORDS) and candidate_id in {"outliers", "boxplot"}:
+            value += 16
+        if objective.intersection(_QUALITY_WORDS) and candidate_id in {"data-quality", "row-completeness"}:
+            value += 16
+        if objective.intersection(_CATEGORY_WORDS) and candidate_id in {"top-categories", "cardinality"}:
+            value += 12
+        return value, -position
+
+    return [candidate for _, candidate in sorted(
+        ((score(candidate, position), candidate) for position, candidate in enumerate(candidates)),
+        key=lambda item: item[0],
+        reverse=True,
+    )]
+
+
 def _selected_ids(
     requested: Any,
     candidates: list[dict[str, Any]],
@@ -254,17 +309,13 @@ def resolve_plan(
         response = _ask_model(planning_context(schema, insights, goal, visuals, cards))
         source = "llm" if response else "heuristic"
 
+    ranked_visuals = _heuristic_order(visuals, goal, "visual")
+    ranked_cards = _heuristic_order(cards, goal, "card")
     visual_ids, visual_valid = _selected_ids(
-        (response or {}).get("visual_ids"),
-        visuals,
-        MIN_CHARTS,
-        MAX_CHARTS,
+        (response or {}).get("visual_ids"), ranked_visuals, MIN_CHARTS, MAX_CHARTS,
     )
     card_ids, card_valid = _selected_ids(
-        (response or {}).get("card_ids"),
-        cards,
-        MIN_INSIGHT_CARDS,
-        MAX_INSIGHT_CARDS,
+        (response or {}).get("card_ids"), ranked_cards, MIN_INSIGHT_CARDS, MAX_INSIGHT_CARDS,
     )
     if source == "llm" and not (visual_valid and card_valid):
         source = "heuristic"

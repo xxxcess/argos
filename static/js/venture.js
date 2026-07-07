@@ -26,6 +26,7 @@ if (!window.__argosVenturePollingFirewallInstalled) {
 const legacyModule = await import('./venture_legacy.js');
 const legacy = legacyModule.default;
 const analysisModule = await import('./venture_analysis.js');
+const analysisDecisionModule = await import('./venture_analysis_decision_trail.js');
 
 const state = window.__argosVentureResourceController || {
   initialized: false,
@@ -390,6 +391,7 @@ function install() {
   });
   queueRefresh();
   Promise.resolve(analysisModule.initVentureDataAnalysis?.()).catch(() => {});
+  Promise.resolve(analysisDecisionModule.initVentureAnalysisDecisionTrail?.()).catch(() => {});
 }
 
 if (document.body) install();

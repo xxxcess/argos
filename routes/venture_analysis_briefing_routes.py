@@ -14,6 +14,7 @@ from core.models import ChatMessage
 from core.session_manager import SessionManager
 from src.auth_helpers import require_user
 from src.runtime_profile import require_venture_runtime
+from src.venture_analysis_payload import analysis_payload, ingest_echarts
 from src.venture_data_analysis import (
     MAX_DATASET_BYTES,
     AnalysisError,
@@ -23,7 +24,6 @@ from src.venture_data_analysis import (
     session_target,
 )
 from src.venture_data_briefing import MAX_GOAL_CHARS, save_goal
-from src.venture_echarts_briefing import analysis_payload, ingest_echarts
 
 
 class BriefingSessionCreate(BaseModel):
