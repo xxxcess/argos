@@ -1,8 +1,8 @@
 """Compact ECharts contracts for Argos Venture data-analysis briefings.
 
-This module keeps Polars profiling on the server and returns only small,
-validated visualization inputs. It deliberately does not construct Plotly
-figures or server-rendered image blobs.
+Polars remains the analytical source of truth. The browser receives compact,
+typed visual inputs while the optional LLM planner only selects from these
+server-generated candidates.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from sqlalchemy import text
 from core.database import engine
 from src import venture_data_analysis as analysis
 from src import venture_data_briefing as briefing
+from src.venture_analysis_planner import annotate_cards, resolve_plan, select_candidates
 
 MAX_VISUAL_POINTS = 10_000
 MAX_HISTOGRAM_VALUES = 50_000
@@ -92,12 +93,12 @@ def _scatter_spec(frame, insights: dict[str, Any]) -> dict[str, Any] | None:
             return None
 
         def bounds(values: list[float]) -> tuple[float, float]:
-            sorted_values = sorted(values)
+            ordered = sorted(values)
 
             def percentile(fraction: float) -> float:
-                offset = (len(sorted_values) - 1) * fraction
+                offset = (len(ordered) - 1) * fraction
                 lower, upper = math.floor(offset), math.ceil(offset)
-                return sorted_values[lower] if lower == upper else sorted_values[lower] + (sorted_values[upper] - sorted_values[lower]) * (offset - lower)
+                return ordered[lower] if lower == upper else ordered[lower] + (ordered[upper] - ordered[lower]) * (offset - lower)
 
             q1, q3 = percentile(0.25), percentile(0.75)
             spread = q3 - q1
@@ -121,8 +122,103 @@ def _scatter_spec(frame, insights: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _temporal_coverage(frame, temporal_columns: list[str]) -> dict[str, Any] | None:
+    if not temporal_columns:
+        return None
+    pl, _, _ = analysis._require_libraries()
+    column = temporal_columns[0]
+    try:
+        grouped = (frame
+            .select(pl.col(column).cast(pl.Date).alias("date"))
+            .drop_nulls()
+            .group_by("date")
+            .len()
+            .sort("date")
+            .to_dicts())
+        if not grouped:
+            return None
+        if len(grouped) > 120:
+            step = max(1, (len(grouped) + 119) // 120)
+            grouped = grouped[::step]
+        return {
+            "field": column,
+            "x": [str(item["date"]) for item in grouped],
+            "y": [int(item["len"] or 0) for item in grouped],
+            "point_count": len(grouped),
+        }
+    except Exception:
+        return None
+
+
+def _row_completeness(frame, column_count: int) -> dict[str, Any]:
+    if not frame.height or not frame.columns:
+        return {
+            "labels": ["No records"],
+            "values": [0],
+            "value_label": "Rows",
+            "point_count": 1,
+        }
+    pl, _, _ = analysis._require_libraries()
+    try:
+        expressions = [pl.col(column).is_not_null().cast(pl.Int16) for column in frame.columns]
+        grouped = (frame
+            .select(pl.sum_horizontal(*expressions).alias("filled"))
+            .group_by("filled")
+            .len()
+            .sort("filled")
+            .to_dicts())
+        return {
+            "labels": [f"{int(item['filled'])}/{column_count} values" for item in grouped],
+            "values": [int(item["len"] or 0) for item in grouped],
+            "value_label": "Rows",
+            "point_count": len(grouped),
+        }
+    except Exception:
+        return {
+            "labels": ["Rows"],
+            "values": [int(frame.height)],
+            "value_label": "Rows",
+            "point_count": 1,
+        }
+
+
+def _cardinality(frame, schema: dict[str, Any]) -> dict[str, Any]:
+    values: list[tuple[str, int]] = []
+    for column in (schema.get("columns") or [])[:12]:
+        name = str(column.get("name") or "")
+        try:
+            count = int(frame.get_column(name).n_unique())
+        except Exception:
+            count = 0
+        values.append((name, count))
+    values.sort(key=lambda item: item[1], reverse=True)
+    values = values[:10]
+    return {
+        "labels": [name for name, _ in values][::-1] or ["No columns"],
+        "values": [count for _, count in values][::-1] or [0],
+        "value_label": "Distinct values",
+        "point_count": len(values) or 1,
+    }
+
+
+def _field_profile(schema: dict[str, Any]) -> dict[str, Any]:
+    numeric = len(schema.get("numeric_columns") or [])
+    temporal = len(schema.get("temporal_columns") or [])
+    categorical = len(schema.get("categorical_columns") or [])
+    total = int(schema.get("column_count") or len(schema.get("columns") or []))
+    other = max(0, total - numeric - temporal - categorical)
+    labels = ["Numeric", "Temporal", "Categorical", "Other"]
+    values = [numeric, temporal, categorical, other]
+    return {
+        "labels": labels,
+        "values": values,
+        "value_label": "Columns",
+        "point_count": len(labels),
+    }
+
+
 def build_echarts_visuals(frame, schema: dict[str, Any], insights: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build the interactive chart set from compact, trusted server aggregates."""
+    """Build a broad, fact-checked candidate set for the planner to choose from."""
     visuals: list[dict[str, Any]] = []
     series = insights.get("time_series") or {}
     points = series.get("points") or []
@@ -136,6 +232,20 @@ def build_echarts_visuals(frame, schema: dict[str, Any], insights: dict[str, Any
                 "x_label": series.get("date_column"),
                 "y_label": f"Average {series.get('measure')}",
                 "point_count": len(points),
+            },
+        ))
+
+    temporal_coverage = _temporal_coverage(frame, list(schema.get("temporal_columns") or []))
+    if temporal_coverage:
+        visuals.append(_visual(
+            "temporal-coverage", "Records over time", "line",
+            f"Record count by {temporal_coverage['field']}.",
+            {
+                "x": temporal_coverage["x"],
+                "y": temporal_coverage["y"],
+                "x_label": temporal_coverage["field"],
+                "y_label": "Rows",
+                "point_count": temporal_coverage["point_count"],
             },
         ))
 
@@ -182,21 +292,6 @@ def build_echarts_visuals(frame, schema: dict[str, Any], insights: dict[str, Any
             scatter,
         ))
 
-    missing = [item for item in schema.get("columns") or [] if int(item.get("null_count") or 0) > 0]
-    if missing:
-        missing = sorted(missing, key=lambda item: float(item.get("null_rate") or 0), reverse=True)[:10]
-        visuals.append(_visual(
-            "data-quality", "Data quality", "bar",
-            "Columns with the highest share of missing values.",
-            {
-                "field": "Column",
-                "labels": [item["name"] for item in missing][::-1],
-                "values": [round(float(item["null_rate"]) * 100, 2) for item in missing][::-1],
-                "value_label": "Missing values (%)",
-                "point_count": len(missing),
-            },
-        ))
-
     if len(numeric) >= 2:
         labels = numeric[:6]
         matrix = [
@@ -223,7 +318,136 @@ def build_echarts_visuals(frame, schema: dict[str, Any], insights: dict[str, Any
                 "point_count": len(outliers),
             },
         ))
-    return visuals[:8]
+
+    columns = schema.get("columns") or []
+    quality_columns = sorted(columns, key=lambda item: float(item.get("null_rate") or 0), reverse=True)[:10]
+    visuals.append(_visual(
+        "data-quality", "Data quality", "bar",
+        "Share of missing values by column.",
+        {
+            "field": "Column",
+            "labels": [str(item.get("name") or "") for item in quality_columns][::-1] or ["No columns"],
+            "values": [round(float(item.get("null_rate") or 0) * 100, 2) for item in quality_columns][::-1] or [0],
+            "value_label": "Missing values (%)",
+            "point_count": len(quality_columns) or 1,
+        },
+    ))
+    visuals.append(_visual(
+        "cardinality", "Column cardinality", "bar",
+        "Distinct-value count for the most varied fields.",
+        {"field": "Column", **_cardinality(frame, schema)},
+    ))
+    visuals.append(_visual(
+        "row-completeness", "Row completeness", "bar",
+        "How many populated values each row contains.",
+        {"field": "Populated fields", **_row_completeness(frame, len(columns))},
+    ))
+    visuals.append(_visual(
+        "field-profile", "Field profile", "bar",
+        "The dataset's mix of numeric, temporal, categorical, and other fields.",
+        {"field": "Field type", **_field_profile(schema)},
+    ))
+    return visuals
+
+
+def _baseline_cards(schema: dict[str, Any], insights: dict[str, Any]) -> list[dict[str, Any]]:
+    overview = insights.get("overview") or {}
+    rows = int(overview.get("rows") or schema.get("row_count") or 0)
+    columns = int(overview.get("columns") or schema.get("column_count") or 0)
+    missing_rate = float(overview.get("missing_rate") or 0)
+    numeric = len(schema.get("numeric_columns") or [])
+    temporal = len(schema.get("temporal_columns") or [])
+    categorical = len(schema.get("categorical_columns") or [])
+    readiness = (
+        ("warning", "Needs more data", "No records", "The CSV has headers but no data rows to analyze.", "Upload a populated dataset")
+        if rows == 0 else
+        ("warning", "Quality gate", f"{missing_rate * 100:.1f}% missing", "Review incomplete fields before comparing segments.", "Review data quality")
+        if missing_rate >= 0.10 else
+        ("positive", "Ready to explore", "Profile complete", "The dataset has enough structure for automated comparisons and pattern detection.", "Review selected findings")
+    )
+    return [
+        {
+            "id": "dataset-footprint",
+            "tone": "neutral",
+            "title": "Dataset footprint",
+            "metric": f"{rows:,} × {columns:,}",
+            "detail": "Rows × columns available for this analysis.",
+            "action": "Review dataset preview",
+        },
+        {
+            "id": "field-mix",
+            "tone": "neutral",
+            "title": "Field mix",
+            "metric": f"{numeric} numeric · {categorical} category",
+            "detail": f"{temporal} temporal field(s) are available for time-aware analysis.",
+            "action": "Inspect column roles",
+        },
+        {
+            "id": "data-completeness",
+            "tone": "warning" if missing_rate >= 0.10 else "positive",
+            "title": "Data completeness",
+            "metric": f"{max(0, 1 - missing_rate) * 100:.1f}% complete",
+            "detail": "Completeness reflects non-missing cells across the profiled dataset.",
+            "action": "Review missing values",
+        },
+        {
+            "id": "analysis-readiness",
+            "tone": readiness[0],
+            "title": readiness[1],
+            "metric": readiness[2],
+            "detail": readiness[3],
+            "action": readiness[4],
+        },
+    ]
+
+
+def _card_candidates(schema: dict[str, Any], insights: dict[str, Any], briefing_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    cards = _baseline_cards(schema, insights)
+    cards.extend(list(briefing_payload.get("cards") or []))
+    cards.extend(list(briefing_payload.get("goal_cards") or []))
+    return annotate_cards(cards)
+
+
+def build_echarts_report(
+    frame,
+    goal: str | None = None,
+    saved_plan: dict[str, Any] | None = None,
+    *,
+    invoke_llm: bool = False,
+) -> dict[str, Any]:
+    schema, insights = briefing.profile_frame(frame)
+    briefing_payload = briefing.build_briefing(schema, insights, goal)
+    visual_candidates = build_echarts_visuals(frame, schema, insights)
+    card_candidates = _card_candidates(schema, insights, briefing_payload)
+    plan = resolve_plan(
+        schema,
+        insights,
+        briefing.normalize_goal(goal),
+        visual_candidates,
+        card_candidates,
+        saved_plan,
+        invoke_llm=invoke_llm,
+    )
+    selected_visuals = select_candidates(visual_candidates, plan["visual_ids"])
+    selected_cards = select_candidates(card_candidates, plan["card_ids"])
+    briefing_payload["selected_cards"] = selected_cards
+    # The UI renders briefing.cards as its primary card grid. Preserve the
+    # selected goal-aware cards there rather than duplicating them below.
+    briefing_payload["cards"] = selected_cards
+    briefing_payload["goal_cards"] = []
+    briefing_payload["planner"] = {
+        "source": plan["source"],
+        "minimums": plan["minimums"],
+        "selected_chart_count": len(selected_visuals),
+        "selected_card_count": len(selected_cards),
+    }
+    return {
+        "schema": schema,
+        "insights": insights,
+        "briefing": briefing_payload,
+        "visuals": selected_visuals,
+        "analysis_plan": plan,
+    }
 
 
 def _payload(
@@ -238,8 +462,16 @@ def _payload(
     if report:
         schema, insights = report["schema"], report["insights"]
         briefing_payload, visuals = report["briefing"], report["visuals"]
+        analysis_plan = report["analysis_plan"]
     else:
         schema, insights, briefing_payload, visuals = {}, {}, briefing.empty_briefing(goal), []
+        analysis_plan = {
+            "version": 1,
+            "source": "heuristic",
+            "visual_ids": [],
+            "card_ids": [],
+            "minimums": {"charts": 4, "insight_cards": 4},
+        }
     return {
         "session": {
             "id": row["session_id"],
@@ -254,26 +486,31 @@ def _payload(
         "insights": insights,
         "briefing": briefing_payload,
         "visuals": visuals,
-        "dashboard": {"revision": 3, "layout": "automatic_echarts_briefing", "analysis_goal": goal},
+        "dashboard": {
+            "revision": 4,
+            "layout": "llm_planned_echarts_briefing",
+            "analysis_goal": goal,
+            "analysis_plan": analysis_plan,
+        },
         "chart": visuals[0] if visuals else None,
     }
 
 
-def build_echarts_report(frame, goal: str | None = None) -> dict[str, Any]:
-    schema, insights = briefing.profile_frame(frame)
-    return {
-        "schema": schema,
-        "insights": insights,
-        "briefing": briefing.build_briefing(schema, insights, goal),
-        "visuals": build_echarts_visuals(frame, schema, insights),
-    }
-
-
 def analysis_payload(session_id: str, owner: str | None) -> dict[str, Any]:
-    """Return compact interactive chart specifications for the owning user."""
+    """Return the stored plan without repeatedly calling the LLM on tab restore."""
     row = analysis._row(session_id, owner)
     goal = briefing.get_goal(session_id, owner)
-    report = build_echarts_report(analysis.read_csv(row["dataset_path"]), goal) if row.get("dataset_path") else None
+    dashboard = analysis._loads(row.get("dashboard_json"), {})
+    saved_plan = dashboard.get("analysis_plan") if isinstance(dashboard, dict) else None
+    report = (
+        build_echarts_report(
+            analysis.read_csv(row["dataset_path"]),
+            goal,
+            saved_plan,
+            invoke_llm=False,
+        )
+        if row.get("dataset_path") else None
+    )
     return _payload(row, goal, report)
 
 
@@ -284,11 +521,20 @@ def ingest_echarts(
     filename: str,
     byte_size: int,
 ) -> dict[str, Any]:
-    """Persist analyses without constructing Plotly figures or image blobs."""
+    """Persist an LLM-selected plan with deterministic chart/card fallbacks."""
     row = analysis._row(session_id, owner)
     goal = briefing.get_goal(session_id, owner)
-    report = build_echarts_report(analysis.read_csv(dataset_path), goal)
-    dashboard = {"revision": 3, "layout": "automatic_echarts_briefing", "analysis_goal": goal}
+    report = build_echarts_report(
+        analysis.read_csv(dataset_path),
+        goal,
+        invoke_llm=True,
+    )
+    dashboard = {
+        "revision": 4,
+        "layout": "llm_planned_echarts_briefing",
+        "analysis_goal": goal,
+        "analysis_plan": report["analysis_plan"],
+    }
     now = analysis._now()
     with engine.begin() as conn:
         conn.execute(text("""
