@@ -2,7 +2,9 @@
 import os
 from fastapi import APIRouter, Request, HTTPException, Query
 
+from routes.data_analysis_routes import router as data_analysis_router
 from src.auth_helpers import get_current_user
+from src.data_analysis_service import ensure_schema
 from src.tool_security import owner_is_admin_or_single_user
 
 # Cap entries returned per directory (mirrors filesystem_tools._CODENAV_MAX_HITS).
@@ -12,7 +14,9 @@ _MAX_BROWSE_DIRS = 500
 
 
 def setup_workspace_routes():
+    ensure_schema()
     router = APIRouter(prefix="/api/workspace", tags=["workspace"])
+    router.include_router(data_analysis_router)
 
     @router.get("/browse")
     def browse(request: Request, path: str = Query(default="")):
