@@ -131,7 +131,7 @@ from src.tool_execution import (  # noqa: E402, F401
 
 # Document functions
 from .document_tools import (
-    set_active_document, 
+    set_active_document,
     set_active_model
 )
 
@@ -147,3 +147,8 @@ from src.tool_implementations import (  # noqa: E402, F401
     do_manage_settings,
     do_api_call,
 )
+
+# Venture's managed synthesis actions extend the existing ``manage_quest``
+# tool only after schemas and dispatcher globals are fully initialised.
+from src.quest_session_tool_patch import install_manage_quest_synthesis_actions  # noqa: E402
+install_manage_quest_synthesis_actions()
