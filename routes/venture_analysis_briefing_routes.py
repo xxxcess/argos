@@ -18,16 +18,12 @@ from src.venture_data_analysis import (
     MAX_DATASET_BYTES,
     AnalysisError,
     AnalysisNotFound,
-    ingest,
     is_analysis_session,
     register_analysis_session,
     session_target,
 )
-from src.venture_data_briefing import (
-    MAX_GOAL_CHARS,
-    analysis_payload,
-    save_goal,
-)
+from src.venture_data_briefing import MAX_GOAL_CHARS, save_goal
+from src.venture_echarts_briefing import analysis_payload, ingest_echarts
 
 
 class BriefingSessionCreate(BaseModel):
@@ -119,10 +115,7 @@ def setup_venture_analysis_briefing_routes(session_manager: SessionManager) -> A
             if received == 0:
                 raise AnalysisError("The uploaded CSV is empty")
             os.replace(temporary, destination)
-            # The existing ingester retains owner-scoped storage and persistence.
-            # Its response is replaced with the goal-aware briefing payload.
-            await asyncio.to_thread(ingest, session_id, owner, str(destination), destination.name, received)
-            return await asyncio.to_thread(analysis_payload, session_id, owner)
+            return await asyncio.to_thread(ingest_echarts, session_id, owner, str(destination), destination.name, received)
         except AnalysisError as exc:
             for path in (temporary, destination):
                 try:

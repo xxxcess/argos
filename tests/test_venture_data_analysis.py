@@ -1,4 +1,4 @@
-"""Focused tests for Argos Venture's automatic CSV insight briefing."""
+"""Focused tests for Argos Venture's automatic ECharts insight briefing."""
 
 import pytest
 
@@ -6,6 +6,7 @@ pl = pytest.importorskip("polars")
 
 from src.venture_data_analysis import AnalysisError, _safe_filename  # noqa: E402
 from src.venture_data_briefing import build_briefing, normalize_goal, profile_frame  # noqa: E402
+from src.venture_echarts_briefing import build_echarts_visuals  # noqa: E402
 
 
 def _frame():
@@ -39,6 +40,21 @@ def test_goal_aware_briefing_adds_domain_cards_without_causal_claims():
     assert any(card["title"] == "Goal lens · geography mix" for card in briefing["goal_cards"])
     relationships = [card for card in briefing["cards"] if card["title"] == "Numeric relationship"]
     assert relationships and "association, not causation" in relationships[0]["detail"]
+
+
+def test_visuals_use_small_echarts_contracts_instead_of_server_images():
+    frame = _frame()
+    schema, insights = profile_frame(frame)
+    visuals = build_echarts_visuals(frame, schema, insights)
+
+    assert visuals
+    assert {visual["renderer"] for visual in visuals} == {"echarts"}
+    assert all("spec" in visual for visual in visuals)
+    assert all("image_png_base64" not in visual for visual in visuals)
+    assert any(visual["kind"] == "histogram" for visual in visuals)
+    assert any(visual["kind"] == "boxplot" for visual in visuals)
+    assert any(visual["kind"] == "scatter" for visual in visuals)
+    assert any(visual["kind"] == "heatmap" for visual in visuals)
 
 
 def test_goal_is_normalized_and_csv_filename_is_confined():

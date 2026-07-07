@@ -1,15 +1,22 @@
 // Argos Venture — automatic CSV insight briefing workspace.
 //
-// An analysis tab is created from the Venture New Tab wizard with a CSV and an
-// optional objective. The tab opens immediately, then each dashboard section
-// shows a loading state while Argos profiles and visualizes the dataset.
+// A Data Analysis tab is created from the Venture New Tab wizard with a CSV and
+// optional objective. The browser renders the typed visual payload with Apache
+// ECharts; Polars remains the server-side analytical source of truth.
 
 const API_BASE = window.API_BASE || '';
+const ECHARTS_VERSION = '6.1.0';
+const ECHARTS_CDN_URL = `https://cdn.jsdelivr.net/npm/echarts@${ECHARTS_VERSION}/dist/echarts.min.js`;
+
 let initialized = false;
 let activeSessionId = null;
 let activePayload = null;
 let panel = null;
 let wizardObserver = null;
+let echartsPromise = null;
+let visualRenderEpoch = 0;
+let chartResizeObserver = null;
+const chartInstances = new Map();
 const knownAnalysisSessions = new Set();
 
 const chartIcon = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 16 4-5 3 3 5-7"/><circle cx="7" cy="16" r="1"/><circle cx="11" cy="11" r="1"/><circle cx="14" cy="14" r="1"/><circle cx="19" cy="7" r="1"/></svg>`;
@@ -86,10 +93,9 @@ function installStyles() {
     .venture-analysis-insight p { margin:0; font-size:12px; line-height:1.38; opacity:.78; }
     .venture-analysis-insight small { display:block; margin-top:7px; font-size:11px; opacity:.62; }
     .venture-analysis-summary { margin:10px 0 0; padding-left:18px; display:flex; flex-direction:column; gap:6px; font-size:12px; line-height:1.45; }
-    .venture-analysis-visual { min-height:220px; display:flex; flex-direction:column; }
+    .venture-analysis-visual { min-height:274px; display:flex; flex-direction:column; }
     .venture-analysis-visual h4 { margin:0 0 7px; font-size:13px; }
-    .venture-analysis-visual-image { min-height:185px; display:flex; align-items:center; justify-content:center; overflow:hidden; }
-    .venture-analysis-visual-image img { width:100%; max-height:290px; object-fit:contain; border-radius:6px; }
+    .venture-analysis-chart { width:100%; height:218px; min-height:218px; border-radius:6px; overflow:hidden; }
     .venture-analysis-empty { text-align:center; opacity:.68; font-size:13px; padding:26px; line-height:1.45; }
     .venture-analysis-table-wrap { overflow:auto; max-height:280px; border:1px solid color-mix(in srgb, var(--border) 66%, transparent); border-radius:7px; }
     .venture-analysis-table { width:100%; border-collapse:collapse; font-size:12px; }
@@ -106,7 +112,7 @@ function installStyles() {
     .venture-analysis-skeleton::after { content:''; position:absolute; inset:0; transform:translateX(-100%); background:linear-gradient(90deg, transparent, color-mix(in srgb, var(--fg) 12%, transparent), transparent); animation:venture-analysis-shimmer 1.2s infinite; }
     .venture-analysis-skeleton.metric { min-height:58px; }
     .venture-analysis-skeleton.card { min-height:104px; }
-    .venture-analysis-skeleton.visual { min-height:220px; }
+    .venture-analysis-skeleton.visual { min-height:250px; }
     .venture-choice.venture-analysis-choice strong { display:flex; align-items:center; gap:6px; }
     .venture-analysis-fields { margin-top:10px; }
     .venture-analysis-file-field { display:flex; flex-direction:column; gap:6px; }
@@ -162,17 +168,188 @@ function insightCard(card) {
 }
 
 function visualCard(visual) {
-  const image = visual?.image_png_base64 ? `data:image/png;base64,${visual.image_png_base64}` : '';
   return `<article class="venture-analysis-card venture-analysis-visual">
     <h4>${esc(visual?.title || 'Visual summary')}</h4>
-    <div class="venture-analysis-visual-image">${image
-      ? `<img alt="${esc(visual?.summary || visual?.title || 'Dataset visualization')}" src="${image}">`
-      : `<div class="venture-analysis-empty">${esc(visual?.summary || 'The visual could not be rendered, but its source data remains available through the analysis API.')}</div>`}</div>
+    <div class="venture-analysis-chart" role="img" aria-label="${esc(visual?.summary || visual?.title || 'Dataset visualization')}"></div>
     ${visual?.summary ? `<div class="venture-analysis-note">${esc(visual.summary)}</div>` : ''}
   </article>`;
 }
 
+function disposeCharts() {
+  visualRenderEpoch += 1;
+  chartResizeObserver?.disconnect();
+  chartResizeObserver = null;
+  chartInstances.forEach(chart => {
+    try { chart.dispose(); } catch (_) { /* no-op */ }
+  });
+  chartInstances.clear();
+}
+
+function loadECharts() {
+  if (window.echarts?.init) return Promise.resolve(window.echarts);
+  if (echartsPromise) return echartsPromise;
+  echartsPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-argos-echarts]');
+    if (existing) {
+      existing.addEventListener('load', () => window.echarts?.init ? resolve(window.echarts) : reject(new Error('ECharts did not initialize.')), { once: true });
+      existing.addEventListener('error', () => reject(new Error('The ECharts runtime could not load.')), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = ECHARTS_CDN_URL;
+    script.async = true;
+    script.crossOrigin = 'anonymous';
+    script.referrerPolicy = 'no-referrer';
+    script.dataset.argosEcharts = ECHARTS_VERSION;
+    script.onload = () => window.echarts?.init
+      ? resolve(window.echarts)
+      : reject(new Error('ECharts did not initialize.'));
+    script.onerror = () => reject(new Error('The ECharts runtime could not load.'));
+    document.head.appendChild(script);
+  }).catch(error => {
+    echartsPromise = null;
+    throw error;
+  });
+  return echartsPromise;
+}
+
+function chartTheme() {
+  const styles = getComputedStyle(panel || document.documentElement);
+  return {
+    foreground: styles.getPropertyValue('--fg').trim() || '#1f2937',
+    border: styles.getPropertyValue('--border').trim() || '#d1d5db',
+    panel: styles.getPropertyValue('--panel').trim() || '#ffffff',
+  };
+}
+
+function baseOption(visual, theme) {
+  return {
+    animationDuration: 280,
+    textStyle: { color: theme.foreground },
+    aria: { enabled: true, description: visual.summary || visual.title || 'Dataset visualization' },
+    tooltip: {
+      trigger: 'axis',
+      confine: true,
+      backgroundColor: theme.panel,
+      borderColor: theme.border,
+      textStyle: { color: theme.foreground },
+    },
+  };
+}
+
+function optionFor(visual, theme) {
+  const spec = visual?.spec || {};
+  const option = baseOption(visual, theme);
+  const axisStyle = {
+    axisLabel: { color: theme.foreground },
+    axisLine: { lineStyle: { color: theme.border } },
+    splitLine: { lineStyle: { color: theme.border, opacity: 0.55 } },
+  };
+
+  if (visual.kind === 'line') {
+    option.xAxis = { type: 'category', data: spec.x || [], name: spec.x_label || '', boundaryGap: false, ...axisStyle };
+    option.yAxis = { type: 'value', name: spec.y_label || '', ...axisStyle };
+    option.series = [{ type: 'line', data: spec.y || [], showSymbol: (spec.point_count || 0) <= 60, smooth: false }];
+    if ((spec.x || []).length > 16) option.dataZoom = [{ type: 'inside' }, { type: 'slider', height: 16, bottom: 2 }];
+    return option;
+  }
+
+  if (visual.kind === 'histogram') {
+    option.xAxis = {
+      type: 'category', data: spec.labels || [], name: spec.field || '',
+      axisLabel: { color: theme.foreground, rotate: (spec.labels || []).length > 12 ? 32 : 0, interval: 'auto' },
+      axisLine: { lineStyle: { color: theme.border } },
+    };
+    option.yAxis = { type: 'value', name: 'Rows', ...axisStyle };
+    option.series = [{ type: 'bar', data: spec.counts || [], barMaxWidth: 28 }];
+    option.tooltip = { ...option.tooltip, trigger: 'axis' };
+    return option;
+  }
+
+  if (visual.kind === 'boxplot') {
+    option.xAxis = { type: 'category', data: [spec.field || 'Value'], ...axisStyle };
+    option.yAxis = { type: 'value', name: spec.field || '', ...axisStyle };
+    option.series = [{ type: 'boxplot', data: [spec.values || []] }];
+    option.tooltip = { ...option.tooltip, trigger: 'item' };
+    return option;
+  }
+
+  if (visual.kind === 'scatter') {
+    option.xAxis = { type: 'value', name: spec.x_field || 'X', ...axisStyle };
+    option.yAxis = { type: 'value', name: spec.y_field || 'Y', ...axisStyle };
+    option.series = [
+      { name: 'Typical range', type: 'scatter', data: spec.regular || [], symbolSize: 6, large: (spec.point_count || 0) > 2000 },
+      { name: 'Possible exceptions', type: 'scatter', data: spec.exceptions || [], symbolSize: 8 },
+    ];
+    option.legend = { data: ['Typical range', 'Possible exceptions'], textStyle: { color: theme.foreground } };
+    option.tooltip = { ...option.tooltip, trigger: 'item' };
+    return option;
+  }
+
+  if (visual.kind === 'heatmap') {
+    const labels = spec.labels || [];
+    const matrix = spec.matrix || [];
+    const data = [];
+    matrix.forEach((row, y) => row.forEach((value, x) => data.push([x, y, value])));
+    option.tooltip = {
+      ...option.tooltip,
+      trigger: 'item',
+      formatter: item => `${esc(labels[item.value?.[1]] || '')} × ${esc(labels[item.value?.[0]] || '')}: ${number(item.value?.[2], 2)}`,
+    };
+    option.xAxis = { type: 'category', data: labels, splitArea: { show: true }, ...axisStyle };
+    option.yAxis = { type: 'category', data: labels, splitArea: { show: true }, ...axisStyle };
+    option.visualMap = { min: -1, max: 1, calculable: true, orient: 'horizontal', left: 'center', bottom: 0, textStyle: { color: theme.foreground } };
+    option.grid = { left: 66, right: 24, top: 18, bottom: 48 };
+    option.series = [{ type: 'heatmap', data, label: { show: labels.length <= 5, formatter: value => number(value.value?.[2], 2) } }];
+    return option;
+  }
+
+  option.xAxis = { type: 'value', name: spec.value_label || '', ...axisStyle };
+  option.yAxis = { type: 'category', data: spec.labels || [], name: spec.field || '', ...axisStyle };
+  option.series = [{ type: 'bar', data: spec.values || [], barMaxWidth: 28 }];
+  option.tooltip = { ...option.tooltip, trigger: 'axis' };
+  return option;
+}
+
+function rendererFor(visual) {
+  const count = Number(visual?.spec?.point_count || 0);
+  return visual?.kind === 'heatmap' || visual?.kind === 'scatter' || count > 1000 ? 'canvas' : 'svg';
+}
+
+async function renderVisuals(visuals, epoch) {
+  if (!visuals?.length) return;
+  try {
+    const echarts = await loadECharts();
+    if (epoch !== visualRenderEpoch || !panel || panel.hidden) return;
+    const theme = chartTheme();
+    const observed = [];
+    const elements = [...panel.querySelectorAll('.venture-analysis-chart')];
+    visuals.forEach((visual, index) => {
+      const element = elements[index];
+      if (!element || epoch !== visualRenderEpoch) return;
+      const chart = echarts.init(element, null, { renderer: rendererFor(visual), useDirtyRect: true });
+      chart.setOption(optionFor(visual, theme), { notMerge: true, lazyUpdate: true });
+      chartInstances.set(element, chart);
+      observed.push(element);
+    });
+    if (typeof ResizeObserver === 'function') {
+      let frame = null;
+      chartResizeObserver = new ResizeObserver(entries => {
+        if (frame) cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => entries.forEach(entry => chartInstances.get(entry.target)?.resize()));
+      });
+      observed.forEach(element => chartResizeObserver.observe(element));
+    }
+  } catch (error) {
+    if (epoch !== visualRenderEpoch || !panel) return;
+    panel.querySelectorAll('.venture-analysis-chart').forEach(element => {
+      element.innerHTML = `<div class="venture-analysis-empty">Interactive charts could not load. ${esc(error.message)}</div>`;
+    });
+  }
+}
+
 function render(payload, { loading = false, loadingFile = '' } = {}) {
+  disposeCharts();
   activePayload = payload || activePayload;
   activeSessionId = payload?.session?.id || activeSessionId;
   if (activeSessionId) knownAnalysisSessions.add(String(activeSessionId));
@@ -223,7 +400,7 @@ function render(payload, { loading = false, loadingFile = '' } = {}) {
           <button type="button" class="venture-analysis-button primary" id="venture-analysis-upload" ${loading ? 'disabled' : ''}>${session.dataset_filename ? 'Replace & analyze' : 'Analyze CSV'}</button>
           <span class="venture-analysis-note">CSV only · up to 200 MB · Polars profiling</span>
         </div>
-        <div class="venture-analysis-status" id="venture-analysis-status">${loading ? `Profiling ${esc(loadingFile || 'the dataset')} and preparing each briefing section…` : ''}</div>
+        <div class="venture-analysis-status" id="venture-analysis-status">${loading ? `Profiling ${esc(loadingFile || 'the dataset')} and preparing interactive visuals…` : ''}</div>
       </section>
       <section>
         <h3 class="venture-analysis-section-label">Dataset health</h3>
@@ -262,6 +439,10 @@ function render(payload, { loading = false, loadingFile = '' } = {}) {
     </aside>`;
 
   layout.querySelector('#venture-analysis-upload')?.addEventListener('click', uploadDataset);
+  if (!loading && visuals.length) {
+    const epoch = ++visualRenderEpoch;
+    requestAnimationFrame(() => renderVisuals(visuals, epoch));
+  }
 }
 
 async function openForSession(sessionId) {
@@ -280,6 +461,7 @@ async function openForSession(sessionId) {
 }
 
 function closeForNavigation() {
+  disposeCharts();
   if (panel) panel.hidden = true;
   document.body.classList.remove('venture-analysis-active');
   activePayload = null;
@@ -294,7 +476,7 @@ async function uploadDatasetFile(file) {
   try {
     const data = await api(`/api/venture/analysis/sessions/${encodeURIComponent(activeSessionId)}/dataset`, { method: 'POST', body: form });
     render(data);
-    setStatus('Dataset profiled. Insight briefing and visual summaries are ready.');
+    setStatus('Dataset profiled. Interactive visual summaries are ready.');
   } catch (error) {
     render(snapshot);
     setStatus(error.message, true);
@@ -346,7 +528,7 @@ function extendWizard(modal) {
 
   const choice = document.createElement('label');
   choice.className = 'venture-choice venture-analysis-choice';
-  choice.innerHTML = `<input type="radio" name="session_type" value="analysis"><strong>${chartIcon} Data Analysis</strong><span class="venture-muted">Choose a CSV and open an automatic visual insight briefing.</span>`;
+  choice.innerHTML = `<input type="radio" name="session_type" value="analysis"><strong>${chartIcon} Data Analysis</strong><span class="venture-muted">Choose a CSV and open an interactive insight briefing.</span>`;
   grid.appendChild(choice);
 
   const fields = document.createElement('div');
