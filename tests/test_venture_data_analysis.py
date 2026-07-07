@@ -1,55 +1,48 @@
-"""Focused tests for the deterministic Argos Venture data-analysis core."""
+"""Focused tests for Argos Venture's automatic CSV insight briefing."""
 
 import pytest
 
 pl = pytest.importorskip("polars")
 
-from src.venture_data_analysis import (  # noqa: E402
-    AnalysisError,
-    _apply_prompt,
-    _safe_filename,
-    default_dashboard,
-    profile,
-)
+from src.venture_data_analysis import AnalysisError, _safe_filename  # noqa: E402
+from src.venture_data_briefing import build_briefing, normalize_goal, profile_frame  # noqa: E402
 
 
 def _frame():
     return pl.DataFrame({
-        "region": ["East", "West", "East", "South"],
-        "revenue": [100.0, 240.0, 130.0, 95.0],
-        "units": [10, 20, 11, 8],
-    })
+        "date": ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-04"],
+        "region": ["East", "West", "East", "South", "South"],
+        "revenue": [100.0, 240.0, 130.0, 95.0, 95.0],
+        "units": [10, 20, 11, 8, 8],
+        "note": [None, "ok", None, "ok", "ok"],
+    }).with_columns(pl.col("date").str.strptime(pl.Date, "%Y-%m-%d"))
 
 
-def test_profile_returns_json_safe_overview_stats_and_categories():
-    schema, insights = profile(_frame())
+def test_profile_adds_time_and_relationship_signals_to_the_base_summary():
+    schema, insights = profile_frame(_frame())
 
-    assert schema["row_count"] == 4
-    assert schema["column_count"] == 3
-    assert {column["name"] for column in schema["columns"]} == {"region", "revenue", "units"}
-    assert insights["overview"]["rows"] == 4
-    assert insights["numeric_stats"]["revenue"]["mean"] == pytest.approx(141.25)
+    assert schema["row_count"] == 5
+    assert "date" in schema["temporal_columns"]
+    assert insights["overview"]["missing_cells"] == 2
     assert insights["top_categories"]["region"][0] == {"value": "East", "count": 2}
+    assert insights["time_series"]["measure"] == "revenue"
+    assert insights["correlations"]
 
 
-def test_dashboard_prompt_changes_view_without_evaluating_user_code():
-    frame = _frame()
-    initial = default_dashboard(frame)
+def test_goal_aware_briefing_adds_domain_cards_without_causal_claims():
+    schema, insights = profile_frame(_frame())
+    briefing = build_briefing(schema, insights, "Analyze revenue trend and region changes")
 
-    scatter, scatter_message = _apply_prompt(frame, initial, "scatter revenue vs units")
-    assert scatter["chart"] == {"kind": "scatter", "x": "revenue", "y": "units"}
-    assert "scatter plot" in scatter_message
-
-    filtered, filter_message = _apply_prompt(frame, scatter, "filter region = East")
-    assert filtered["filters"] == [{"column": "region", "value": "East"}]
-    assert "Filtered" in filter_message
-
-    untouched, fallback_message = _apply_prompt(frame, filtered, "__import__('os').system('do-not-run')")
-    assert untouched["chart"] == filtered["chart"]
-    assert "Dashboard state is saved" in fallback_message
+    assert briefing["analysis_goal"] == "Analyze revenue trend and region changes"
+    assert briefing["goal_cards"]
+    assert any(card["title"] == "Goal lens · commercial performance" for card in briefing["goal_cards"])
+    assert any(card["title"] == "Goal lens · geography mix" for card in briefing["goal_cards"])
+    relationships = [card for card in briefing["cards"] if card["title"] == "Numeric relationship"]
+    assert relationships and "association, not causation" in relationships[0]["detail"]
 
 
-def test_csv_filename_is_confined_to_a_csv_basename():
+def test_goal_is_normalized_and_csv_filename_is_confined():
+    assert normalize_goal("  find   revenue  drivers ") == "find revenue drivers"
     assert _safe_filename("../../quarterly sales.csv") == "quarterly_sales.csv"
     with pytest.raises(AnalysisError, match="CSV"):
         _safe_filename("report.xlsx")
