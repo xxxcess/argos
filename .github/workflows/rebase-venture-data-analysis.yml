@@ -1,0 +1,102 @@
+name: Rebase Venture data analysis integration
+
+on:
+  push:
+    branches:
+      - feat/venture-data-analysis-sessions
+
+permissions:
+  contents: write
+
+jobs:
+  merge-current-venture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge current Venture and resolve integration seams
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin argos-venture
+
+          if git merge-base --is-ancestor origin/argos-venture HEAD; then
+            echo "Current Venture is already integrated."
+            exit 0
+          fi
+
+          git merge --no-commit --no-ff origin/argos-venture || true
+
+          if git ls-files -u -- routes/venture_routes.py | grep -q .; then
+            cat > routes/venture_routes.py <<'PY'
+          """Public Venture route module.
+
+          The governed facade retains the Quest/Bible lifecycle and current Venture
+          integrations: Live Capture, Meeting Brief, and Data Analysis sessions.
+          """
+
+          from routes.meeting_brief_routes import setup_meeting_brief_routes
+          from routes.venture_analysis_routes import setup_venture_analysis_routes
+          from routes.venture_routes_legacy import *  # noqa: F401,F403
+          from routes.venture_routes_governed import setup_venture_routes as _setup_governed_routes
+
+
+          def setup_venture_routes(session_manager):
+              router = _setup_governed_routes(session_manager)
+              router.include_router(setup_meeting_brief_routes(session_manager))
+              router.include_router(setup_venture_analysis_routes(session_manager))
+              return router
+          PY
+            git add routes/venture_routes.py
+          fi
+
+          if git ls-files -u -- static/js/venture.js | grep -q .; then
+            # Retain the newer Quest controller from argos-venture, then add the
+            # small Data Analysis extension from this branch.
+            git checkout --theirs -- static/js/venture.js
+            git add static/js/venture.js
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("static/js/venture.js")
+          content = path.read_text()
+          import_marker = "const legacy = legacyModule.default;\n"
+          if "./venture_analysis.js" not in content:
+              if import_marker not in content:
+                  raise SystemExit("Could not locate Venture legacy import marker")
+              content = content.replace(
+                  import_marker,
+                  import_marker + "const analysisModule = await import('./venture_analysis.js');\n",
+                  1,
+              )
+
+          install_marker = "  queueRefresh();\n}\n\nif (document.body) install();"
+          if "initVentureDataAnalysis" not in content:
+              if install_marker not in content:
+                  raise SystemExit("Could not locate Venture install marker")
+              content = content.replace(
+                  install_marker,
+                  "  queueRefresh();\n  Promise.resolve(analysisModule.initVentureDataAnalysis?.()).catch(() => {});\n}\n\nif (document.body) install();",
+                  1,
+              )
+          path.write_text(content)
+          PY
+          git add static/js/venture.js
+
+          if git ls-files -u | grep -q .; then
+            echo "Unexpected conflicts remain:" >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+
+          # This workflow is only a merge vehicle and must not remain in the PR.
+          git rm .github/workflows/rebase-venture-data-analysis.yml
+          git add -A
+          git commit -m "merge: rebase data analysis sessions onto governed Venture"
+          git push origin HEAD:feat/venture-data-analysis-sessions
