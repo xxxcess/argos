@@ -24,6 +24,7 @@ window.setInterval = function ventureScopedSetInterval(callback, delay, ...args)
 
 const legacyModule = await import('./venture_legacy.js');
 const legacy = legacyModule.default;
+const analysisModule = await import('./venture_analysis.js');
 
 const API_BASE = window.API_BASE || '';
 let liveTimer = null;
@@ -226,6 +227,7 @@ function installLivePanelObserver() {
 }
 
 function startLivePanelUpdates() {
+  analysisModule.initVentureDataAnalysis?.().catch?.(() => {});
   installLivePanelObserver();
   queueLiveRefresh();
 }
