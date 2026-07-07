@@ -1,86 +1,89 @@
 # Argos Venture Browser-Driven UI QA Agent
 
-You are a QA Engineer Agent for interactive, computer-use browser testing of **Argos Venture**. Scope, execute, document, and optionally publish evidence-based UI findings without changing the running application environment.
+Run this approval-gated workflow whenever the user types `/macro ui-test` or asks to `start a ui testing session`.
 
-Trigger this approval-gated workflow whenever the user types `/macro ui-test` or asks to `start a ui testing session`. Do not skip phases. Do not take state-changing UI actions until the user approves the plan.
+## Runtime and execution boundary
 
-## Runtime facts
+- Argos Venture is a FastAPI/Uvicorn application with server-rendered HTML and native JavaScript modules.
+- The user has already launched it with `./start-macos.sh`; reuse the visible browser session, normally at `http://127.0.0.1:7861`.
+- Do not use a generic Node/Vite/React/Cypress/Playwright workflow.
+- Use visible browser interaction only. Do not start or restart services, run package commands, use headless tools, call APIs directly, inject scripts, or change code, databases, configuration, credentials, or unapproved data.
+- Do not bypass access controls, browser permissions, or account restrictions.
 
-- Argos Venture is a Python FastAPI/Uvicorn application with server-rendered HTML, static CSS, and native JavaScript modules.
-- The user has already started the app using `./start-macos.sh`.
-- The committed `argos-venture` profile serves the UI at `http://127.0.0.1:7861` by default.
-- This is not a Node/Vite/React/Playwright/Cypress project.
+## Primary coverage: New Session to its Workspace Tab
 
-Reuse the existing visible browser session. Do not infer a generic frontend stack from package files.
+New Session / New Tab creation is the default primary test surface. Unless the user explicitly narrows scope, most scenarios, screenshots, and findings must cover the creation flow and all UI it produces.
 
-## Primary priority: New Session to Workspace Tab
+For each selected session type visibly offered by New Session:
 
-The **New Session / New Tab** creation UX is the primary test surface. Unless the user explicitly limits scope, more than half of the scenarios, screenshots, and reported findings must come from the creation path and the UI it produces.
+1. Test type selection, visible guidance, keyboard focus, cancel/back behavior, validation, busy state, and duplicate-submit prevention.
+2. For every non-Live-Capture type, use approved disposable text whenever the UI provides a text field. An empty creation path is not complete coverage.
+3. Follow creation into the workspace tab. Test active state, label/icon, layout, controls, panels, loading/empty/error states, and result-specific content.
+4. Test every connected UI surface produced by that result: adjacent tabs, side panels, headers, action controls, composers, dashboards, status cards, in-app documents, Library views, and visibly linked components.
+5. A toast, redirect, or new tab alone is not a pass. The resulting tab and connected UI are part of the same scenario.
 
-For every user-approved session type that is visibly offered by the current New Session UI:
+## Required Home-tab round trip
 
-1. Start from the visible launcher and test the type selector, instructions, controls, keyboard focus, cancel/back behavior, validation, busy state, and duplicate-submit handling.
-2. For every non-Live-Capture type, enter approved disposable text wherever the UI provides a text field. An empty creation path is not complete coverage.
-3. Follow successful creation into the resulting workspace tab. Test its active state, label/icon, switch-away-and-back behavior, visible layout, controls, panels, empty/loading/error states, and result-specific content.
-4. Test all connected UI surfaces created by that session result: adjacent tabs, side panels, headers, action controls, composers, dashboards, status cards, output documents, Library views, or other in-app components visibly opened from the new session.
-5. Test safe browser back/forward, normal tab switching, and approved viewport resizing. Record any unavailable downstream UI as blocked; never silently skip it.
+For every session tab under test:
 
-Do not treat a creation toast, redirect, or new tab alone as a passing result. The resulting session UI and all connected tab/UI components are part of the same scenario.
+1. Open the visible Home tab.
+2. Confirm Home renders and the tested tab remains available.
+3. Return to that same session tab.
+4. Confirm the correct tab becomes active and its inputs, results, loading state, and meaningful scroll position remain coherent. Check that no request is duplicated and no tab is recreated, closed, or replaced.
 
-Quest, source, Artifact, notification, and Shipmate testing is secondary unless it is created by or visibly connected to the New Session result.
+Repeat this safely while an AI/Yi response is pending. Treat a failed Home-to-session round trip as a tab navigation or state-retention defect.
 
-### Live Capture: audio readiness gate
+## AI/Yi response performance observation
 
-Live Capture is the only session type for which typed text may be omitted.
+Treat delayed visible Yi/AI responses as possible performance findings. For each approved model-backed request:
 
-When the user asks to test Live Capture, stop before Live Capture testing and ask the user to provide an approved disposable audio recording or to make a short recording in the already-running Venture browser session. Do not proceed with Live Capture until the user confirms audio is ready.
+- record the trigger, first visible acknowledgement or progress feedback, first content, terminal state, and approximate elapsed time;
+- check whether the active tab remains usable and whether the Home-tab round trip works while waiting;
+- report a Performance issue when a response is noticeably slow without feedback, appears stalled, blocks tab switching, freezes the UI, or leaves stale, duplicated, missing, or unrecoverable UI;
+- use qualitative timing when no visible timer is available; never invent precise durations.
 
-Until audio is ready:
+Do not use DevTools, APIs, scripts, synthetic load, or headless tools for performance checks.
 
-- do not use typed text as a substitute for audio;
-- do not fabricate audio, simulate transcript results, or bypass permissions;
-- mark the scenario as blocked, not failed.
+## Live Capture audio gate
 
-Once approved audio is available, test the visible Live Capture chain: creation, permission messaging, recording state, transcript presentation, resulting workspace tab, and any user-approved in-app output or adjacent tab it creates.
+Live Capture is the only session type for which typed text may be omitted. Before testing it, ask the user to provide an approved disposable audio recording or make a short recording in the already-running Venture browser session. Do not proceed until the user confirms audio is ready.
 
-## Browser-only boundary
+Until then, do not substitute typed text for audio, fabricate audio or transcripts, or bypass permissions. Record Live Capture as blocked, not failed. Once ready, test creation, permission messaging, recording, transcript display, resulting tab, Home-tab round trip, and approved downstream output.
 
-Use normal, visible browser interaction only: click, type, scroll, select, keyboard navigation, browser back/forward, and visible-window resizing.
+## Data Analysis coverage
 
-During Phases 1–3, do not:
+When Data Analysis is selected, ask the user to select a non-sensitive test CSV through the application's normal upload flow. Use only the CSV the user explicitly identifies for the session.
 
-- run `./start-macos.sh`, `npm`, `pnpm`, `yarn`, `bun`, `vite`, `uvicorn`, or any server command;
-- install packages, alter the environment, launch a headless browser, or run Playwright/Cypress/Selenium/WebDriver;
-- call APIs directly, use `curl`, inject DevTools/DOM scripts, or fabricate network requests;
-- restart services or inspect, modify, reset, or seed the database, filesystem, credentials, runtime profile, or application code.
+For each selected CSV:
 
-The sole permitted shell action is the separately approved `gh issue create` command in Phase 4.
+1. Test selection feedback, validation/error state, upload, Data Analysis tab creation, and the Home-tab round trip.
+2. Inspect visible data quality signals: schema/column labels, preview rows, metrics, summaries, insight text, chart titles, axes, legends, labels, values, empty states, and errors.
+3. Use approved in-app controls or prompts to create at least one suitable view, such as a numeric distribution, categorical/top-value view, or two-column comparison.
+4. Check that visible insights and charts are consistent with visible preview data and selected columns. Record unverified precision as a limitation instead of guessing.
+5. Report missing data, nonsensical summaries, contradictory insights, misleading chart labels, unusable chart interaction, or broken chart rendering as defects.
 
-Never bypass authentication, authorization, source access, role restrictions, browser permissions, or account restrictions. If a prerequisite is missing, stop and tell the user what must be made ready in the existing session.
+If the user has not identified an appropriate CSV or the normal upload flow cannot use it, stop that scenario and record it as blocked.
 
-Use only approved, disposable data. Do not publish Artifacts, invite users, upload files, delete data, trigger external integrations, or change settings unless the plan explicitly includes the action and the user approves it.
-
-## Phase 1: Readiness and scope
+## Phase 1: Scope
 
 1. Confirm the visible browser session is Argos Venture. Record route, signed-in role, viewport, theme, open tabs, and existing state that must not be disturbed.
-2. Capture a visual baseline.
-3. Inspect the New Session/New Tab launcher without creating anything. Record the session types currently shown.
-4. Ask:
+2. Capture a visual baseline and inspect the New Session launcher without creating anything.
+3. Ask:
 
-   *"I detected Argos Venture already running through `start-macos.sh` at `http://127.0.0.1:7861`. I will prioritize the New Session/New Tab UX and every workspace tab or connected UI component created from it. Which session types and resulting tab flows should I test? Please provide the approved account/role, disposable text or source data, allowed state-changing actions, and target viewport sizes. For Live Capture, please provide or make a short approved audio recording before testing begins."*
+   *"I detected Argos Venture already running through `start-macos.sh` at `http://127.0.0.1:7861`. I will prioritize New Session/New Tab, each resulting workspace tab, and a Home-tab round trip for every tested session. Which session types and downstream tab flows should I test? Please provide the approved account/role, disposable data, permitted state-changing actions, target viewport sizes, and any response-time concern. For Data Analysis, select a non-sensitive CSV for the normal upload flow. For Live Capture, provide or make a short approved audio recording before testing begins."*
 
-5. If Live Capture is requested without confirmed audio, ask for the audio prerequisite and wait. Do not draft or execute Live Capture test steps until it is available.
+4. If Live Capture is requested without confirmed audio, ask for the prerequisite and wait.
 
 ## Phase 2: Plan and approval
 
-Present a Markdown checklist that includes:
+Present a Markdown checklist covering:
 
-- session guardrails: role, data, open tabs, permitted state changes, exclusions, and blockers;
-- New Session/New Tab lifecycle as the majority of planned coverage;
-- each selected session type: selector, form/text input where applicable, validation, creation, resulting tab, connected UI, state retention, and responsive/keyboard checks;
-- Live Capture only if audio readiness is confirmed; otherwise show it as blocked by missing audio;
-- expected visible result, screenshots, and evidence requirements for every scenario;
-- secondary Venture flows only where they are connected to the created session result.
+- guardrails, permitted data/actions, exclusions, and blockers;
+- New Session/New Tab as the majority of coverage;
+- each selected type: validation, creation, resulting tab, connected UI, Home-tab round trip, keyboard, and responsive checks;
+- Yi/AI progress, usability while waiting, response-delay evidence, and pending-response tab round trip;
+- Data Analysis CSV, preview, insight, and chart checks when selected;
+- Live Capture only after audio readiness; otherwise show it as blocked.
 
 End with:
 
@@ -90,12 +93,13 @@ Do not execute beyond the baseline until the user says `Approve`.
 
 ## Phase 3: Approved execution and issue capture
 
-1. Execute only in the existing visible Venture browser session.
-2. Start with the New Session/New Tab lifecycle and keep it as the majority of active testing unless the user explicitly approved another focus.
-3. For each selected session, verify creation and the complete downstream tab/component chain before moving to unrelated areas.
-4. Look for functional and visual defects: incorrect type selection, validation, creation, tab activation/restoration, stale UI, missing/obscured controls, duplicate actions, focus traps, layout shifts, responsive breakage, unclear errors, and state-loss after normal navigation.
-5. Stop blocked scenarios instead of bypassing them. Missing audio blocks Live Capture only.
-6. Maintain `.codex/discovered_ui_issues.md` through file editing. Include:
+1. Work only in the existing visible Venture browser session.
+2. Keep New Session/New Tab as the majority of testing unless the user explicitly approves another focus.
+3. Verify each selected session's complete downstream tab/component chain and Home-tab round trip before moving to unrelated areas.
+4. Observe Yi/AI feedback, delay, usability, and recovery for every model-backed request.
+5. For Data Analysis, assess visible insight/chart quality only against visible preview evidence.
+6. Stop blocked scenarios instead of bypassing them.
+7. Maintain `.codex/discovered_ui_issues.md` with:
 
    ```markdown
    # UI Discovery Report
@@ -107,31 +111,33 @@ Do not execute beyond the baseline until the user says `Approve`.
    - Viewport(s):
    - New Session/New Tab types tested:
    - Resulting tabs and connected UI covered:
-   - Approved state-changing actions:
+   - Home-tab round trips:
+   - Yi/AI response timing observations:
+   - Data Analysis CSVs tested:
    - Test limitations/blockers:
 
    ## Confirmed Issues
-   | ID | Severity | Originating Session Type/Tab | Area/Route | Reproduction Steps | Expected Result | Actual Result | Evidence |
-   |---|---|---|---|---|---|---|---|
+   | ID | Severity | Category | Originating Session Type/Tab | Area/Route | Reproduction Steps | Expected Result | Actual Result | Evidence |
+   |---|---|---|---|---|---|---|---|---|
 
    ## Passed Coverage
-   - [ ] Session type → resulting tab → connected UI and visible result
+   - [ ] Session type → resulting tab → Home round trip → connected UI
 
    ## Not Tested / Blocked
    - Scenario, reason, and required user action
    ```
 
-7. Do not change application code or attempt fixes.
+8. Do not change application code or attempt fixes.
 
 ## Phase 4: Sign-off and GitHub issue
 
-1. Show a concise table of known/discovered issues, including originating session type/tab, severity, affected flow, reproducibility, and evidence.
-2. Separately summarize New Session-to-tab coverage, passed downstream UI, and blocked or untested scenarios.
+1. Show a table of known/discovered issues, including category, originating session type/tab, severity, affected flow, reproducibility, and evidence. Use `Performance` for Yi/AI response findings.
+2. Separately summarize New Session-to-tab coverage, Home-tab round trips, response timing observations, Data Analysis coverage, and blocked scenarios.
 3. Ask:
 
    *"Would you like me to automatically bundle these findings and publish a GitHub issue via the `gh` CLI tool?"*
 
-4. Publish only after explicit final approval, using exactly:
+4. Publish only after explicit final approval:
 
    ```bash
    gh issue create --title "UI Discovery Report: [Today's Date]" --body-file=.codex/discovered_ui_issues.md
