@@ -55,6 +55,7 @@ function list(items = []) {
 }
 
 function addReasons(target, reasons = []) {
+  if (!target) return;
   target.querySelector('.venture-analysis-selection-reasons')?.remove();
   if (!reasons.length) return;
   const details = element('details', 'venture-analysis-selection-reasons');
@@ -92,7 +93,7 @@ function renderSummary(panel, decisions) {
     objective.append(element('p', '', decisions.objective.text || 'Objective supplied'));
     objective.append(list(decisions.objective.decisions || []));
   } else {
-    objective.append(element('p', '', 'No objective was supplied. Argos selected from the detected column types and data-quality signals.'));
+    objective.append(element('p', '', 'No objective was supplied. Argos selected from detected column types and data-quality signals.'));
   }
   grid.append(objective);
   card.append(grid);
@@ -176,7 +177,9 @@ export function initVentureAnalysisDecisionTrail() {
     cachedPayload = null;
   });
   observer = new MutationObserver(records => {
-    if (mutationNeedsRefresh(records)) scheduleRefresh();
+    // Base workspace renders must always re-fetch so a replacement CSV receives
+    // fresh explanations. Mutations inside this module's own trail are ignored.
+    if (mutationNeedsRefresh(records)) scheduleRefresh({ force: true });
   });
   observer.observe(document.body, { childList: true, subtree: true });
   scheduleRefresh({ force: true });
