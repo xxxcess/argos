@@ -8,6 +8,7 @@
 import Storage, { KEYS } from './storage.js';
 import uiModule from './ui.js';
 import { makeWindowDraggable } from './windowDrag.js';
+import dataAnalysisModule from './dataAnalysis.js';
 
 const API_BASE = window.location.origin;
 // Same folder glyph as the overflow menu item + pill (not an emoji).
@@ -203,6 +204,7 @@ export function initWorkspace() {
   if (overflow) overflow.addEventListener('click', openWorkspaceBrowser);
   const pill = document.getElementById('workspace-indicator-btn');
   if (pill) pill.addEventListener('click', clearWorkspace);
+  dataAnalysisModule.initDataAnalysis();
 }
 
 export default { initWorkspace, openWorkspaceBrowser, getWorkspace, setWorkspace, vetAndSetWorkspace, clearWorkspace, syncWorkspaceIndicator, applyMode };
