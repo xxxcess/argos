@@ -1,0 +1,80 @@
+name: Resolve Venture Bible integration
+
+on:
+  push:
+    branches:
+      - fix/venture-bible-governance
+
+permissions:
+  contents: write
+
+jobs:
+  merge-pr18:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge the Bible governance history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin plan/venture-artifact-key-points-memory
+
+          if git merge-base --is-ancestor origin/plan/venture-artifact-key-points-memory HEAD; then
+            echo "Bible governance history is already integrated."
+            exit 0
+          fi
+
+          git merge --no-commit --no-ff origin/plan/venture-artifact-key-points-memory || true
+
+          # Earlier work on this integration branch may duplicate new Bible
+          # files. Preserve the canonical PR #18 versions for those files.
+          for path in \
+            src/quest_bible_context.py \
+            src/quest_scope_guard.py \
+            src/quest_bible_search_governor.py \
+            src/quest_bible_workflow.py \
+            src/quest_exact_bible_retrieval_patch.py \
+            src/quest_session_tool_schema.py; do
+            if git ls-files -u -- "$path" | grep -q .; then
+              git checkout --theirs -- "$path"
+              git add -- "$path"
+            fi
+          done
+
+          if git ls-files -u -- routes/venture_routes.py | grep -q .; then
+            cat > routes/venture_routes.py <<'PY'
+          """Public Venture route module.
+
+          The governed facade retains the legacy route surface and the current
+          Venture integrations, including Live Capture and Meeting Brief.
+          """
+
+          from routes.meeting_brief_routes import setup_meeting_brief_routes
+          from routes.venture_routes_legacy import *  # noqa: F401,F403
+          from routes.venture_routes_governed import setup_venture_routes as _setup_governed_routes
+
+
+          def setup_venture_routes(session_manager):
+              router = _setup_governed_routes(session_manager)
+              router.include_router(setup_meeting_brief_routes(session_manager))
+              return router
+          PY
+            git add routes/venture_routes.py
+          fi
+
+          if git ls-files -u | grep -q .; then
+            echo "Unexpected conflicts remain:" >&2
+            git diff --name-only --diff-filter=U >&2
+            exit 1
+          fi
+
+          # This workflow is only a merge vehicle; it must not ship in the PR.
+          git rm .github/workflows/resolve-venture-bible-merge.yml
+          git add -A
+          git commit -m "merge: integrate governed Quest Bible workflow with Live Capture"
+          git push origin HEAD:fix/venture-bible-governance
