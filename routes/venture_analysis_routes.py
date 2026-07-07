@@ -110,7 +110,9 @@ def setup_venture_analysis_routes(session_manager: SessionManager) -> APIRouter:
         except AnalysisError as exc:
             raise _error(exc) from exc
 
-        temporary = destination.with_suffix(destination.suffix + ".uploading")
+        # Each upload gets its own staging name so concurrent submissions cannot
+        # truncate one another before the atomic replace into the durable path.
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.uploading")
         received = 0
         try:
             with temporary.open("wb") as output:
