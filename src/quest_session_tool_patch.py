@@ -1,0 +1,258 @@
+"""Startup-safe dispatcher extensions for Venture Quest actions.
+
+The legacy ``manage_quest`` implementation remains available. This extension
+adds a deterministic ``manage_quest_session`` tool, routes Bible workflow
+aliases through it, and recovers the narrow bare-JSON action form emitted by
+some local models when native function calls are unavailable.
+"""
+
+from __future__ import annotations
+
+import json
+
+
+_RAW_QUEST_ACTIONS = {
+    "list_sources",
+    "inspect_source",
+    "search_bible",
+    "retrieve_bible_passage",
+    "request_bible_passage",
+    "remember_bible_passage",
+    "status",
+    "synthesize_artifact",
+    "synthesize_memory",
+}
+
+
+def _normalize_action(value) -> str:
+    action = str(value or "").strip().lower()
+    return {
+        "lookup_bible": "retrieve_bible_passage",
+        "retrieve_bible": "retrieve_bible_passage",
+        "request_passage": "request_bible_passage",
+        "remember_passage": "remember_bible_passage",
+        "request_synthesis": "synthesize_artifact",
+        "synthesis_artifact": "synthesize_artifact",
+        "synthesis_memory": "synthesize_memory",
+    }.get(action, action)
+
+
+def _quest_workflow_request(content: str) -> str | None:
+    try:
+        args = json.loads(content or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(args, dict):
+        return None
+    action = _normalize_action(args.get("action"))
+    if action not in _RAW_QUEST_ACTIONS:
+        return None
+    args["action"] = action
+    return json.dumps(args)
+
+
+def _raw_quest_json_block(text: str, tool_block):
+    """Convert a *whole-response* Quest action object into one safe tool call.
+
+    This intentionally does not scan prose for arbitrary JSON. It covers only
+    the local-model fallback seen in Venture where the complete assistant turn
+    is an object such as ``{"op":"retrieve_bible_passage","passage":"Matthew 1:18-25"}``.
+    """
+    if not isinstance(text, str):
+        return None
+    try:
+        payload = json.loads(text.strip())
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    allowed = {
+        "op", "action", "passage", "reference", "query", "source_id",
+        "quest_id", "artifact_proposal_id", "proposal_id", "translation",
+    }
+    if set(payload) - allowed:
+        return None
+    action = _normalize_action(payload.get("action") or payload.get("op"))
+    if action not in _RAW_QUEST_ACTIONS:
+        return None
+
+    args = {"action": action}
+    for key in ("source_id", "quest_id", "artifact_proposal_id", "proposal_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            args[key] = value.strip()
+
+    if action in {"retrieve_bible_passage", "request_bible_passage", "remember_bible_passage"}:
+        reference = payload.get("reference") or payload.get("passage") or payload.get("query")
+        if not isinstance(reference, str) or not reference.strip():
+            return None
+        args["reference"] = reference.strip()
+    elif action == "search_bible":
+        query = payload.get("query") or payload.get("passage") or payload.get("reference")
+        if not isinstance(query, str) or not query.strip():
+            return None
+        args["query"] = query.strip()
+
+    return tool_block("manage_quest_session", json.dumps(args))
+
+
+def _install_raw_quest_json_recovery() -> None:
+    """Patch parser exports before the agent loop imports them from the facade."""
+    import src.agent_tools as agent_tools
+    import src.tool_parsing as parsing
+
+    if getattr(parsing, "_venture_raw_quest_json_recovery_installed", False):
+        return
+    original_parse = parsing.parse_tool_blocks
+    original_strip = parsing.strip_tool_blocks
+
+    def parse_tool_blocks(text: str, skip_fenced: bool = False):
+        blocks = original_parse(text, skip_fenced=skip_fenced)
+        if blocks:
+            return blocks
+        block = _raw_quest_json_block(text, parsing.ToolBlock)
+        return [block] if block else []
+
+    def strip_tool_blocks(text: str, skip_fenced: bool = False):
+        if _raw_quest_json_block(text, parsing.ToolBlock):
+            return ""
+        return original_strip(text, skip_fenced=skip_fenced)
+
+    parsing.parse_tool_blocks = parse_tool_blocks
+    parsing.strip_tool_blocks = strip_tool_blocks
+    # agent_loop imports these facade attributes only after agent_tools finishes
+    # importing, so update both the implementation module and the public facade.
+    agent_tools.parse_tool_blocks = parse_tool_blocks
+    agent_tools.strip_tool_blocks = strip_tool_blocks
+    parsing._venture_raw_quest_json_recovery_installed = True
+
+
+def _register_schema_and_tag() -> None:
+    """Register after agent_tools has completed its normal import sequence."""
+    import src.agent_tools as agent_tools
+    import src.tool_schemas as schemas
+    import src.tool_policy as tool_policy
+    from src.quest_session_tool_schema import QUEST_SESSION_TOOL_SCHEMA
+
+    agent_tools.TOOL_TAGS.add("manage_quest_session")
+    tool_policy.VENTURE_QUEST_ALLOWED_TOOLS = frozenset(
+        set(tool_policy.VENTURE_QUEST_ALLOWED_TOOLS) | {"manage_quest_session"}
+    )
+    if not any(item.get("function", {}).get("name") == "manage_quest_session" for item in schemas.FUNCTION_TOOL_SCHEMAS):
+        schemas.FUNCTION_TOOL_SCHEMAS.append({"type": "function", "function": QUEST_SESSION_TOOL_SCHEMA})
+    try:
+        from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS, ToolIndex
+
+        description = (
+            "Scoped Venture Quest Bible and synthesis management. Resolve a Quest source, retrieve an exact "
+            "indexed Bible passage, search selected Quest Bible evidence by topic, queue a missing selected "
+            "book, create an Artifact-review request from a retrieved passage, or run explicit Artifact and "
+            "published-Artifact Memory synthesis. Never substitutes web passages for Quest evidence."
+        )
+        BUILTIN_TOOL_DESCRIPTIONS["manage_quest_session"] = description
+        ToolIndex._KEYWORD_HINTS[frozenset({
+            "quest", "bible", "scripture", "verse", "gospel", "word of god", "word was god",
+            "john", "john the baptist", "remember this", "take note", "add passage",
+            "artifact synthesis", "memory synthesis",
+        })] = {"manage_quest_session"}
+    except Exception:
+        # Discovery is a convenience; schema/dispatcher registration is the
+        # executable contract and must remain available without vector tooling.
+        pass
+
+
+def _is_quest_memory_add(block, session_id: str | None) -> bool:
+    if block.tool_type != "manage_memory" or not session_id:
+        return False
+    lines = (block.content or "").split("\n", 1)
+    return bool(lines and lines[0].strip().lower() == "add")
+
+
+def install_quest_session_tool() -> None:
+    """Install once after agent_tools has loaded schemas and the dispatcher."""
+    import src.tool_execution as execution
+    import src.tool_implementations as implementations
+    from src.quest_bible_search_governor import install_bounded_bible_search
+    from src.quest_exact_bible_retrieval_patch import install_exact_bible_retrieval
+
+    if getattr(execution, "_venture_quest_session_tool_installed", False):
+        return
+
+    _register_schema_and_tag()
+    _install_raw_quest_json_recovery()
+    install_bounded_bible_search()
+    install_exact_bible_retrieval()
+    original_execute = execution._execute_tool_block_impl
+    original_manage_quest = implementations.do_manage_quest
+
+    async def execute_impl(block, session_id=None, disabled_tools=None, owner=None, progress_cb=None, tool_policy=None):
+        # Quest insight must be preserved through the Artifact-first path.
+        # Do not let a model bypass provenance by writing generic memory from an
+        # active Quest turn.
+        if _is_quest_memory_add(block, session_id):
+            try:
+                from src.venture_auth import get_quest_role
+                if get_quest_role(owner, session_id) in {"captain", "shipmate"}:
+                    return "manage_memory: QUEST SCOPE", {
+                        "error": "Quest facts must be captured through a cited Artifact. Use manage_quest_session remember_bible_passage (or synthesize an Artifact), then publish it before Voyage Memory is created.",
+                        "scope": "quest_artifact_first",
+                        "exit_code": 1,
+                    }
+            except Exception:
+                pass
+
+        # Block direct and MCP-backed external Bible lookup before either
+        # dispatcher can substitute web material for selected Quest evidence.
+        if block.tool_type in {"web_search", "web_fetch"}:
+            try:
+                from src.quest_scope_guard import block_external_bible_lookup
+                blocked = block_external_bible_lookup(
+                    session_id=session_id,
+                    owner=owner,
+                    request_text=block.content,
+                )
+                if blocked:
+                    return f"{block.tool_type}: QUEST SCOPE", {"error": blocked, "scope": "quest_only", "exit_code": 1}
+            except Exception:
+                pass
+
+        request = None
+        if block.tool_type == "manage_quest_session":
+            request = block.content
+        elif block.tool_type == "manage_quest":
+            request = _quest_workflow_request(block.content)
+        if request is not None:
+            if disabled_tools and block.tool_type in disabled_tools:
+                return f"{block.tool_type}: BLOCKED", {"error": f"Tool '{block.tool_type}' is disabled by user.", "exit_code": 1}
+            if tool_policy and tool_policy.blocks(block.tool_type):
+                return f"{block.tool_type}: BLOCKED", {"error": f"Execution of tool '{block.tool_type}' is forbidden by the active guide-only policy.", "exit_code": 1}
+            from src.agent_tools.quest_tools import ManageQuestSessionTool
+            result = await ManageQuestSessionTool().execute(request, {"owner": owner, "session_id": session_id})
+            return block.tool_type, result
+        return await original_execute(
+            block,
+            session_id=session_id,
+            disabled_tools=disabled_tools,
+            owner=owner,
+            progress_cb=progress_cb,
+            tool_policy=tool_policy,
+        )
+
+    async def managed_quest(content: str, owner=None, session_id=None):
+        request = _quest_workflow_request(content)
+        if request is None:
+            return await original_manage_quest(content, owner=owner, session_id=session_id)
+        from src.agent_tools.quest_tools import ManageQuestSessionTool
+        return await ManageQuestSessionTool().execute(request, {"owner": owner, "session_id": session_id})
+
+    execution._execute_tool_block_impl = execute_impl
+    implementations.do_manage_quest = managed_quest
+    execution._venture_quest_session_tool_installed = True
+
+
+# Compatibility name retained for existing agent_tools imports. The previous
+# version attempted to access execution.do_manage_quest and caused startup to
+# fail on Python 3.12.
+def install_manage_quest_synthesis_actions() -> None:
+    install_quest_session_tool()

@@ -4,6 +4,7 @@ from typing import Dict, Any
 
 from src.constants import MAX_OUTPUT_CHARS
 
+
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.search import comprehensive_web_search
@@ -37,6 +38,21 @@ class WebSearchTool:
                 time_filter = "month"
             elif " news" in q_lc or q_lc.startswith("news ") or q_lc.endswith(" news"):
                 time_filter = "week"
+
+        # A scoped Quest Bible source is authoritative for its Quest. Do not
+        # silently substitute search snippets or external translations for it.
+        try:
+            from src.quest_scope_guard import block_external_bible_lookup
+            blocked = block_external_bible_lookup(
+                session_id=(ctx or {}).get("session_id"),
+                owner=(ctx or {}).get("owner"),
+                request_text=query,
+            )
+            if blocked:
+                return {"error": blocked, "scope": "quest_only", "exit_code": 1}
+        except Exception:
+            pass
+
         loop = asyncio.get_running_loop()
         if progress_cb:
             await progress_cb({
@@ -76,6 +92,7 @@ class WebSearchTool:
             output += "\n\n<!-- SOURCES:" + json.dumps(sources) + " -->"
         return {"output": output, "exit_code": 0}
 
+
 class WebFetchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.search.content import fetch_webpage_content
@@ -107,6 +124,19 @@ class WebFetchTool:
             return {"error": f"web_fetch: unsupported URL scheme (only http/https): {url[:80]}", "exit_code": 1}
         if not low.startswith(("http://", "https://")):
             url = "https://" + url
+
+        try:
+            from src.quest_scope_guard import block_external_bible_lookup
+            blocked = block_external_bible_lookup(
+                session_id=(ctx or {}).get("session_id"),
+                owner=(ctx or {}).get("owner"),
+                request_text=url,
+            )
+            if blocked:
+                return {"error": blocked, "scope": "quest_only", "exit_code": 1}
+        except Exception:
+            pass
+
         loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(
