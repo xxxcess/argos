@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from routes import venture_routes_legacy as _legacy
+from routes.meeting_brief_routes import setup_meeting_brief_routes
 from routes.venture_routes_legacy import *  # noqa: F401,F403
 
 
@@ -215,4 +216,7 @@ def setup_venture_routes(session_manager):
         finally:
             db.close()
 
+    # Meeting Brief and Live Capture are nested under the Venture router so they
+    # inherit the same explicit runtime boundary as Quest workflows.
+    router.include_router(setup_meeting_brief_routes(session_manager))
     return router
