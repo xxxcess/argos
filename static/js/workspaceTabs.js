@@ -1,12 +1,21 @@
-export const MAX_SESSION_TABS = 12;
+export const MAX_WORKSPACE_TABS = 12;
+export const MAX_SESSION_TABS = MAX_WORKSPACE_TABS;
 
 export function canonicalSessionTabId(sessionId) {
   return `session:${String(sessionId || '')}`;
 }
 
+export function canonicalLiveCaptureTabId(captureId) {
+  return `live-capture:${String(captureId || '')}`;
+}
+
+// Compatibility alias for callers written before the product naming settled on
+// Live Capture. New code should use canonicalLiveCaptureTabId.
+export const canonicalMeetingTabId = canonicalLiveCaptureTabId;
+
 export function createInitialTabState() {
   return {
-    version: 1,
+    version: 3,
     order: ['home'],
     selected: 'home',
     tabs: {
@@ -15,50 +24,54 @@ export function createInitialTabState() {
   };
 }
 
-function _cloneState(state) {
+function cloneState(state) {
   return JSON.parse(JSON.stringify(state || createInitialTabState()));
 }
 
 export function normalizeTabState(state, sessions = null) {
-  const next = _cloneState(state);
+  const next = cloneState(state);
   const sessionList = Array.isArray(sessions) ? sessions : [];
-  const sessionIds = new Set(sessionList.map(s => String(s.id)));
-  next.version = 1;
+  const sessionIds = new Set(sessionList.map(session => String(session.id)));
+  next.version = 3;
   next.tabs = next.tabs && typeof next.tabs === 'object' ? next.tabs : {};
-  next.tabs.home = { id: 'home', kind: 'home', title: 'Home', pinned: true, state: 'idle', view: next.tabs.home?.view || {} };
+  next.tabs.home = {
+    id: 'home', kind: 'home', title: 'Home', pinned: true, state: 'idle', view: next.tabs.home?.view || {},
+  };
 
-  const cleaned = ['home'];
+  const order = ['home'];
   for (const rawId of next.order || []) {
     if (rawId === 'home') continue;
     const tab = next.tabs[rawId];
     if (!tab || tab.kind !== 'session') continue;
-    const sid = String(tab.sessionId || rawId.slice('session:'.length));
-    if (sessionIds.size && !sessionIds.has(sid)) continue;
-    const id = canonicalSessionTabId(sid);
-    const meta = sessionList.find(s => String(s.id) === sid);
+    const sessionId = String(tab.sessionId || rawId.slice('session:'.length));
+    if (sessionIds.size && !sessionIds.has(sessionId)) continue;
+    const id = canonicalSessionTabId(sessionId);
+    const meta = sessionList.find(session => String(session.id) === sessionId);
     next.tabs[id] = {
       ...tab,
       id,
       kind: 'session',
-      sessionId: sid,
+      sessionId,
       title: meta?.name || tab.title || 'Chat',
+      mode: meta?.mode || tab.mode || null,
       pinned: false,
       state: tab.state || 'idle',
       view: tab.view || {},
     };
-    if (!cleaned.includes(id)) cleaned.push(id);
+    if (!order.includes(id)) order.push(id);
   }
-  next.order = cleaned.slice(0, MAX_SESSION_TABS + 1);
+
+  next.order = order.slice(0, MAX_WORKSPACE_TABS + 1);
   if (!next.order.includes(next.selected)) next.selected = 'home';
-  for (const key of Object.keys(next.tabs)) {
-    if (!next.order.includes(key)) delete next.tabs[key];
+  for (const tabId of Object.keys(next.tabs)) {
+    if (!next.order.includes(tabId)) delete next.tabs[tabId];
   }
   return next;
 }
 
 export function upsertSessionTab(state, session, { selected = true, state: visualState = 'idle' } = {}) {
   const next = normalizeTabState(state);
-  if (!session || !session.id) return next;
+  if (!session?.id) return next;
   const id = canonicalSessionTabId(session.id);
   const prior = next.tabs[id] || {};
   next.tabs[id] = {
@@ -67,32 +80,52 @@ export function upsertSessionTab(state, session, { selected = true, state: visua
     kind: 'session',
     sessionId: String(session.id),
     title: session.name || prior.title || 'Chat',
+    mode: session.mode || prior.mode || null,
     pinned: false,
     state: visualState || prior.state || 'idle',
     view: prior.view || {},
   };
-  if (!next.order.includes(id)) {
-    next.order.push(id);
-  }
-  const sessionTabs = next.order.filter(t => t !== 'home');
-  while (sessionTabs.length > MAX_SESSION_TABS) {
-    const stale = sessionTabs.shift();
-    next.order = next.order.filter(t => t !== stale);
+  if (!next.order.includes(id)) next.order.push(id);
+  const workspaceTabs = next.order.filter(tabId => tabId !== 'home');
+  while (workspaceTabs.length > MAX_WORKSPACE_TABS) {
+    const stale = workspaceTabs.shift();
+    next.order = next.order.filter(tabId => tabId !== stale);
     delete next.tabs[stale];
   }
-  next.order = ['home', ...next.order.filter(t => t !== 'home')];
+  next.order = ['home', ...next.order.filter(tabId => tabId !== 'home')];
   if (selected) next.selected = id;
   return next;
 }
 
+export function upsertLiveCaptureTab(state, capture, { selected = true, state: visualState = 'idle' } = {}) {
+  const next = normalizeTabState(state);
+  const captureId = String(capture?.captureId || capture?.id || '');
+  if (!captureId) return next;
+  const id = canonicalLiveCaptureTabId(captureId);
+  next.tabs[id] = {
+    id,
+    kind: 'live_capture',
+    captureId,
+    title: capture?.title || 'Live Capture',
+    mode: 'live_capture',
+    pinned: false,
+    state: visualState || 'idle',
+    view: {},
+  };
+  if (!next.order.includes(id)) next.order.push(id);
+  if (selected) next.selected = id;
+  return next;
+}
+
+// Compatibility alias. This function no longer creates an Audio Capture tab.
+export const upsertMeetingTab = upsertLiveCaptureTab;
+
 export function closeTabById(state, tabId) {
   const next = normalizeTabState(state);
   if (!tabId || tabId === 'home') return next;
-  const idx = next.order.indexOf(tabId);
+  const index = next.order.indexOf(tabId);
   delete next.tabs[tabId];
   next.order = next.order.filter(id => id !== tabId);
-  if (next.selected === tabId) {
-    next.selected = next.order[Math.max(0, idx - 1)] || 'home';
-  }
+  if (next.selected === tabId) next.selected = next.order[Math.max(0, index - 1)] || 'home';
   return next;
 }
