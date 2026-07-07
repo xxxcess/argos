@@ -47,3 +47,9 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+# Stateful CSV analysis sessions. Polars runs ingestion/cleaning through its
+# columnar, multi-threaded engine; Plotly emits the serialized dashboard and
+# Kaleido renders a self-contained image for the workspace modal.
+polars
+plotly
+kaleido
