@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from routes import venture_routes_legacy as _legacy
+from routes.venture_analysis_routes import setup_venture_analysis_routes
 from routes.venture_routes_legacy import *  # noqa: F401,F403
 
 
@@ -149,6 +150,7 @@ def _remove_get_route(router, path: str) -> None:
 
 def setup_venture_routes(session_manager):
     router = _legacy.setup_venture_routes(session_manager)
+    router.include_router(setup_venture_analysis_routes(session_manager))
     _remove_get_route(router, "/api/quests/{quest_id}/sources")
     _remove_get_route(router, "/api/quests/{quest_id}/sources/{source_id}/index-status")
 
